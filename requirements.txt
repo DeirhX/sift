@@ -1,0 +1,31 @@
+# PhotoOrganizer Python dependencies.
+#
+# Versions are intentionally unpinned (this repo had no lockfile and no
+# captured environment). Pin these to whatever you actually install if you
+# want reproducible runs:  pip freeze > requirements.lock.txt
+#
+# Install:  pip install -r requirements.txt
+# A CUDA build of torch is strongly recommended for the ML scoring path;
+# see https://pytorch.org/get-started/locally/ for the right index URL.
+
+# ── Core: analysis + indexing + web server (always needed) ──────────────────
+numpy
+pillow
+tqdm
+opencv-python
+imagehash
+scikit-learn
+fastapi
+uvicorn[standard]
+
+# ── ML scoring: aesthetic (PARA / CLIP-IQA), captions, tags ─────────────────
+# Heavy. Pulls multi-GB model weights on first run.
+torch
+transformers
+open_clip_torch
+huggingface_hub
+
+# ── Optional: face detection + clustering (--faces) ─────────────────────────
+# Comment this out if you never use the face features; it drags in an older
+# torch-dependent stack.
+facenet-pytorch

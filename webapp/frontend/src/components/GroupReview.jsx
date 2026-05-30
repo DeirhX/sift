@@ -35,11 +35,11 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
 
   const keepBestDeleteRest = () => {
     onDecisionsBulk(items.map((it, i) => ({
-      id: it.id, path: it.path, decision: i === 0 ? 'keep' : 'del',
+      id: it.id, hash: it.hash, decision: i === 0 ? 'keep' : 'del',
     })))
   }
   const clearGroup = () => {
-    onDecisionsBulk(items.map((it) => ({ id: it.id, path: it.path, decision: null })))
+    onDecisionsBulk(items.map((it) => ({ id: it.id, hash: it.hash, decision: null })))
   }
 
   // Adapt Lightbox's setIndex (number to navigate, null to close).

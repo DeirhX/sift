@@ -101,17 +101,17 @@ export default function App() {
     const next = item.decision === decision ? null : decision
     patchDecision(item.id, next)
     try {
-      await apiSetDecision(item.path, next)
+      await apiSetDecision(item.hash, next)
     } catch {
       qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
     }
   }, [patchDecision, qc])
 
-  // Bulk apply (e.g. "keep best, delete rest"). updates: [{id, path, decision}]
+  // Bulk apply (e.g. "keep best, delete rest"). updates: [{id, hash, decision}]
   const setDecisionsBulk = useCallback(async (updates) => {
     updates.forEach((u) => patchDecision(u.id, u.decision))
     try {
-      await Promise.all(updates.map((u) => apiSetDecision(u.path, u.decision)))
+      await Promise.all(updates.map((u) => apiSetDecision(u.hash, u.decision)))
     } catch {
       qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
     }

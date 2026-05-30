@@ -16,13 +16,26 @@ Options:
   --workers <n>        Thumbnail worker threads (default: 8)
   --skip-thumbs        Only (re)build the DB, don't regenerate thumbnails
   --force-thumbs       Regenerate thumbnails even if they already exist
+  --no-prune           Keep thumbnails no longer referenced by any image
+                       (by default, orphaned thumbnails are deleted)
 
 The DB preserves any existing decisions/cluster names when rebuilt, so you can
 re-ingest a fresh audit without losing your keep/delete marks or face names.
+
+Incremental ingest:
+  Each image is content-hashed (blake2b of its bytes). The hash is reused for
+  files whose (mtime, size) are unchanged since the last build, so re-ingesting
+  a regenerated report only re-hashes and re-thumbnails files that actually
+  changed. Thumbnails are named by content hash, so re-sorting the report no
+  longer invalidates the cache.
+
+Decisions are keyed by content hash rather than path, so keep/delete marks
+survive moving or reorganizing the underlying files.
 """
 
 import sys
 import json
+import hashlib
 import argparse
 import sqlite3
 from pathlib import Path
@@ -30,6 +43,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PIL import Image, ImageOps
 from tqdm import tqdm
+
+HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 
 
 SCHEMA = """
@@ -55,6 +70,9 @@ CREATE TABLE IF NOT EXISTS images (
     imgw            INTEGER,
     imgh            INTEGER,
     thumb           TEXT,
+    content_hash    TEXT,
+    mtime           REAL,
+    fsize           INTEGER,
     n_faces         INTEGER DEFAULT 0
 );
 
@@ -78,7 +96,7 @@ CREATE TABLE IF NOT EXISTS clusters (
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
-    path        TEXT PRIMARY KEY,   -- keyed by path so it survives id changes
+    hash        TEXT PRIMARY KEY,   -- content hash: survives renames AND moves
     decision    TEXT                -- 'keep' | 'del'
 );
 
@@ -104,36 +122,58 @@ CREATE VIRTUAL TABLE IF NOT EXISTS images_fts
 """
 
 
-def make_thumb(args: tuple) -> tuple:
-    """Worker: generate one WebP thumbnail.
-
-    Returns (image_id, status, err) where status is "made" | "skip" | "fail".
-    A thumbnail is reused only when it already exists AND is at least as new as
-    its source file — so edited/replaced photos get fresh thumbnails while
-    unchanged ones are skipped, making re-ingest fast."""
-    image_id, src_path, dst_path, size, quality, force = args
+def hash_file(path: Path) -> str:
+    """blake2b-128 of the file's bytes (32 hex chars). Falls back to hashing
+    the path string when the file can't be read, so an unreadable image still
+    gets a stable key rather than crashing the build."""
     try:
-        if dst_path.exists() and not force:
-            try:
-                if dst_path.stat().st_mtime >= src_path.stat().st_mtime:
-                    return image_id, "skip", None
-            except OSError:
-                # Source missing/unreadable — keep the existing thumb rather
-                # than failing the whole build.
-                return image_id, "skip", None
-        with Image.open(src_path) as im:
-            im = ImageOps.exif_transpose(im)        # honour camera rotation
-            im = im.convert("RGB")
-            im.thumbnail((size, size), Image.LANCZOS)
-            im.save(dst_path, "WEBP", quality=quality, method=4)
-        return image_id, "made", None
+        h = hashlib.blake2b(digest_size=16)
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(HASH_CHUNK), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return hashlib.blake2b(str(path).encode("utf-8"), digest_size=16).hexdigest()
+
+
+def process_image(args: tuple) -> tuple:
+    """Worker: ensure an image's content hash and WebP thumbnail exist.
+
+    Computes the content hash only when not already known (i.e. the file is new
+    or changed), and generates the thumbnail only when it's missing or --force.
+    Thumbnails are named by content hash so they're stable across re-sorts.
+
+    Returns (idx, content_hash, raw_size|None, status, err) where status is
+    "made" | "skip" | "fail". raw_size is (w, h) before EXIF transpose — the
+    same coordinate space the face detector uses — and is None when the source
+    wasn't opened (thumbnail skipped)."""
+    idx, src_path, known_hash, thumb_dir, size, quality, force, skip_thumbs = args
+    try:
+        content_hash = known_hash or hash_file(src_path)
+        raw_size = None
+        status = "skip"
+        if not skip_thumbs:
+            dst = thumb_dir / f"{content_hash}.webp"
+            if force or not dst.exists():
+                with Image.open(src_path) as im:
+                    raw_size = im.size                      # pre-transpose (w, h)
+                    out = ImageOps.exif_transpose(im)       # honour camera rotation
+                    out = out.convert("RGB")
+                    out.thumbnail((size, size), Image.LANCZOS)
+                    out.save(dst, "WEBP", quality=quality, method=4)
+                status = "made"
+        return idx, content_hash, raw_size, status, None
     except Exception as e:
-        return image_id, "fail", str(e)
+        return idx, known_hash, None, "fail", str(e)
+
+
+def _columns(conn, table: str) -> list[str]:
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
 def build(report_path: Path, db_path: Path, thumb_dir: Path,
           thumb_size: int, thumb_quality: int, workers: int,
-          skip_thumbs: bool, force_thumbs: bool) -> None:
+          skip_thumbs: bool, force_thumbs: bool, prune: bool = True) -> None:
 
     with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
@@ -151,10 +191,34 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         has_fts = False
         print("  (FTS5 unavailable — caption search will use LIKE fallback)")
 
-    # ── Preserve decisions + cluster names across rebuilds ───────────────────
-    prev_decisions = dict(conn.execute("SELECT path, decision FROM decisions").fetchall())
-    prev_names     = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
-    print(f"  Preserving {len(prev_decisions)} decisions, {len(prev_names)} cluster names")
+    # ── Upgrade pre-incremental DBs: add columns CREATE IF NOT EXISTS can't ───
+    img_cols = set(_columns(conn, "images"))
+    for col, decl in (("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER")):
+        if col not in img_cols:
+            conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
+    # Index created after the ALTER so legacy tables don't reference a missing column.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
+
+    # ── Snapshot prior state before wiping ───────────────────────────────────
+    prev_names = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
+
+    # Prior per-path signature so we can reuse content hashes for unchanged
+    # files instead of re-reading their bytes. Guarded for pre-incremental DBs.
+    prev_sig: dict[str, tuple] = {}
+    if {"content_hash", "mtime", "fsize"} <= set(_columns(conn, "images")):
+        for r in conn.execute(
+            "SELECT path, content_hash, mtime, fsize FROM images "
+            "WHERE content_hash IS NOT NULL"):
+            prev_sig[r[0]] = (r[1], r[2], r[3])
+
+    # Prior decisions, keyed by whatever the existing schema used. Older DBs
+    # keyed decisions by 'path'; we translate those to content hashes below.
+    dec_cols = _columns(conn, "decisions")
+    dec_key = "hash" if "hash" in dec_cols else "path"
+    prev_decisions = dict(conn.execute(
+        f"SELECT {dec_key}, decision FROM decisions").fetchall())
+    print(f"  Preserving {len(prev_decisions)} decisions ({dec_key}-keyed), "
+          f"{len(prev_names)} cluster names")
 
     # ── Wipe rebuildable tables ──────────────────────────────────────────────
     conn.execute("DELETE FROM images")
@@ -163,19 +227,66 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     if has_fts:
         conn.execute("DELETE FROM images_fts")
 
+    # ── Pass 1: resolve content hashes + (re)generate thumbnails ─────────────
+    # Reuse the prior hash when a file's (mtime, size) is unchanged; otherwise
+    # the worker hashes it. Workers also (re)build any missing thumbnail.
+    jobs: list[tuple] = []
+    reused = 0
+    for idx, im in enumerate(images):
+        src = Path(im["path"])
+        try:
+            st = src.stat()
+            sig = (st.st_mtime, st.st_size)
+        except OSError:
+            sig = (None, None)
+        prev = prev_sig.get(im["path"])
+        known_hash = None
+        if prev and prev[1] == sig[0] and prev[2] == sig[1]:
+            known_hash = prev[0]
+            reused += 1
+        jobs.append([idx, src, known_hash, thumb_dir, thumb_size,
+                     thumb_quality, force_thumbs, skip_thumbs,
+                     sig[0], sig[1]])
+
+    print(f"  Hash reuse: {reused}/{len(images)} unchanged files")
+
+    hashes: dict[int, str] = {}
+    raw_sizes: dict[int, tuple] = {}
+    made = skipped = failed = 0
+    if jobs:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(process_image, tuple(j[:8])) for j in jobs]
+            for fut in tqdm(as_completed(futures), total=len(futures),
+                            desc="Hash + thumbnails"):
+                idx, h, rsize, status, err = fut.result()
+                hashes[idx] = h
+                if rsize:
+                    raw_sizes[idx] = rsize
+                if status == "made":
+                    made += 1
+                elif status == "skip":
+                    skipped += 1
+                else:
+                    failed += 1
+                    if failed <= 10:
+                        print(f"  fail (id={idx}): {err}")
+
     # ── Insert image records ─────────────────────────────────────────────────
     cluster_ids_seen: set[int] = set()
-    thumb_jobs: list[tuple] = []
 
     for idx, im in enumerate(images):
-        thumb_name = f"{idx}.webp"
+        chash = hashes.get(idx)
+        thumb_name = f"{chash}.webp" if chash else None
+        rw, rh = raw_sizes.get(idx, (None, None))
+        imgw = im.get("imgw") if im.get("imgw") is not None else rw
+        imgh = im.get("imgh") if im.get("imgh") is not None else rh
         conn.execute(
             """INSERT INTO images
                (id, path, filename, sharpness, combined, raw_laplacian, dup_group,
                 para_aesthetic, para_quality, para_composition, para_light,
                 para_color, para_dof, para_content, clip_iqa, caption,
-                imgw, imgh, thumb, n_faces)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                imgw, imgh, thumb, content_hash, mtime, fsize, n_faces)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (idx, im["path"], im["filename"],
              im.get("sharpness"), im.get("combined"), im.get("raw_laplacian"),
              im.get("dup_group"),
@@ -183,7 +294,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
              im.get("para_composition"), im.get("para_light"),
              im.get("para_color"), im.get("para_dof"), im.get("para_content"),
              im.get("clip_iqa"), im.get("caption"),
-             im.get("imgw"), im.get("imgh"), thumb_name,
+             imgw, imgh, thumb_name, chash, jobs[idx][8], jobs[idx][9],
              len(im.get("faces", []))),
         )
 
@@ -206,9 +317,6 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             conn.execute("INSERT INTO images_fts (rowid, caption) VALUES (?,?)",
                          (idx, im["caption"]))
 
-        thumb_jobs.append((idx, Path(im["path"]), thumb_dir / thumb_name,
-                           thumb_size, thumb_quality, force_thumbs))
-
     # ── Re-seed clusters: keep prior names, add any new cluster ids ──────────
     # Also pick up names embedded in the report (from --face-ref matching).
     report_names: dict[int, str] = {}
@@ -224,10 +332,28 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             "INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
             (cid, name))
 
-    # ── Restore decisions for paths that still exist ─────────────────────────
-    for path, decision in prev_decisions.items():
-        conn.execute("INSERT OR REPLACE INTO decisions (path, decision) VALUES (?,?)",
-                     (path, decision))
+    # ── Restore decisions, keyed by content hash ─────────────────────────────
+    if dec_key != "hash":
+        # Pre-incremental DB keyed decisions by path; rebuild the table on the
+        # new schema and translate each path to its content hash. Decisions for
+        # files that have since vanished from the library are dropped (we have
+        # no old hash to recover them from — this is the one-time migration cost).
+        conn.execute("DROP TABLE IF EXISTS decisions")
+        conn.execute("CREATE TABLE decisions (hash TEXT PRIMARY KEY, decision TEXT)")
+        path_to_hash = {im["path"]: hashes.get(i) for i, im in enumerate(images)}
+        migrated = 0
+        for path, decision in prev_decisions.items():
+            h = path_to_hash.get(path)
+            if h:
+                conn.execute(
+                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                    (h, decision))
+                migrated += 1
+        print(f"  Migrated {migrated}/{len(prev_decisions)} decisions to content-hash keys")
+    else:
+        for h, decision in prev_decisions.items():
+            conn.execute("INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                         (h, decision))
 
     # ── Meta ─────────────────────────────────────────────────────────────────
     for k in ("folder", "backend", "caption_model", "face_model"):
@@ -242,26 +368,25 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
     conn.commit()
     print(f"  DB written: {db_path}  ({len(cluster_ids_seen)} clusters)")
-
-    # ── Generate thumbnails in parallel ──────────────────────────────────────
     if skip_thumbs:
-        print("  Skipping thumbnail generation (--skip-thumbs)")
+        print("  Skipped thumbnail generation (--skip-thumbs)")
     else:
-        made, skipped, failed = 0, 0, 0
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(make_thumb, job) for job in thumb_jobs]
-            for fut in tqdm(as_completed(futures), total=len(futures),
-                            desc="Thumbnails"):
-                _id, status, err = fut.result()
-                if status == "made":
-                    made += 1
-                elif status == "skip":
-                    skipped += 1
-                else:
-                    failed += 1
-                    if failed <= 10:
-                        print(f"  thumb fail (id={_id}): {err}")
         print(f"  Thumbnails: {made} generated, {skipped} reused, {failed} failed")
+
+    # ── Prune orphaned thumbnails (old naming scheme + stale hashes) ─────────
+    if prune:
+        referenced = {r[0] for r in
+                      conn.execute("SELECT thumb FROM images WHERE thumb IS NOT NULL")}
+        removed = 0
+        for f in thumb_dir.glob("*.webp"):
+            if f.name not in referenced:
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            print(f"  Pruned {removed} orphaned thumbnails")
 
     conn.close()
     print("\nDone. Next:  python server.py --db", db_path)
@@ -278,6 +403,8 @@ def main() -> None:
     ap.add_argument("--workers",       type=int, default=8)
     ap.add_argument("--skip-thumbs",   action="store_true")
     ap.add_argument("--force-thumbs",  action="store_true")
+    ap.add_argument("--no-prune",      action="store_true",
+                    help="Keep thumbnails no longer referenced by any image")
     args = ap.parse_args()
 
     report_path = Path(args.report)
@@ -289,7 +416,7 @@ def main() -> None:
 
     build(report_path, db_path, thumb_dir,
           args.thumb_size, args.thumb_quality, args.workers,
-          args.skip_thumbs, args.force_thumbs)
+          args.skip_thumbs, args.force_thumbs, prune=not args.no_prune)
 
 
 if __name__ == "__main__":

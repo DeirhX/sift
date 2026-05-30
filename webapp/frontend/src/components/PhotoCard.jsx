@@ -1,13 +1,16 @@
 import { thumbUrl } from '../api.js'
 
-// One photo tile: cover-cropped thumbnail with face overlays, scores,
-// caption, tags and keep/delete actions.
+// One photo tile with face overlays, scores, caption, tags and keep/delete
+// actions. thumbH is chosen by the grid to preserve the photo's aspect ratio;
+// when it matches the image's proportions the offsets below collapse to zero
+// (no crop), and when the grid clamps an extreme ratio the cover-crop math
+// keeps face boxes aligned.
 export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, personName }) {
   const aes = item.para_aesthetic ?? item.clip_iqa
   const fmt = (v) => (v == null ? '–' : v.toFixed(2))
 
   // Face boxes are stored in original-image pixel coords; scale to the
-  // cover-cropped thumbnail. Cover-crop centers the longer axis.
+  // displayed thumbnail (centered cover-crop for any leftover overflow).
   const iw = item.imgw || 1
   const ih = item.imgh || 1
   const scale = Math.max(colWidth / iw, thumbH / ih)
