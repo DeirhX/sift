@@ -58,6 +58,14 @@ Useful flags (full list in the script's `--help`):
 
 Output: `audit_report.json` in the folder (or `--out <path>`).
 
+This step is **incremental**: the previous report doubles as a cache, so a
+re-run only re-scores files whose bytes changed (detected by mtime + size) and
+whose cached record already has the outputs you asked for. The heavy
+aesthetic/caption models are skipped for unchanged files. Pass `--no-cache` to
+force a full re-score. (Faces are clustered globally, so any change re-detects
+faces for the whole folder; changing flags like `--backend` or `--caption`
+invalidates the cache.)
+
 ### 2. Build the database + thumbnails
 
 ```bash
@@ -111,9 +119,11 @@ content rather than being orphaned.
 
 ## Notes & limitations
 
-- **Re-analysis is not incremental.** `build_db.py` is incremental, but
-  `photo_audit.py` re-scores every file each run; that GPU work is the real cost
-  on large libraries.
+- Both stages are incremental, but **faces are global**: because identity
+  clustering spans the whole folder, any change re-detects faces for every
+  image (the scalar scores are still cached).
 - Duplicate grouping is `O(n²)` over all image pairs — fine for thousands, slow
   for very large libraries.
+- Orphaned thumbnails are pruned automatically on each `build_db` run; pass
+  `--no-prune` to keep them.
 - No tests yet.

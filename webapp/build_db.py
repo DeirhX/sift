@@ -16,6 +16,8 @@ Options:
   --workers <n>        Thumbnail worker threads (default: 8)
   --skip-thumbs        Only (re)build the DB, don't regenerate thumbnails
   --force-thumbs       Regenerate thumbnails even if they already exist
+  --no-prune           Keep thumbnails no longer referenced by any image
+                       (by default, orphaned thumbnails are deleted)
 
 The DB preserves any existing decisions/cluster names when rebuilt, so you can
 re-ingest a fresh audit without losing your keep/delete marks or face names.
@@ -171,7 +173,7 @@ def _columns(conn, table: str) -> list[str]:
 
 def build(report_path: Path, db_path: Path, thumb_dir: Path,
           thumb_size: int, thumb_quality: int, workers: int,
-          skip_thumbs: bool, force_thumbs: bool) -> None:
+          skip_thumbs: bool, force_thumbs: bool, prune: bool = True) -> None:
 
     with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
@@ -371,6 +373,21 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     else:
         print(f"  Thumbnails: {made} generated, {skipped} reused, {failed} failed")
 
+    # ── Prune orphaned thumbnails (old naming scheme + stale hashes) ─────────
+    if prune:
+        referenced = {r[0] for r in
+                      conn.execute("SELECT thumb FROM images WHERE thumb IS NOT NULL")}
+        removed = 0
+        for f in thumb_dir.glob("*.webp"):
+            if f.name not in referenced:
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        if removed:
+            print(f"  Pruned {removed} orphaned thumbnails")
+
     conn.close()
     print("\nDone. Next:  python server.py --db", db_path)
 
@@ -386,6 +403,8 @@ def main() -> None:
     ap.add_argument("--workers",       type=int, default=8)
     ap.add_argument("--skip-thumbs",   action="store_true")
     ap.add_argument("--force-thumbs",  action="store_true")
+    ap.add_argument("--no-prune",      action="store_true",
+                    help="Keep thumbnails no longer referenced by any image")
     args = ap.parse_args()
 
     report_path = Path(args.report)
@@ -397,7 +416,7 @@ def main() -> None:
 
     build(report_path, db_path, thumb_dir,
           args.thumb_size, args.thumb_quality, args.workers,
-          args.skip_thumbs, args.force_thumbs)
+          args.skip_thumbs, args.force_thumbs, prune=not args.no_prune)
 
 
 if __name__ == "__main__":

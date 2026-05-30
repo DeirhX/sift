@@ -30,6 +30,16 @@ Options:
   --move-junk <path>    Move images scoring below --junk-threshold to this folder
   --junk-threshold <f>  Combined score threshold for --move-junk (0-1, default: 0.25)
   --top <n>             Print top-N worst images to console (default: 30)
+  --no-cache            Ignore the previous report and re-score every image
+
+Incremental re-scoring:
+  The previous audit_report.json doubles as a cache. On re-run, any image whose
+  (mtime, size) are unchanged AND whose cached record already has the outputs
+  this run needs is reused verbatim — the heavy aesthetic/caption models only
+  run on new or edited files. Sharpness normalisation and duplicate grouping are
+  recomputed across the whole set (cheap, no model inference). Faces are global
+  (clustering spans all images), so if anything changed they are re-detected for
+  the whole folder; an unchanged folder reuses cached faces too.
 
 Scores (all 0-1, higher = better):
   sharpness        Normalised Laplacian variance (blur detection)
@@ -586,6 +596,8 @@ def main():
     ap.add_argument("--move-junk",      default=None)
     ap.add_argument("--junk-threshold", type=float, default=0.25)
     ap.add_argument("--top",            type=int,   default=30)
+    ap.add_argument("--no-cache",       action="store_true",
+                    help="Ignore the previous report; re-score every image")
     args = ap.parse_args()
 
     folder = Path(args.folder)
@@ -602,60 +614,125 @@ def main():
     use_clip_iqa = not args.no_clip and args.backend in ("clip-iqa", "both")
     use_para     = not args.no_clip and args.backend in ("para",     "both")
 
-    # ── Sharpness ──
+    out_path = Path(args.out) if args.out else folder / "audit_report.json"
+
+    # ── Incremental cache ────────────────────────────────────────────────────
+    # The previous report doubles as the cache: reuse a record verbatim when the
+    # file's (mtime, size) are unchanged and it already holds every output this
+    # run needs, so the heavy models only touch new/edited files.
+    import imagehash
+
+    prev_by_path: dict[str, dict] = {}
+    if not args.no_cache and out_path.exists():
+        try:
+            with open(out_path, encoding="utf-8") as f:
+                prev = json.load(f)
+            # Only trust the cache when it was produced with the same scoring
+            # configuration, so reused records have exactly the expected shape.
+            cur_cfg = ("none" if args.no_clip else args.backend,
+                       bool(args.caption), bool(args.faces))
+            prev_cfg = (prev.get("backend"),
+                        prev.get("caption_model") is not None,
+                        prev.get("face_model") is not None)
+            if prev_cfg == cur_cfg:
+                prev_by_path = {r["path"]: r for r in prev.get("images", [])}
+            else:
+                print(f"  (config changed {prev_cfg} → {cur_cfg}; re-scoring all)")
+        except Exception as e:
+            print(f"  (cache unreadable, re-scoring all: {e})")
+
+    sigs: dict[Path, tuple] = {}
+    for p in paths:
+        try:
+            st = p.stat()
+            sigs[p] = (st.st_mtime, st.st_size)
+        except OSError:
+            sigs[p] = (None, None)
+
+    def reusable(p: Path):
+        prev = prev_by_path.get(str(p))
+        if not prev or "phash" not in prev or prev.get("mtime") is None:
+            return None
+        mt, sz = sigs[p]
+        if sz is None or prev.get("fsize") != sz or abs(prev["mtime"] - mt) > 1e-6:
+            return None
+        if use_para     and "para_aesthetic" not in prev: return None
+        if use_clip_iqa and "clip_iqa"       not in prev: return None
+        if args.caption and "caption"        not in prev: return None
+        if args.faces   and "faces"          not in prev: return None
+        return prev
+
+    cached: dict[Path, dict] = {}
+    to_process: list[Path] = []
+    for p in paths:
+        prev = reusable(p)
+        (cached.__setitem__(p, prev) if prev is not None else to_process.append(p))
+    print(f"\nIncremental: {len(cached)} cached, {len(to_process)} to score "
+          f"(of {len(paths)})")
+
+    def device_for() -> str:
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    # ── Sharpness (raw reused from cache; only new files read from disk) ──
     print("\nComputing sharpness (Laplacian variance)...")
-    raw_sharp  = {p: laplacian_variance(p) for p in tqdm(paths, desc="Sharpness")}
+    raw_sharp: dict[Path, float] = {p: cached[p].get("raw_laplacian", 0.0) for p in cached}
+    for p in tqdm(to_process, desc="Sharpness"):
+        raw_sharp[p] = laplacian_variance(p)
     norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
     sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
 
-    # ── CLIP-IQA ──
+    # ── CLIP-IQA / PARA (new files only) ──
     clip_iqa_scores: dict[Path, float] = {}
-    if use_clip_iqa:
-        import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if use_clip_iqa and to_process:
         print()
-        clip_iqa_scores = run_clip_iqa(paths, device)
+        clip_iqa_scores = run_clip_iqa(to_process, device_for())
 
-    # ── PARA ──
     para_raw: dict[Path, dict] = {}
-    if use_para:
-        import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if use_para and to_process:
         print()
-        para_raw = run_para(paths, device)
+        para_raw = run_para(to_process, device_for())
 
-    # ── Primary aesthetic for combined score ──
+    # ── Primary aesthetic for combined score (cached or freshly computed) ──
     def primary_aes(p: Path) -> float:
-        if use_para:
-            return para_raw[p]["aesthetic"] / 5.0
-        if use_clip_iqa:
-            return clip_iqa_scores[p]
+        if p in cached:
+            if use_para:     return cached[p].get("para_aesthetic", 0.5)
+            if use_clip_iqa: return cached[p].get("clip_iqa", 0.5)
+            return 0.5
+        if use_para:     return para_raw[p]["aesthetic"] / 5.0
+        if use_clip_iqa: return clip_iqa_scores[p]
         return 0.5
 
     combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
 
-    # ── Duplicate detection ──
+    # ── Duplicate detection (phash reused from cache; only new files hashed) ──
     print("\nComputing perceptual hashes for duplicate detection...")
-    hashes, img_sizes = compute_phashes(paths)
+    hashes: dict = {}
+    for p in cached:
+        try:
+            hashes[p] = imagehash.hex_to_hash(cached[p]["phash"])
+        except Exception:
+            pass
+    new_hashes, new_sizes = compute_phashes(to_process) if to_process else ({}, {})
+    hashes.update(new_hashes)
+    img_sizes = new_sizes
     dup_groups = group_duplicates(hashes, threshold=args.dup_threshold)
     path_to_group: dict[Path, int] = {}
     for gid, group in enumerate(dup_groups):
         for p in group:
             path_to_group[p] = gid
 
-    # ── BLIP captions + CLIP keyword tags ──
+    # ── BLIP captions + CLIP keyword tags (new files only) ──
     captions: dict[Path, dict] = {}
-    if args.caption:
-        import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        captions = run_caption_and_tags(paths, device, top_k=args.top_tags)
+    if args.caption and to_process:
+        captions = run_caption_and_tags(to_process, device_for(), top_k=args.top_tags)
 
     # ── Face detection + identity clustering ──
-    face_data:      dict[Path, list]  = {}
-    face_img_sizes: dict[Path, tuple] = {}
-    if args.faces:
-        import torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Clustering is global, so any change forces a whole-folder re-detection;
+    # an unchanged folder reuses cached faces.
+    face_data: dict[Path, list] = {}
+    faces_global = bool(args.faces and to_process)
+    if faces_global:
         refs: dict[str, Path] = {}
         for item in args.face_ref:
             if "=" in item:
@@ -663,8 +740,8 @@ def main():
                 refs[name.strip()] = Path(rpath.strip())
             else:
                 print(f"  Warning: --face-ref '{item}' ignored (expected NAME=PATH)")
-        face_data, face_img_sizes = run_faces(
-            paths, device,
+        face_data, _ = run_faces(
+            paths, device_for(),
             face_refs=refs or None,
             min_face_size=args.face_min_size,
             min_face_rel=args.face_min_rel,
@@ -672,9 +749,33 @@ def main():
         )
 
     # ── Build report ──
+    def stamp(rec: dict, p: Path) -> dict:
+        mt, sz = sigs[p]
+        rec["mtime"] = mt
+        rec["fsize"] = sz
+        if p in hashes:
+            rec["phash"] = str(hashes[p])
+        return rec
+
     records = []
     for p in paths:
-        rec: dict = {
+        if p in cached:
+            # Reuse all per-image outputs; only recompute set-relative scalars.
+            rec = dict(cached[p])
+            rec["sharpness"] = round(sharpness[p], 4)
+            rec["combined"]  = round(combined[p], 4)
+            rec["dup_group"] = path_to_group.get(p)
+            if use_para and use_clip_iqa:
+                rec["combined_clip_iqa"] = round(
+                    0.4 * sharpness[p] + 0.6 * rec.get("clip_iqa", 0.5), 4)
+                rec["combined_para"] = round(
+                    0.4 * sharpness[p] + 0.6 * rec.get("para_aesthetic", 0.5), 4)
+            if faces_global:
+                rec["faces"] = face_data.get(p, [])
+            records.append(stamp(rec, p))
+            continue
+
+        rec = {
             "path":          str(p),
             "filename":      p.name,
             "sharpness":     round(sharpness[p], 4),
@@ -710,11 +811,10 @@ def main():
             rec["tags"]    = captions[p].get("tags", [])
         if args.faces:
             rec["faces"] = face_data.get(p, [])
-        records.append(rec)
+        records.append(stamp(rec, p))
 
     records.sort(key=lambda r: r["combined"])
 
-    out_path = Path(args.out) if args.out else folder / "audit_report.json"
     with open(out_path, "w", encoding="utf-8") as f:
         n_faces_images = sum(1 for r in records if r.get("faces"))
         n_clusters = (
