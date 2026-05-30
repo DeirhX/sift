@@ -41,11 +41,11 @@ export async function fetchGroups(offset, limit, order = 'size') {
   return r.json()
 }
 
-export async function setDecision(path, decision) {
+export async function setDecision(hash, decision) {
   await fetch('/api/decisions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, decision }),
+    body: JSON.stringify({ hash, decision }),
   })
 }
 

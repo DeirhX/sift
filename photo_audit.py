@@ -357,15 +357,21 @@ def run_caption_and_tags(paths: list[Path], device: str,
 
 # ── Perceptual hashing / duplicate detection ──────────────────────────────────
 
-def compute_phashes(paths: list[Path]) -> dict:
+def compute_phashes(paths: list[Path]) -> tuple[dict, dict]:
+    """Returns (hashes, sizes). Sizes are raw (pre-EXIF-transpose) (w, h),
+    matching the coordinate space the face detector uses for its bboxes, so
+    the frontend can scale face overlays and lay out aspect-correct tiles."""
     import imagehash
-    hashes = {}
+    hashes: dict = {}
+    sizes:  dict = {}
     for p in tqdm(paths, desc="Perceptual hashing"):
         try:
-            hashes[p] = imagehash.phash(Image.open(p))
+            im = Image.open(p)
+            sizes[p] = im.size
+            hashes[p] = imagehash.phash(im)
         except Exception as e:
             print(f"  hash error {p.name}: {e}")
-    return hashes
+    return hashes, sizes
 
 
 def group_duplicates(hashes: dict, threshold: int = 6) -> list[list[Path]]:
@@ -630,7 +636,7 @@ def main():
 
     # ── Duplicate detection ──
     print("\nComputing perceptual hashes for duplicate detection...")
-    hashes     = compute_phashes(paths)
+    hashes, img_sizes = compute_phashes(paths)
     dup_groups = group_duplicates(hashes, threshold=args.dup_threshold)
     path_to_group: dict[Path, int] = {}
     for gid, group in enumerate(dup_groups):
@@ -676,6 +682,11 @@ def main():
             "dup_group":     path_to_group.get(p),
             "raw_laplacian": round(raw_sharp[p], 2),
         }
+        # Dimensions for every image (not just faces) so the grid can lay out
+        # aspect-correct tiles. Falls back to None if the image failed to open.
+        w_h = img_sizes.get(p)
+        if w_h:
+            rec["imgw"], rec["imgh"] = w_h
         if use_clip_iqa:
             rec["clip_iqa"] = round(clip_iqa_scores.get(p, 0.5), 4)
         if use_para:
@@ -699,8 +710,6 @@ def main():
             rec["tags"]    = captions[p].get("tags", [])
         if args.faces:
             rec["faces"] = face_data.get(p, [])
-            if p in face_img_sizes:
-                rec["imgw"], rec["imgh"] = face_img_sizes[p]
         records.append(rec)
 
     records.sort(key=lambda r: r["combined"])

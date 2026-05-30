@@ -7,8 +7,10 @@ Serves:
   GET  /api/images                faceted, sorted, paginated image query
   GET  /thumb/{id}                cached WebP thumbnail
   GET  /img/{id}                  full-resolution original (served on click)
-  GET  /api/decisions             { path: 'keep'|'del' }
-  POST /api/decisions             { path, decision|null }   set one decision
+  GET  /api/decisions             { hash: 'keep'|'del' }
+  POST /api/decisions             { hash, decision|null }   set one decision
+                                  (decisions are keyed by content hash, so they
+                                   survive the underlying files being moved)
   GET  /api/clusters              [ {cluster_id, name} ]
   POST /api/clusters              { cluster_id, name|null }  rename a cluster
   GET  /api/export                full decisions export (kept/deleted/unmarked)
@@ -216,7 +218,7 @@ def get_images(
 
         base = f"""
             FROM images i
-            LEFT JOIN decisions d ON d.path = i.path
+            LEFT JOIN decisions d ON d.hash = i.content_hash
             WHERE {where_sql}
         """
 
@@ -258,6 +260,7 @@ def _rows_to_items(conn, rows) -> list[dict]:
         d = dict(r)
         items.append({
             "id": d["id"], "filename": d["filename"], "path": d["path"],
+            "hash": d["content_hash"],
             "combined": d["combined"], "sharpness": d["sharpness"],
             "para_aesthetic": d["para_aesthetic"],
             "para_composition": d["para_composition"],
@@ -304,7 +307,7 @@ def get_groups(
             members = conn.execute(
                 """SELECT i.*, d.decision
                    FROM images i
-                   LEFT JOIN decisions d ON d.path = i.path
+                   LEFT JOIN decisions d ON d.hash = i.content_hash
                    WHERE i.dup_group = ?
                    ORDER BY i.combined DESC, i.id ASC""",
                 (gid,),
@@ -347,23 +350,29 @@ def serve_full(image_id: int):
 @app.get("/api/decisions")
 def get_decisions():
     with db() as conn:
-        return {r["path"]: r["decision"]
-                for r in conn.execute("SELECT path, decision FROM decisions")}
+        return {r["hash"]: r["decision"]
+                for r in conn.execute("SELECT hash, decision FROM decisions")}
 
 
 @app.post("/api/decisions")
 def set_decision(payload: dict = Body(...)):
-    path = payload.get("path")
+    h = payload.get("hash")
     decision = payload.get("decision")    # 'keep' | 'del' | None
-    if not path:
-        raise HTTPException(400, "path required")
+    # Backward-compatible fallback: resolve a path to its content hash.
+    if not h and payload.get("path"):
+        with db() as conn:
+            row = conn.execute("SELECT content_hash FROM images WHERE path=?",
+                               (payload["path"],)).fetchone()
+            h = row["content_hash"] if row else None
+    if not h:
+        raise HTTPException(400, "hash required")
     with db() as conn:
         if decision in ("keep", "del"):
             conn.execute(
-                "INSERT OR REPLACE INTO decisions (path, decision) VALUES (?,?)",
-                (path, decision))
+                "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                (h, decision))
         else:
-            conn.execute("DELETE FROM decisions WHERE path=?", (path,))
+            conn.execute("DELETE FROM decisions WHERE hash=?", (h,))
         conn.commit()
     return {"ok": True}
 
@@ -397,7 +406,7 @@ def export_decisions():
     with db() as conn:
         rows = conn.execute(
             """SELECT i.path, i.filename, i.combined, d.decision
-               FROM images i LEFT JOIN decisions d ON d.path = i.path""").fetchall()
+               FROM images i LEFT JOIN decisions d ON d.hash = i.content_hash""").fetchall()
     out = {"kept": [], "deleted": [], "unmarked": []}
     for r in rows:
         entry = {"path": r["path"], "filename": r["filename"], "combined": r["combined"]}
@@ -424,13 +433,15 @@ def autocull_groups():
         kept = deleted = 0
         for gid in gids:
             members = conn.execute(
-                """SELECT path FROM images WHERE dup_group=?
+                """SELECT content_hash FROM images WHERE dup_group=?
                    ORDER BY combined DESC, id ASC""", (gid,)).fetchall()
             for i, m in enumerate(members):
+                if not m["content_hash"]:
+                    continue
                 dec = "keep" if i == 0 else "del"
                 conn.execute(
-                    "INSERT OR REPLACE INTO decisions (path, decision) VALUES (?,?)",
-                    (m["path"], dec))
+                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                    (m["content_hash"], dec))
                 kept += (i == 0)
                 deleted += (i != 0)
         conn.commit()
@@ -478,7 +489,7 @@ def apply_status():
         pending = 0
         for r in conn.execute(
             """SELECT i.path FROM images i
-               JOIN decisions d ON d.path = i.path
+               JOIN decisions d ON d.hash = i.content_hash
                WHERE d.decision='del'"""):
             if not str(r["path"]).startswith(rej_str):
                 pending += 1
@@ -497,7 +508,7 @@ def apply_decisions():
         rej_str = str(rej)
         rows = conn.execute(
             """SELECT i.id, i.path FROM images i
-               JOIN decisions d ON d.path = i.path
+               JOIN decisions d ON d.hash = i.content_hash
                WHERE d.decision='del'""").fetchall()
         if rows:
             rej.mkdir(parents=True, exist_ok=True)
@@ -512,9 +523,8 @@ def apply_decisions():
             except OSError:
                 skipped += 1
                 continue
+            # Only the path moves; the decision stays attached via content hash.
             conn.execute("UPDATE images SET path=? WHERE id=?", (str(dest), r["id"]))
-            # decisions are keyed by path — keep the row in sync
-            conn.execute("UPDATE decisions SET path=? WHERE path=?", (str(dest), str(src)))
             conn.execute(
                 "INSERT INTO applied_moves (image_id, from_path, to_path, ts) VALUES (?,?,?,?)",
                 (r["id"], str(src), str(dest), datetime.now().isoformat(timespec="seconds")))
@@ -543,7 +553,6 @@ def undo_apply():
                     skipped += 1
                     continue
                 conn.execute("UPDATE images SET path=? WHERE id=?", (str(dst), r["image_id"]))
-                conn.execute("UPDATE decisions SET path=? WHERE path=?", (str(dst), str(src)))
                 restored += 1
             else:
                 skipped += 1
