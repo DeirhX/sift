@@ -1,0 +1,47 @@
+# ── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ── Node / frontend ──────────────────────────────────────────────────────
+node_modules/
+webapp/frontend/dist/
+*.tsbuildinfo
+.vite/
+
+# ── Generated data artifacts (this tool produces these; never commit) ──────
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+audit_report.json
+unclassified_classification.json
+audit_viewer.html
+.thumbs/
+_rejected/
+
+# ── Logs ───────────────────────────────────────────────────────────────────
+*.log
+
+# ── ML model / weight caches ───────────────────────────────────────────────
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# ── OS / editor cruft ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp

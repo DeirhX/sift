@@ -1,0 +1,806 @@
+"""
+photo_audit.py — Score a photo dump for sharpness + aesthetic quality,
+                 group near-duplicates, and optionally caption each image.
+
+Usage:
+  python photo_audit.py <folder> [options]
+
+Options:
+  --recurse             Include subfolders (default: top-level only)
+  --out <path>          JSON report output path (default: <folder>/audit_report.json)
+  --dup-threshold <n>   Perceptual-hash Hamming distance for duplicate grouping (default: 6)
+  --backend {clip-iqa,para,both}
+                        Aesthetic scoring backend (default: para)
+                          clip-iqa  CLIP ViT-L/14 bipolar prompt scoring
+                          para      rsinema/aesthetic-scorer — CLIP ViT-B/32 fine-tuned on
+                                    the PARA dataset; 7 dimension scores (recommended)
+                          both      Run both and report side-by-side
+  --no-clip             Skip all aesthetic scoring (sharpness + duplicates only)
+  --caption             Add natural-language captions + keyword tags
+                        Caption: Salesforce/blip-image-captioning-base (~990 MB)
+                        Tags:    CLIP ViT-B/32 zero-shot against a curated 60-word vocab
+  --top-tags <n>        Number of keyword tags to emit per image (default: 8)
+  --faces               Detect + cluster faces (requires facenet-pytorch)
+                        Uses MTCNN detection + VGGFace2/InceptionResnetV1 embeddings
+                        + DBSCAN identity clustering.  Stores bbox, cluster_id, name.
+  --face-ref NAME=PATH  Reference photo for a named person (repeatable).
+                        e.g.  --face-ref "Aja=aja_reference.jpg"
+                        The cluster closest to the reference (cosine dist < 0.40)
+                        is automatically labelled with that name.
+  --move-junk <path>    Move images scoring below --junk-threshold to this folder
+  --junk-threshold <f>  Combined score threshold for --move-junk (0-1, default: 0.25)
+  --top <n>             Print top-N worst images to console (default: 30)
+
+Scores (all 0-1, higher = better):
+  sharpness        Normalised Laplacian variance (blur detection)
+  clip_iqa         CLIP-IQA bipolar prompt score (5 pairs averaged)
+  para_aesthetic   PARA aesthetic head / 5
+  para_*           PARA quality/composition/light/color/dof/content heads / 5
+  combined         0.4 * sharpness + 0.6 * primary_aesthetic
+                   (primary = PARA aesthetic if available, else CLIP-IQA)
+"""
+
+import sys
+import json
+import argparse
+import shutil
+from pathlib import Path
+
+# Make sure aesthetic_scorer.py is importable regardless of working directory
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import cv2
+import numpy as np
+from PIL import Image
+from tqdm import tqdm
+
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
+
+# ── CLIP-IQA bipolar prompt pairs ────────────────────────────────────────────
+QUALITY_PAIRS = [
+    ("a sharp, well-focused photograph",
+     "a blurry, out-of-focus photograph"),
+    ("a well-composed, aesthetically pleasing photograph",
+     "a poorly composed, badly framed snapshot"),
+    ("a photograph with good exposure and lighting",
+     "an overexposed or underexposed photograph"),
+    ("a high quality professional photograph",
+     "a low quality amateur snapshot"),
+    ("an interesting, visually engaging photo",
+     "a boring, uninteresting photo"),
+]
+
+PARA_KEYS = ["aesthetic", "quality", "composition", "light", "color", "dof", "content"]
+
+
+# ── Sharpness ────────────────────────────────────────────────────────────────
+
+def laplacian_variance(path: Path) -> float:
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return 0.0
+    h, w = img.shape
+    if max(h, w) > 1920:
+        scale = 1920 / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+    return float(cv2.Laplacian(img, cv2.CV_64F).var())
+
+
+def normalise_sharpness(values: list[float]) -> list[float]:
+    log_vals = [np.log1p(v) for v in values]
+    lo, hi = min(log_vals), max(log_vals)
+    if hi == lo:
+        return [0.5] * len(values)
+    return [(v - lo) / (hi - lo) for v in log_vals]
+
+
+# ── CLIP-IQA (ViT-L/14 bipolar prompts) ──────────────────────────────────────
+
+def load_clip_iqa(device: str):
+    import torch, open_clip
+    print(f"Loading CLIP ViT-L/14 (IQA backend) on {device}...")
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-L-14", pretrained="openai", device=device
+    )
+    tokenizer = open_clip.get_tokenizer("ViT-L-14")
+    model.eval()
+    return model, preprocess, tokenizer
+
+
+def encode_quality_texts(model, tokenizer, device):
+    import torch
+    pos_texts = [f"a photo of {p}" for p, _ in QUALITY_PAIRS]
+    neg_texts = [f"a photo of {n}" for _, n in QUALITY_PAIRS]
+    tokens = tokenizer(pos_texts + neg_texts).to(device)
+    with torch.no_grad(), torch.amp.autocast(device):
+        feats = model.encode_text(tokens)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    feats = feats.cpu().float()
+    n = len(QUALITY_PAIRS)
+    return feats[:n], feats[n:]
+
+
+def clip_iqa_score(img_feat, pos_feats, neg_feats) -> float:
+    import torch, torch.nn.functional as F
+    scores = []
+    for pf, nf in zip(pos_feats, neg_feats):
+        logits = torch.tensor([(img_feat @ pf.unsqueeze(-1)).item(),
+                               (img_feat @ nf.unsqueeze(-1)).item()])
+        scores.append(F.softmax(logits, dim=0)[0].item())
+    return float(np.mean(scores))
+
+
+def run_clip_iqa(paths, device, batch_size=32):
+    import torch
+    from sklearn.preprocessing import normalize
+
+    model, preprocess, tokenizer = load_clip_iqa(device)
+    pos_feats, neg_feats = encode_quality_texts(model, tokenizer, device)
+
+    embeddings, valid = [], []
+    for i in tqdm(range(0, len(paths), batch_size), desc="CLIP-IQA embed"):
+        batch = paths[i:i + batch_size]
+        tensors, bvalid = [], []
+        for p in batch:
+            try:
+                img = Image.open(p).convert("RGB")
+                tensors.append(preprocess(img))
+                bvalid.append(p)
+            except Exception as e:
+                print(f"  skip {p.name}: {e}")
+        if not tensors:
+            continue
+        t = torch.stack(tensors).to(device)
+        with torch.no_grad(), torch.amp.autocast(device):
+            f = model.encode_image(t).cpu().float().numpy()
+        embeddings.extend(f)
+        valid.extend(bvalid)
+
+    embs = normalize(np.array(embeddings))
+    scores = {}
+    for p, e in zip(valid, embs):
+        scores[p] = clip_iqa_score(torch.tensor(e), pos_feats, neg_feats)
+    for p in paths:
+        scores.setdefault(p, 0.5)
+
+    del model
+    return scores
+
+
+# ── PARA / rsinema aesthetic scorer (ViT-B/32) ───────────────────────────────
+
+def load_para_scorer(device: str):
+    import torch
+    from transformers import CLIPVisionModel, CLIPProcessor
+    from huggingface_hub import hf_hub_download
+    from aesthetic_scorer import AestheticScorer
+
+    print(f"Loading PARA aesthetic scorer (ViT-B/32) on {device}...")
+    model_path = hf_hub_download("rsinema/aesthetic-scorer", "model.pt")
+    processor  = CLIPProcessor.from_pretrained("rsinema/aesthetic-scorer")
+
+    payload = torch.load(model_path, map_location=device, weights_only=False)
+    if isinstance(payload, dict):
+        # State dict uses CLIPVisionTransformer (inner backbone, no vision_model. prefix)
+        backbone = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32").vision_model
+        scorer = AestheticScorer(backbone)
+        scorer.load_state_dict(payload)
+    else:
+        scorer = payload
+
+    scorer = scorer.to(device).eval()
+    return scorer, processor
+
+
+def run_para(paths, device, batch_size=32):
+    import torch
+
+    scorer, processor = load_para_scorer(device)
+    results = {}
+    for i in tqdm(range(0, len(paths), batch_size), desc="PARA scoring"):
+        batch = paths[i:i + batch_size]
+        tensors, bpaths = [], []
+        for p in batch:
+            try:
+                img = Image.open(p).convert("RGB")
+                t = processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+                tensors.append(t)
+                bpaths.append(p)
+            except Exception as e:
+                print(f"  skip {p.name}: {e}")
+        if not tensors:
+            continue
+        batch_t = torch.stack(tensors).to(device)
+        with torch.no_grad():
+            out = scorer(batch_t)
+        head_lists = [o.squeeze(1).tolist() for o in out]
+        for p, *vals in zip(bpaths, *head_lists):
+            results[p] = {k: v for k, v in zip(PARA_KEYS, vals)}
+
+    fallback = {k: 2.5 for k in PARA_KEYS}
+    for p in paths:
+        results.setdefault(p, fallback)
+
+    del scorer
+    return results
+
+
+# ── CLIP tag vocabulary ───────────────────────────────────────────────────────
+
+CLIP_TAG_VOCAB = [
+    # Scene type
+    "landscape", "cityscape", "street scene", "interior room", "portrait",
+    # Nature
+    "forest", "mountains", "ocean", "beach", "lake", "river", "desert",
+    "field", "garden", "snow and ice", "waterfall", "rocks and cliffs", "sky and clouds",
+    # Urban / built environment
+    "building and architecture", "bridge", "market or shop", "historical site",
+    # People
+    "single person", "group of people", "crowd", "child or children", "face close-up",
+    # Animals
+    "dog", "cat", "bird", "wildlife animal",
+    # Light / weather
+    "sunset or sunrise", "golden hour", "blue hour", "night scene",
+    "foggy or misty", "rainy weather", "overcast sky", "bright sunny day",
+    # Photographic style
+    "bokeh background blur", "silhouette", "reflection in water",
+    "black and white", "aerial or birds eye view", "long exposure",
+    # Subject category
+    "food or drink", "vehicle or transportation", "boat or ship",
+    "sports or action", "festival or event", "abstract pattern",
+    "indoor", "outdoor",
+]
+
+
+# ── Captions (BLIP) + keyword tags (CLIP ViT-B/32) ───────────────────────────
+
+def run_caption_and_tags(paths: list[Path], device: str,
+                         top_k: int = 8,
+                         batch_size_blip: int = 16,
+                         batch_size_clip: int = 32) -> dict:
+    """
+    Returns {path: {"caption": str, "tags": list[str]}} for every path.
+
+    Caption : Salesforce/blip-image-captioning-base  (~990 MB, natively in transformers)
+    Tags    : open_clip ViT-B/32  zero-shot against CLIP_TAG_VOCAB (top-k by cosine sim)
+    """
+    import torch
+    import open_clip
+    from transformers import BlipProcessor, BlipForConditionalGeneration
+
+    results: dict[Path, dict] = {p: {"caption": "", "tags": []} for p in paths}
+
+    # ── BLIP captions ──────────────────────────────────────────────────────────
+    print(f"\nLoading BLIP captioning model on {device}...")
+    try:
+        blip_proc  = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        blip_model = BlipForConditionalGeneration.from_pretrained(
+            "Salesforce/blip-image-captioning-base"
+        ).to(device).eval()
+
+        for i in tqdm(range(0, len(paths), batch_size_blip), desc="BLIP captions"):
+            batch_paths = paths[i:i + batch_size_blip]
+            images, bpaths = [], []
+            for p in batch_paths:
+                try:
+                    images.append(Image.open(p).convert("RGB"))
+                    bpaths.append(p)
+                except Exception as e:
+                    print(f"  skip {p.name}: {e}")
+            if not images:
+                continue
+
+            inputs = blip_proc(images=images, return_tensors="pt").to(device)
+            with torch.no_grad():
+                out_ids = blip_model.generate(
+                    **inputs, max_new_tokens=64,
+                    num_beams=4, length_penalty=1.0,
+                )
+            captions = blip_proc.batch_decode(out_ids, skip_special_tokens=True)
+            for p, cap in zip(bpaths, captions):
+                results[p]["caption"] = cap.strip()
+
+        del blip_model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+    except Exception as e:
+        print(f"  BLIP captioning failed: {e}")
+
+    # ── CLIP ViT-B/32 zero-shot keyword tags ───────────────────────────────────
+    print(f"\nLoading CLIP ViT-B/32 for keyword tagging on {device}...")
+    try:
+        clip_model, _, clip_prep = open_clip.create_model_and_transforms(
+            "ViT-B-32", pretrained="openai", device=device
+        )
+        clip_tok = open_clip.get_tokenizer("ViT-B-32")
+        clip_model.eval()
+
+        # Encode the full vocabulary once
+        vocab_tokens = clip_tok(
+            [f"a photo of {t}" for t in CLIP_TAG_VOCAB]
+        ).to(device)
+        with torch.no_grad(), torch.amp.autocast(device):
+            vocab_feats = clip_model.encode_text(vocab_tokens)
+            vocab_feats = vocab_feats / vocab_feats.norm(dim=-1, keepdim=True)
+        vocab_feats = vocab_feats.cpu().float()   # (V, D)
+
+        for i in tqdm(range(0, len(paths), batch_size_clip), desc="CLIP tags"):
+            batch_paths = paths[i:i + batch_size_clip]
+            tensors, bpaths = [], []
+            for p in batch_paths:
+                try:
+                    img = Image.open(p).convert("RGB")
+                    tensors.append(clip_prep(img))
+                    bpaths.append(p)
+                except Exception as e:
+                    print(f"  skip {p.name}: {e}")
+            if not tensors:
+                continue
+
+            t = torch.stack(tensors).to(device)
+            with torch.no_grad(), torch.amp.autocast(device):
+                img_feats = clip_model.encode_image(t).cpu().float()
+                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
+
+            sims = img_feats @ vocab_feats.T   # (B, V)
+            topk_idx = torch.topk(sims, k=min(top_k, len(CLIP_TAG_VOCAB)), dim=1).indices
+            for p, idx in zip(bpaths, topk_idx.tolist()):
+                results[p]["tags"] = [CLIP_TAG_VOCAB[i] for i in idx]
+
+        del clip_model
+    except Exception as e:
+        print(f"  CLIP tagging failed: {e}")
+
+    return results
+
+
+# ── Perceptual hashing / duplicate detection ──────────────────────────────────
+
+def compute_phashes(paths: list[Path]) -> dict:
+    import imagehash
+    hashes = {}
+    for p in tqdm(paths, desc="Perceptual hashing"):
+        try:
+            hashes[p] = imagehash.phash(Image.open(p))
+        except Exception as e:
+            print(f"  hash error {p.name}: {e}")
+    return hashes
+
+
+def group_duplicates(hashes: dict, threshold: int = 6) -> list[list[Path]]:
+    paths = list(hashes.keys())
+    visited = set()
+    groups = []
+    for i, p in enumerate(paths):
+        if p in visited:
+            continue
+        group = [p]
+        visited.add(p)
+        for j in range(i + 1, len(paths)):
+            q = paths[j]
+            if q not in visited and (hashes[p] - hashes[q]) <= threshold:
+                group.append(q)
+                visited.add(q)
+        if len(group) > 1:
+            groups.append(group)
+    return groups
+
+
+# ── Face detection / clustering (facenet-pytorch + DBSCAN) ───────────────────
+
+def run_faces(paths: list[Path], device: str,
+              face_refs: dict | None = None,
+              min_prob: float = 0.90,
+              min_face_size: int = 80,
+              min_face_rel: float = 0.04,
+              eps: float = 0.50) -> tuple[dict, dict]:
+    """
+    Detect faces, embed with InceptionResnetV1(VGGFace2), cluster with DBSCAN.
+
+    Parameters
+    ----------
+    paths         : image paths to process
+    device        : 'cuda' or 'cpu'
+    face_refs     : {name: Path} — one reference photo per named person
+    min_prob      : minimum MTCNN detection confidence (default 0.90)
+    min_face_size : minimum absolute face width in pixels for MTCNN (default 80)
+                    Raises the floor so tiny background-crowd faces are never
+                    detected in the first place.
+    min_face_rel  : minimum face width as fraction of image width (default 0.04)
+                    Secondary filter — discards background faces that slip through.
+                    e.g. 0.04 means the face must be ≥ 4 % of the image width.
+    eps           : DBSCAN cosine-distance epsilon for identity clustering (default 0.50)
+
+    Returns
+    -------
+    face_data  : {path: [{"bbox":[x1,y1,x2,y2], "prob":f,
+                           "cluster_id":int, "name":str|None}, ...]}
+    img_sizes  : {path: (width, height)}  — only for images with detected faces
+    """
+    import torch
+    from facenet_pytorch import MTCNN, InceptionResnetV1
+    from sklearn.cluster import DBSCAN
+
+    print(f"\nInitialising face detector + embedder on {device}...")
+    # post_process=True → crops already normalised to [-1, 1] for InceptionResnetV1
+    mtcnn  = MTCNN(keep_all=True, device=device,
+                   min_face_size=min_face_size, margin=14, post_process=True)
+    resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+
+    # ── Phase 1: detect + embed every face ────────────────────────────────────
+    # all_faces entries: (path, face_slot_idx, embedding_np, bbox, prob)
+    all_faces: list[tuple] = []
+    img_sizes: dict[Path, tuple] = {}
+    n_filtered_rel = 0
+
+    for p in tqdm(paths, desc="Face detection"):
+        try:
+            img     = Image.open(p).convert("RGB")
+            w, h    = img.size
+            boxes, probs = mtcnn.detect(img)
+            if boxes is None:
+                continue
+
+            faces = mtcnn(img)   # (N, 3, 160, 160) float32 [-1,1], or None
+            if faces is None:
+                continue
+            if faces.dim() == 3:          # single face → add batch dim
+                faces = faces.unsqueeze(0)
+
+            # Keep only faces that pass probability AND relative-size thresholds
+            valid = []
+            for i, pv in enumerate(probs):
+                if pv is None or float(pv) < min_prob:
+                    continue
+                x1, y1, x2, y2 = boxes[i]
+                face_rel = (x2 - x1) / w if w else 0
+                if face_rel < min_face_rel:
+                    n_filtered_rel += 1
+                    continue
+                valid.append(i)
+
+            if not valid:
+                continue
+
+            img_sizes[p] = (w, h)
+            batch_t = faces[valid].to(device)
+            with torch.no_grad():
+                embs = resnet(batch_t).cpu().numpy()   # (len(valid), 512)
+
+            for rank, vi in enumerate(valid):
+                all_faces.append((p, vi, embs[rank],
+                                  boxes[vi].tolist(), float(probs[vi])))
+        except Exception as e:
+            print(f"  face error {p.name}: {e}")
+
+    if not all_faces:
+        print("  No faces detected.")
+        del resnet
+        return {}, img_sizes
+
+    print(f"  Detected {len(all_faces)} face instances in {len(img_sizes)} images "
+          f"(filtered out {n_filtered_rel} faces below rel-size {min_face_rel:.2f})")
+
+    # ── Phase 2: DBSCAN on L2-normalised embeddings (cosine metric) ───────────
+    emb_matrix = np.array([f[2] for f in all_faces])           # (M, 512)
+    norms      = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
+    emb_norm   = emb_matrix / np.maximum(norms, 1e-8)
+
+    # min_samples=1 → singletons become their own cluster (label ≥ 0)
+    # rather than noise (-1), so every face is visible in the viewer.
+    db     = DBSCAN(eps=eps, min_samples=1, metric='cosine').fit(emb_norm)
+    labels = db.labels_
+
+    n_clusters = len(set(labels))
+    print(f"  Identity clusters: {n_clusters}")
+
+    # ── Phase 3: cluster centroids ─────────────────────────────────────────────
+    cluster_ids       = [cid for cid in set(labels) if cid >= 0]
+    cluster_centroids = {
+        cid: emb_norm[labels == cid].mean(axis=0)
+        for cid in cluster_ids
+    }
+
+    # ── Phase 4: match reference photos to cluster IDs ────────────────────────
+    cluster_names: dict[int, str] = {}
+    if face_refs:
+        print("  Matching reference photos to clusters...")
+        for name, ref_path in face_refs.items():
+            try:
+                ref_img   = Image.open(ref_path).convert("RGB")
+                ref_crops = mtcnn(ref_img)
+                if ref_crops is None:
+                    print(f"    No face found in reference: {ref_path.name}")
+                    continue
+                if ref_crops.dim() == 3:
+                    ref_crops = ref_crops.unsqueeze(0)
+                with torch.no_grad():
+                    ref_emb = resnet(ref_crops[0:1].to(device)).cpu().numpy()[0]
+                ref_norm = ref_emb / max(float(np.linalg.norm(ref_emb)), 1e-8)
+
+                best_cid, best_dist = -1, 1.0
+                for cid, centroid in cluster_centroids.items():
+                    dist = 1.0 - float(ref_norm @ centroid)
+                    if dist < best_dist:
+                        best_dist, best_cid = dist, cid
+
+                MATCH_THRESHOLD = 0.40
+                if best_cid >= 0 and best_dist < MATCH_THRESHOLD:
+                    cluster_names[best_cid] = name
+                    print(f"    '{name}' → cluster {best_cid}  (dist={best_dist:.3f})")
+                else:
+                    print(f"    '{name}' → no match  (best dist={best_dist:.3f})")
+            except Exception as e:
+                print(f"    Reference error '{name}': {e}")
+
+    # ── Phase 5: build per-image face records ──────────────────────────────────
+    face_data: dict[Path, list] = {}
+    for idx, (p, _vi, _emb, box, prob) in enumerate(all_faces):
+        cid  = int(labels[idx])
+        name = cluster_names.get(cid) if cid >= 0 else None
+        face_data.setdefault(p, []).append({
+            "bbox":       [round(v, 1) for v in box],
+            "prob":       round(prob, 3),
+            "cluster_id": cid,
+            "name":       name,
+        })
+
+    del resnet
+    return face_data, img_sizes
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("folder")
+    ap.add_argument("--recurse",        action="store_true")
+    ap.add_argument("--out",            default=None)
+    ap.add_argument("--dup-threshold",  type=int,   default=6)
+    ap.add_argument("--backend",        choices=["clip-iqa", "para", "both"],
+                    default="para",
+                    help="Aesthetic scoring backend (default: para)")
+    ap.add_argument("--no-clip",        action="store_true",
+                    help="Skip all aesthetic scoring")
+    ap.add_argument("--caption",        action="store_true",
+                    help="Add BLIP captions + CLIP keyword tags (slower)")
+    ap.add_argument("--top-tags",       type=int, default=8,
+                    help="Number of keyword tags per image (default: 8)")
+    ap.add_argument("--faces",          action="store_true",
+                    help="Detect + cluster faces (requires facenet-pytorch)")
+    ap.add_argument("--face-ref",       action="append", default=[], metavar="NAME=PATH",
+                    help="Named reference photo, e.g. --face-ref 'Aja=photo.jpg'")
+    ap.add_argument("--face-min-size",  type=int,   default=80, metavar="PX",
+                    help="Min face width in pixels for MTCNN (default: 80)")
+    ap.add_argument("--face-min-rel",   type=float, default=0.04, metavar="F",
+                    help="Min face width as fraction of image width (default: 0.04)")
+    ap.add_argument("--face-eps",       type=float, default=0.50, metavar="F",
+                    help="DBSCAN cosine-distance epsilon for clustering (default: 0.50)")
+    ap.add_argument("--move-junk",      default=None)
+    ap.add_argument("--junk-threshold", type=float, default=0.25)
+    ap.add_argument("--top",            type=int,   default=30)
+    args = ap.parse_args()
+
+    folder = Path(args.folder)
+    if not folder.exists():
+        print(f"Error: {folder} does not exist"); sys.exit(1)
+
+    glob = "**/*" if args.recurse else "*"
+    paths = [p for p in folder.glob(glob)
+             if p.suffix.lower() in IMAGE_EXTENSIONS and p.is_file()]
+    print(f"Found {len(paths)} images in {folder}")
+    if not paths:
+        sys.exit(0)
+
+    use_clip_iqa = not args.no_clip and args.backend in ("clip-iqa", "both")
+    use_para     = not args.no_clip and args.backend in ("para",     "both")
+
+    # ── Sharpness ──
+    print("\nComputing sharpness (Laplacian variance)...")
+    raw_sharp  = {p: laplacian_variance(p) for p in tqdm(paths, desc="Sharpness")}
+    norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
+    sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
+
+    # ── CLIP-IQA ──
+    clip_iqa_scores: dict[Path, float] = {}
+    if use_clip_iqa:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print()
+        clip_iqa_scores = run_clip_iqa(paths, device)
+
+    # ── PARA ──
+    para_raw: dict[Path, dict] = {}
+    if use_para:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print()
+        para_raw = run_para(paths, device)
+
+    # ── Primary aesthetic for combined score ──
+    def primary_aes(p: Path) -> float:
+        if use_para:
+            return para_raw[p]["aesthetic"] / 5.0
+        if use_clip_iqa:
+            return clip_iqa_scores[p]
+        return 0.5
+
+    combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
+
+    # ── Duplicate detection ──
+    print("\nComputing perceptual hashes for duplicate detection...")
+    hashes     = compute_phashes(paths)
+    dup_groups = group_duplicates(hashes, threshold=args.dup_threshold)
+    path_to_group: dict[Path, int] = {}
+    for gid, group in enumerate(dup_groups):
+        for p in group:
+            path_to_group[p] = gid
+
+    # ── BLIP captions + CLIP keyword tags ──
+    captions: dict[Path, dict] = {}
+    if args.caption:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        captions = run_caption_and_tags(paths, device, top_k=args.top_tags)
+
+    # ── Face detection + identity clustering ──
+    face_data:      dict[Path, list]  = {}
+    face_img_sizes: dict[Path, tuple] = {}
+    if args.faces:
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        refs: dict[str, Path] = {}
+        for item in args.face_ref:
+            if "=" in item:
+                name, rpath = item.split("=", 1)
+                refs[name.strip()] = Path(rpath.strip())
+            else:
+                print(f"  Warning: --face-ref '{item}' ignored (expected NAME=PATH)")
+        face_data, face_img_sizes = run_faces(
+            paths, device,
+            face_refs=refs or None,
+            min_face_size=args.face_min_size,
+            min_face_rel=args.face_min_rel,
+            eps=args.face_eps,
+        )
+
+    # ── Build report ──
+    records = []
+    for p in paths:
+        rec: dict = {
+            "path":          str(p),
+            "filename":      p.name,
+            "sharpness":     round(sharpness[p], 4),
+            "combined":      round(combined[p], 4),
+            "dup_group":     path_to_group.get(p),
+            "raw_laplacian": round(raw_sharp[p], 2),
+        }
+        if use_clip_iqa:
+            rec["clip_iqa"] = round(clip_iqa_scores.get(p, 0.5), 4)
+        if use_para:
+            pr = para_raw[p]
+            rec["para_aesthetic"]   = round(pr["aesthetic"]   / 5.0, 4)
+            rec["para_quality"]     = round(pr["quality"]     / 5.0, 4)
+            rec["para_composition"] = round(pr["composition"] / 5.0, 4)
+            rec["para_light"]       = round(pr["light"]       / 5.0, 4)
+            rec["para_color"]       = round(pr["color"]       / 5.0, 4)
+            rec["para_dof"]         = round(pr["dof"]         / 5.0, 4)
+            rec["para_content"]     = round(pr["content"]     / 5.0, 4)
+            if use_clip_iqa:
+                rec["combined_clip_iqa"] = round(
+                    0.4 * sharpness[p] + 0.6 * clip_iqa_scores[p], 4)
+                rec["combined_para"]     = round(
+                    0.4 * sharpness[p] + 0.6 * pr["aesthetic"] / 5.0, 4)
+        if not use_clip_iqa and not use_para:
+            rec["aesthetic"] = 0.5
+        if args.caption and p in captions:
+            rec["caption"] = captions[p].get("caption", "")
+            rec["tags"]    = captions[p].get("tags", [])
+        if args.faces:
+            rec["faces"] = face_data.get(p, [])
+            if p in face_img_sizes:
+                rec["imgw"], rec["imgh"] = face_img_sizes[p]
+        records.append(rec)
+
+    records.sort(key=lambda r: r["combined"])
+
+    out_path = Path(args.out) if args.out else folder / "audit_report.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        n_faces_images = sum(1 for r in records if r.get("faces"))
+        n_clusters = (
+            len({f["cluster_id"] for r in records
+                 for f in r.get("faces", []) if f["cluster_id"] >= 0})
+            if args.faces else 0
+        )
+        json.dump({
+            "folder":           str(folder),
+            "backend":          "none" if args.no_clip else args.backend,
+            "caption_model":    "blip-base+clip-b32" if args.caption else None,
+            "face_model":       "mtcnn+vggface2" if args.faces else None,
+            "total_images":     len(records),
+            "duplicate_groups": len(dup_groups),
+            "faces_images":     n_faces_images if args.faces else None,
+            "face_clusters":    n_clusters     if args.faces else None,
+            "images":           records,
+        }, f, indent=2, ensure_ascii=False)
+    print(f"\nReport saved: {out_path}")
+
+    # ── Console summary ──
+    print(f"\n{'='*80}")
+    print(f"WORST {args.top} images  (sorted by combined score, lower = worse)")
+    print(f"{'='*80}")
+
+    show_caption = args.caption and any(captions.get(p, {}).get("caption") for p in paths)
+
+    if args.backend == "both" and use_clip_iqa and use_para:
+        hdr = (f"  {'comb':>6}  {'sharp':>6}  {'IQA':>6}  "
+               f"{'PARA':>6}  {'qual':>6}  {'comp':>6}  {'dup':>5}  filename")
+        print(hdr)
+        print("  " + "  ".join(["-"*6]*6) + "  " + "-"*5 + "  " + "-"*30)
+        for r in records[:args.top]:
+            dup = f"G{r['dup_group']}" if r["dup_group"] is not None else ""
+            print(f"  {r['combined']:>6.3f}  {r['sharpness']:>6.3f}"
+                  f"  {r.get('clip_iqa',0):>6.3f}"
+                  f"  {r.get('para_aesthetic',0):>6.3f}"
+                  f"  {r.get('para_quality',0):>6.3f}"
+                  f"  {r.get('para_composition',0):>6.3f}"
+                  f"  {dup:>5}  {r['filename']}")
+            if show_caption and r.get("caption"):
+                tags = ", ".join(r.get("tags", [])[:6])
+                print(f"  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>5}"
+                      f"  \033[2m{r['caption'][:90]}\033[0m")
+                if tags:
+                    print(f"  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>6}  {'':>5}"
+                          f"  \033[2mtags: {tags}\033[0m")
+    else:
+        aes_key = ("clip_iqa"        if use_clip_iqa
+                   else "para_aesthetic" if use_para
+                   else "aesthetic")
+        aes_lbl = "IQA" if use_clip_iqa else ("PARA" if use_para else "aesth")
+        print(f"  {'score':>6}  {'sharp':>6}  {aes_lbl:>6}  {'dup':>5}  filename")
+        print(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*5}  {'-'*40}")
+        for r in records[:args.top]:
+            dup = f"G{r['dup_group']}" if r["dup_group"] is not None else ""
+            print(f"  {r['combined']:>6.3f}  {r['sharpness']:>6.3f}  "
+                  f"{r.get(aes_key, 0.5):>6.3f}  {dup:>5}  {r['filename']}")
+            if show_caption and r.get("caption"):
+                tags = ", ".join(r.get("tags", [])[:6])
+                print(f"  {'':>6}  {'':>6}  {'':>6}  {'':>5}"
+                      f"  \033[2m{r['caption'][:90]}\033[0m")
+                if tags:
+                    print(f"  {'':>6}  {'':>6}  {'':>6}  {'':>5}"
+                          f"  \033[2mtags: {tags}\033[0m")
+
+    if dup_groups:
+        print(f"\n{'='*80}")
+        print(f"DUPLICATE GROUPS  ({len(dup_groups)} groups — keep highest combined score)")
+        print(f"{'='*80}")
+        for gid, group in enumerate(dup_groups):
+            ranked = sorted(group, key=lambda p: -combined[p])
+            print(f"\n  Group {gid}  ({len(group)} images):")
+            for p in ranked:
+                marker = "KEEP" if p == ranked[0] else "del?"
+                cap = ""
+                if show_caption and captions.get(p, {}).get("caption"):
+                    cap = "  — " + captions[p]["caption"][:60]
+                print(f"    [{marker}] {combined[p]:.3f}  {p.name}{cap}")
+
+    # ── Move junk ──
+    if args.move_junk:
+        junk_dir = Path(args.move_junk)
+        junk_dir.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for r in records:
+            if r["combined"] < args.junk_threshold:
+                src = Path(r["path"])
+                dst = junk_dir / src.name
+                shutil.move(str(src), str(dst))
+                moved += 1
+        print(f"\nMoved {moved} images scoring < {args.junk_threshold} to {junk_dir}")
+
+    print(f"\nDone. Total: {len(records)} images, {len(dup_groups)} duplicate groups.")
+
+
+if __name__ == "__main__":
+    main()
