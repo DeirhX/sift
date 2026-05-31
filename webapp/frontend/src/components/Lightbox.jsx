@@ -1,5 +1,9 @@
 import { useEffect, useCallback, useState } from 'react'
 import { fullUrl, thumbUrl, fetchLocations, revealPath } from '../api.js'
+import { fmt, aestheticScore } from '../format.js'
+
+const qColor = (v) =>
+  v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
 
 // Render a filesystem path as breadcrumb segments: clicking a directory opens
 // it in the OS file manager; clicking the filename reveals the file selected.
@@ -73,10 +77,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
   }, [item?.id])
 
   if (!item) return null
-  const aes = item.para_aesthetic ?? item.clip_iqa
-  const fmt = (v) => (v == null ? '–' : v.toFixed(2))
-  const qColor = (v) =>
-    v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
+  const aes = aestheticScore(item)
 
   return (
     <div className="lightbox" onClick={() => setIndex(null)}>
