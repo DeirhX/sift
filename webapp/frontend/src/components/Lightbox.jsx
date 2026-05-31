@@ -98,6 +98,15 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
     return () => { alive = false }
   }, [item?.id])
 
+  // Rich tooltip for strip thumbnails: name, key scores, then caption.
+  const describe = (it) => {
+    const parts = [it.filename,
+      `Q ${fmt(it.combined)} · Sh ${fmt(it.sharpness)} · Ae ${fmt(aestheticScore(it))}`]
+    if (it.portrait != null) parts.push(`Portrait ${fmt(it.portrait)}`)
+    if (it.caption) parts.push(it.caption)
+    return parts.join('\n')
+  }
+
   if (!item) return null
   const aes = aestheticScore(item)
 
@@ -173,7 +182,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
                 + (it.decision === 'del' ? ' is-del' : '')
                 + (it.decision === 'keep' ? ' is-keep' : '')}
               onClick={() => setIndex(i)}
-              title={it.filename}
+              title={describe(it)}
             >
               <img src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
             </button>
