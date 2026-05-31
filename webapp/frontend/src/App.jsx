@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchMeta, fetchImages, fetchGroups, setDecision as apiSetDecision } from './api.js'
 import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState.js'
@@ -22,6 +22,36 @@ export default function App() {
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
+  const searchRef = useRef(null)
+
+  const focusGrid = useCallback(() => {
+    document.querySelector('.grid-scroll')?.focus()
+  }, [])
+
+  // Global shortcut: "/" jumps to the search box (unless already typing or a
+  // modal is open). Pairs with the grid's arrow-key navigation.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return
+      if (lightboxIdx != null || showAnalyze || showSettings) return
+      e.preventDefault()
+      searchRef.current?.focus()
+      searchRef.current?.select()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightboxIdx, showAnalyze, showSettings])
+
+  // Close the lightbox and hand keyboard focus back to the grid so arrow
+  // navigation resumes where it left off.
+  const closeLightbox = useCallback((v) => {
+    setLightboxIdx((i) => {
+      const n = typeof v === 'function' ? v(i) : v
+      if (n == null) setTimeout(focusGrid, 0)
+      return n
+    })
+  }, [focusGrid])
 
   // Mirror filter + view state into the URL (replace, so we don't spam history).
   useEffect(() => {
@@ -154,10 +184,14 @@ export default function App() {
             <input
               className="search"
               type="text"
-              placeholder="Search captions…"
+              placeholder="Search captions…  ( / )"
+              ref={searchRef}
               key={filters.q}
               defaultValue={filters.q}
-              onKeyDown={(e) => { if (e.key === 'Enter') updateFilter({ q: e.target.value }) }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { updateFilter({ q: e.target.value }); focusGrid() }
+                else if (e.key === 'Escape') { e.target.blur(); focusGrid() }
+              }}
               onBlur={(e) => { if (e.target.value !== filters.q) updateFilter({ q: e.target.value }) }}
             />
           )}
@@ -208,7 +242,7 @@ export default function App() {
         <Lightbox
           items={items}
           index={lightboxIdx}
-          setIndex={setLightboxIdx}
+          setIndex={closeLightbox}
           onDecision={setDecision}
         />
       )}

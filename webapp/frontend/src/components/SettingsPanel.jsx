@@ -27,6 +27,14 @@ export default function SettingsPanel({ onClose, onChange }) {
     getRoots().then((d) => setRoots(d.photo_roots)).catch(() => setRoots([]))
   }, [])
 
+  // Escape closes the panel — unless the autocomplete list is open, in which
+  // case the input's own handler swallows Escape to dismiss suggestions first.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && !(open && suggest.length)) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, suggest.length, onClose])
+
   // Keep the highlighted row scrolled into view during keyboard nav.
   useEffect(() => {
     if (hi < 0 || !listRef.current) return
