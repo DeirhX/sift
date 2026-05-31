@@ -1,5 +1,40 @@
 import { useEffect, useCallback, useState } from 'react'
-import { fullUrl, thumbUrl, fetchLocations } from '../api.js'
+import { fullUrl, thumbUrl, fetchLocations, revealPath } from '../api.js'
+
+// Render a filesystem path as breadcrumb segments: clicking a directory opens
+// it in the OS file manager; clicking the filename reveals the file selected.
+function PathLink({ path }) {
+  const sep = path.includes('\\') ? '\\' : '/'
+  const parts = path.split(/[\\/]/)
+  const items = []
+  let acc = ''
+  parts.forEach((part, i) => {
+    if (i === 0) {
+      // Unix root (''), or a Windows drive ('E:') — anchor with a trailing sep.
+      acc = (part === '' ? '' : part) + sep
+      items.push({ label: part === '' ? sep : part, target: acc })
+    } else if (part !== '') {
+      acc = (acc.endsWith(sep) ? acc : acc + sep) + part
+      items.push({ label: part, target: acc })
+    }
+  })
+  const open = (target) => (e) => {
+    e.stopPropagation()
+    revealPath(target).catch(() => {})
+  }
+  return (
+    <span className="path-link">
+      {items.map((it, i) => (
+        <span key={i}>
+          {i > 0 && <span className="path-sep">{sep}</span>}
+          <span className="path-seg" title={`Open ${it.target}`} onClick={open(it.target)}>
+            {it.label}
+          </span>
+        </span>
+      ))}
+    </span>
+  )
+}
 
 // Full-resolution overlay with keyboard nav (←/→/Esc) and keep/del.
 // When `showStrip` is set, a small thumbnail strip lets you jump between
@@ -40,6 +75,8 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
   if (!item) return null
   const aes = item.para_aesthetic ?? item.clip_iqa
   const fmt = (v) => (v == null ? '–' : v.toFixed(2))
+  const qColor = (v) =>
+    v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
 
   return (
     <div className="lightbox" onClick={() => setIndex(null)}>
@@ -52,10 +89,16 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
       )}
       <img src={fullUrl(item.id)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
       <div className="lb-info" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <span className="q-pill big" style={{ background: qColor(item.combined) }} title="Composite quality">
+            Q {fmt(item.combined)}
+          </span>
           <b>{item.filename}</b>
-          <span>Q {fmt(item.combined)} · Sh {fmt(item.sharpness)} · Ae {fmt(aes)}</span>
-          {item.dup_group != null && <span>dup #{item.dup_group}</span>}
+          <span className="lb-sub">
+            Sh {fmt(item.sharpness)} · Ae {fmt(aes)}
+            {item.portrait != null && ` · Portrait ${fmt(item.portrait)}`}
+          </span>
+          {item.dup_group != null && <span className="lb-sub">dup #{item.dup_group}</span>}
           <div style={{ flex: 1 }} />
           <button
             className={'btn ' + (item.decision === 'keep' ? '' : '')}
@@ -80,15 +123,17 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
                   <div
                     key={l.id}
                     className={'lb-loc' + (l.id === item.id ? ' current' : '') + (l.exists ? '' : ' missing')}
-                    title={l.exists ? l.path : l.path + '  (file missing)'}
                   >
-                    {l.id === item.id ? '▶ ' : '   '}{l.path}{l.exists ? '' : '  (missing)'}
+                    {l.id === item.id ? '▶ ' : '\u00a0\u00a0\u00a0'}
+                    {l.exists ? <PathLink path={l.path} /> : <span>{l.path}  (missing)</span>}
                   </div>
                 ))}
               </>
             ) : (
-              <div className="lb-loc" title={locs.locations[0]?.path}>
-                {locs.locations[0]?.path}
+              <div className="lb-loc">
+                {locs.locations[0]?.exists
+                  ? <PathLink path={locs.locations[0].path} />
+                  : <span>{locs.locations[0]?.path}  (missing)</span>}
               </div>
             )}
           </div>

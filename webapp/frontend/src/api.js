@@ -153,5 +153,16 @@ export async function fetchLocations(id) {
   return r.json()
 }
 
+// Open a file (selected in its folder) or a directory in the OS file manager.
+export async function revealPath(path) {
+  const r = await fetch('/api/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error('reveal failed')
+  return r.json()
+}
+
 export const thumbUrl = (id) => `/thumb/${id}`
 export const fullUrl = (id) => `/img/${id}`

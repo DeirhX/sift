@@ -14,6 +14,8 @@ import { thumbUrl, assignFace, deleteFace } from '../api.js'
 export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, personName, people = [], onFaceChange }) {
   const aes = item.para_aesthetic ?? item.clip_iqa
   const fmt = (v) => (v == null ? '–' : v.toFixed(2))
+  const qColor = (v) =>
+    v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
   const [editFace, setEditFace] = useState(null)   // index into item.faces
   const [busy, setBusy] = useState(false)
 
@@ -82,9 +84,11 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
 
       <div className="meta">
         <div className="scores">
-          <span>Q <b>{fmt(item.combined)}</b></span>
-          <span>Sh <b>{fmt(item.sharpness)}</b></span>
-          <span>Ae <b>{fmt(aes)}</b></span>
+          <span className="q-pill" style={{ background: qColor(item.combined) }} title="Composite quality">
+            Q {fmt(item.combined)}
+          </span>
+          <span className="score-sub">Sh <b>{fmt(item.sharpness)}</b></span>
+          <span className="score-sub">Ae <b>{fmt(aes)}</b></span>
         </div>
         {item.caption && <div className="caption">{item.caption}</div>}
         {item.tags?.length > 0 && (
