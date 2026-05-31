@@ -125,8 +125,6 @@ content rather than being orphaned.
 
 ## Other scripts
 
-- `generate_viewer.py` — build a standalone, self-contained `audit_viewer.html`
-  (older review UI; cluster names live in `localStorage`)
 - `reface.py` — re-run only face detection on an existing report
 - `classify_inspiration.py` — one-off CLIP folder classifier (paths hardcoded)
 
