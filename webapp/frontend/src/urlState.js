@@ -13,13 +13,16 @@ export const DEFAULT_FILTERS = {
   decision: 'all',
   tags: [],
   people: [],
+  folder: '',
+  folderRecursive: true,
   q: '',
 }
 
 const NUM_KEYS = ['scoreMin', 'scoreMax', 'sharpMin', 'sharpMax', 'aesMin', 'aesMax',
   'portraitMin', 'portraitMax']
 const LIST_KEYS = ['tags', 'people']
-const STR_KEYS = ['sort', 'dir', 'dupMode', 'decision', 'q']
+const STR_KEYS = ['sort', 'dir', 'dupMode', 'decision', 'folder', 'q']
+const BOOL_KEYS = ['folderRecursive']
 
 // Read filters + view out of a query string (e.g. window.location.search).
 export function parseState(search) {
@@ -41,6 +44,10 @@ export function parseState(search) {
     const v = p.get(k)
     if (v) filters[k] = v.split(',').filter(Boolean)
   }
+  for (const k of BOOL_KEYS) {
+    const v = p.get(k)
+    if (v != null) filters[k] = v !== 'false' && v !== '0'
+  }
 
   const view = p.get('view') === 'groups' ? 'groups' : 'grid'
   return { filters, view }
@@ -55,6 +62,9 @@ export function buildSearch(filters, view) {
   }
   for (const k of LIST_KEYS) {
     if (filters[k] && filters[k].length) p.set(k, filters[k].join(','))
+  }
+  for (const k of BOOL_KEYS) {
+    if (filters[k] !== DEFAULT_FILTERS[k]) p.set(k, String(filters[k]))
   }
   if (view !== 'grid') p.set('view', view)
 

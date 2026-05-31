@@ -1062,3 +1062,75 @@ select:focus, input:focus {
   color: var(--text-dim, #888);
   font-style: italic;
 }
+
+/* ── Folder hierarchy filter ───────────────────────────────────────────── */
+.folder-tree, .folder-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.folder-tree {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  background: var(--bg-card);
+}
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 4px;
+}
+.folder-row.selected { background: var(--accent); }
+.folder-row.selected .folder-name,
+.folder-row.selected .folder-count { color: #fff; }
+.folder-twist {
+  flex: 0 0 auto;
+  width: 16px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0;
+  line-height: 1;
+}
+.folder-twist.leaf { cursor: default; opacity: 0.4; }
+.folder-label {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  padding: 3px 4px;
+  font-size: 12px;
+}
+.folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.folder-count {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.folder-label:hover .folder-name { color: var(--accent); }
+.folder-row.selected .folder-label:hover .folder-name { color: #fff; }
+.folder-subtoggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.folder-subtoggle input { margin: 0; }

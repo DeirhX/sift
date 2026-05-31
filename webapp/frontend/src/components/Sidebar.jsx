@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import ApplyPanel from './ApplyPanel.jsx'
 import RangeSlider from './RangeSlider.jsx'
+import FolderTree from './FolderTree.jsx'
 import { renameCluster, mergeClusters } from '../api.js'
 
 // Left filter panel: sort, score/sharpness/aesthetic ranges, dup mode,
@@ -151,6 +152,8 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
           )}
         </div>
       )}
+
+      <FolderTree folders={meta?.folders} filters={filters} updateFilter={updateFilter} />
 
       {tags.length > 0 && (
         <div className="filter-group">
