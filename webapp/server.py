@@ -75,11 +75,15 @@ def get_meta():
         meta = {k: v for k, v in conn.execute("SELECT key, value FROM meta")}
 
         clusters = [
-            {"cluster_id": r["cluster_id"], "name": r["name"],
-             "count": conn.execute(
-                 "SELECT COUNT(*) FROM faces WHERE cluster_id=?",
-                 (r["cluster_id"],)).fetchone()[0]}
-            for r in conn.execute("SELECT cluster_id, name FROM clusters ORDER BY cluster_id")
+            c for c in (
+                {"cluster_id": r["cluster_id"], "name": r["name"],
+                 "count": conn.execute(
+                     "SELECT COUNT(*) FROM faces WHERE cluster_id=?",
+                     (r["cluster_id"],)).fetchone()[0]}
+                for r in conn.execute(
+                    "SELECT cluster_id, name FROM clusters ORDER BY cluster_id"))
+            # Hide clusters drained by manual reassignment/deletion.
+            if c["count"] > 0
         ]
 
         tags = [
@@ -148,39 +152,18 @@ SORT_COLUMNS = {
 }
 
 
-@app.get("/api/images")
-def get_images(
-    offset: int = 0,
-    limit:  int = Query(60, le=300),
-    sort:   str = "combined",
-    dir:    str = "asc",
-    score_min: float = 0.0, score_max: float = 1.0,
-    sharp_min: float = 0.0, sharp_max: float = 1.0,
-    aes_min:   float = 0.0, aes_max:   float = 1.0,
-    tags:    str | None = None,     # comma-separated, OR match
-    people:  str | None = None,     # comma-separated cluster ids, OR match
-    dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
-    decision: str = "all",          # all | keep | del | unmarked
-    q:       str | None = None,     # caption text search
-):
+def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
+                 aes_min, aes_max, tags, people, q, decision):
+    """Build the shared image-level WHERE clauses + params used by both
+    /api/images and /api/groups. Clauses reference alias `i` (images) and
+    `d` (decisions LEFT JOIN on content hash)."""
     where = ["i.combined BETWEEN ? AND ?",
              "i.sharpness BETWEEN ? AND ?"]
     params: list = [score_min, score_max, sharp_min, sharp_max]
 
-    # Aesthetic range only constrains rows that have a score
+    # Aesthetic range only constrains rows that have a score.
     where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
     params += [aes_min, aes_max]
-
-    if dup_mode == "groups-only":
-        where.append("i.dup_group IS NOT NULL")
-    elif dup_mode == "no-groups":
-        where.append("i.dup_group IS NULL")
-    elif dup_mode == "hide-dups":
-        # keep only the best-scoring representative of each duplicate group
-        where.append(
-            "(i.dup_group IS NULL OR i.id = ("
-            " SELECT id FROM images i2 WHERE i2.dup_group = i.dup_group"
-            " ORDER BY i2.combined DESC, i2.id ASC LIMIT 1))")
 
     if tags:
         tag_list = [t for t in tags.split(",") if t]
@@ -203,14 +186,49 @@ def get_images(
     elif decision == "unmarked":
         where.append("d.decision IS NULL")
 
+    if q:
+        if _has_fts(conn):
+            where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
+            params.append(q)
+        else:
+            where.append("i.caption LIKE ?")
+            params.append(f"%{q}%")
+
+    return where, params
+
+
+@app.get("/api/images")
+def get_images(
+    offset: int = 0,
+    limit:  int = Query(60, le=300),
+    sort:   str = "combined",
+    dir:    str = "asc",
+    score_min: float = 0.0, score_max: float = 1.0,
+    sharp_min: float = 0.0, sharp_max: float = 1.0,
+    aes_min:   float = 0.0, aes_max:   float = 1.0,
+    tags:    str | None = None,     # comma-separated, OR match
+    people:  str | None = None,     # comma-separated cluster ids, OR match
+    dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
+    decision: str = "all",          # all | keep | del | unmarked
+    q:       str | None = None,     # caption text search
+):
     with db() as conn:
-        if q:
-            if _has_fts(conn):
-                where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
-                params.append(q)
-            else:
-                where.append("i.caption LIKE ?")
-                params.append(f"%{q}%")
+        where, params = _image_where(
+            conn, score_min=score_min, score_max=score_max,
+            sharp_min=sharp_min, sharp_max=sharp_max,
+            aes_min=aes_min, aes_max=aes_max,
+            tags=tags, people=people, q=q, decision=decision)
+
+        if dup_mode == "groups-only":
+            where.append("i.dup_group IS NOT NULL")
+        elif dup_mode == "no-groups":
+            where.append("i.dup_group IS NULL")
+        elif dup_mode == "hide-dups":
+            # keep only the best-scoring representative of each duplicate group
+            where.append(
+                "(i.dup_group IS NULL OR i.id = ("
+                " SELECT id FROM images i2 WHERE i2.dup_group = i.dup_group"
+                " ORDER BY i2.combined DESC, i2.id ASC LIMIT 1))")
 
         sort_col = SORT_COLUMNS.get(sort, "i.combined")
         sort_dir = "DESC" if dir.lower() == "desc" else "ASC"
@@ -245,9 +263,10 @@ def _rows_to_items(conn, rows) -> list[dict]:
     if ids:
         ph = ",".join("?" * len(ids))
         for fr in conn.execute(
-            f"""SELECT image_id, x1, y1, x2, y2, prob, cluster_id
+            f"""SELECT id, image_id, x1, y1, x2, y2, prob, cluster_id
                 FROM faces WHERE image_id IN ({ph})""", ids):
             faces_by_img[fr["image_id"]].append({
+                "id": fr["id"],
                 "bbox": [fr["x1"], fr["y1"], fr["x2"], fr["y2"]],
                 "prob": fr["prob"], "cluster_id": fr["cluster_id"],
             })
@@ -283,23 +302,55 @@ def get_groups(
     offset: int = 0,
     limit:  int = Query(40, le=200),
     order:  str = "size",          # size | id
+    score_min: float = 0.0, score_max: float = 1.0,
+    sharp_min: float = 0.0, sharp_max: float = 1.0,
+    aes_min:   float = 0.0, aes_max:   float = 1.0,
+    tags:    str | None = None,
+    people:  str | None = None,
+    decision: str = "all",
+    q:       str | None = None,
 ):
     """Return duplicate groups (paginated by group), each with all of its
-    member photos ordered best-first. Powers the stacked 'Groups' view."""
+    member photos ordered best-first. The same filters as /api/images apply:
+    a group is included when at least one of its members matches, but every
+    member is returned so the full duplicate set stays reviewable."""
     order_sql = "c DESC, dup_group ASC" if order == "size" else "dup_group ASC"
     with db() as conn:
-        total = conn.execute(
-            "SELECT COUNT(DISTINCT dup_group) FROM images WHERE dup_group IS NOT NULL"
-        ).fetchone()[0]
+        where, params = _image_where(
+            conn, score_min=score_min, score_max=score_max,
+            sharp_min=sharp_min, sharp_max=sharp_max,
+            aes_min=aes_min, aes_max=aes_max,
+            tags=tags, people=people, q=q, decision=decision)
+        where.append("i.dup_group IS NOT NULL")
+        where_sql = " AND ".join(where)
+
+        # dup_groups with at least one member passing the filters
+        qual = (f"SELECT DISTINCT i.dup_group FROM images i "
+                f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                f"WHERE {where_sql}")
+
+        total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
 
         grp_rows = conn.execute(
             f"""SELECT dup_group, COUNT(*) c
-                FROM images WHERE dup_group IS NOT NULL
+                FROM images WHERE dup_group IN ({qual})
                 GROUP BY dup_group
                 ORDER BY {order_sql}
                 LIMIT ? OFFSET ?""",
-            (limit, offset),
+            params + [limit, offset],
         ).fetchall()
+
+        page_gids = [gr["dup_group"] for gr in grp_rows]
+
+        # Which member ids on this page actually pass the filters — so the UI
+        # can show the full group but flag the members outside the filter.
+        match_ids: set[int] = set()
+        if page_gids:
+            gph = ",".join("?" * len(page_gids))
+            match_sql = (f"SELECT i.id FROM images i "
+                         f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                         f"WHERE {where_sql} AND i.dup_group IN ({gph})")
+            match_ids = {r[0] for r in conn.execute(match_sql, params + page_gids)}
 
         groups = []
         for gr in grp_rows:
@@ -313,7 +364,12 @@ def get_groups(
                 (gid,),
             ).fetchall()
             items = _rows_to_items(conn, members)
-            groups.append({"dup_group": gid, "count": len(items), "items": items})
+            n_match = 0
+            for it in items:
+                it["matches"] = it["id"] in match_ids
+                n_match += it["matches"]
+            groups.append({"dup_group": gid, "count": len(items),
+                           "match_count": n_match, "items": items})
 
     return {"total": total, "offset": offset, "limit": limit, "groups": groups}
 
@@ -395,6 +451,80 @@ def rename_cluster(payload: dict = Body(...)):
     with db() as conn:
         conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
                      (int(cid), name or None))
+        conn.commit()
+    return {"ok": True}
+
+
+def _next_cluster_id(conn) -> int:
+    """Smallest unused cluster id (>= 0), considering both named clusters
+    and assigned faces so we never collide with an existing identity."""
+    m1 = conn.execute("SELECT MAX(cluster_id) FROM clusters").fetchone()[0]
+    m2 = conn.execute("SELECT MAX(cluster_id) FROM faces").fetchone()[0]
+    return max(m1 if m1 is not None else -1,
+               m2 if m2 is not None else -1) + 1
+
+
+@app.post("/api/clusters/merge")
+def merge_clusters(payload: dict = Body(...)):
+    """Reassign every face of the `from` cluster(s) into `into`, then drop the
+    now-empty source cluster name rows. Pure DB edit — no re-embedding."""
+    into = payload.get("into")
+    frm = payload.get("from")
+    if into is None or frm is None:
+        raise HTTPException(400, "from and into required")
+    into = int(into)
+    if isinstance(frm, (int, str)):
+        frm = [frm]
+    frm = [int(c) for c in frm if int(c) != into]
+    if not frm:
+        return {"ok": True, "moved": 0}
+    with db() as conn:
+        ph = ",".join("?" * len(frm))
+        cur = conn.execute(
+            f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
+        moved = cur.rowcount
+        conn.execute(f"DELETE FROM clusters WHERE cluster_id IN ({ph})", frm)
+        conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
+                     (into,))
+        conn.commit()
+    return {"ok": True, "moved": moved}
+
+
+@app.post("/api/faces/{face_id}/assign")
+def assign_face(face_id: int, payload: dict = Body(...)):
+    """Move one face box to a different person. Either pass an existing
+    `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
+    fresh identity. Survives only until the next build_db ingest."""
+    with db() as conn:
+        row = conn.execute("SELECT image_id FROM faces WHERE id=?", (face_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "face not found")
+        if payload.get("new_person"):
+            target = _next_cluster_id(conn)
+            conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
+                         (target, payload.get("name") or None))
+        else:
+            cid = payload.get("cluster_id")
+            if cid is None:
+                raise HTTPException(400, "cluster_id or new_person required")
+            target = int(cid)
+            conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
+                         (target,))
+        conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
+        conn.commit()
+    return {"ok": True, "cluster_id": target}
+
+
+@app.delete("/api/faces/{face_id}")
+def delete_face(face_id: int):
+    """Drop a false-positive face box and decrement the image's face count."""
+    with db() as conn:
+        row = conn.execute("SELECT image_id FROM faces WHERE id=?", (face_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "face not found")
+        conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
+        conn.execute("UPDATE images SET n_faces = MAX(0, n_faces - 1) WHERE id=?",
+                     (row["image_id"],))
         conn.commit()
     return {"ok": True}
 

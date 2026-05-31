@@ -11,6 +11,11 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
   const [sel, setSel] = useState(0)
   const [full, setFull] = useState(false)
 
+  // How many members pass the active filters (server-computed). When some
+  // don't, the filmstrip dims them so you still see the full duplicate set.
+  const matchCount = items.filter((it) => it.matches !== false).length
+  const someFiltered = matchCount < items.length
+
   // Keep selection valid if the group's contents change underneath us.
   useEffect(() => { if (sel >= items.length) setSel(0) }, [items.length, sel])
 
@@ -32,6 +37,17 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
   const cur = items[sel]
   const fmt = (v) => (v == null ? '–' : v.toFixed(2))
   const aes = cur.para_aesthetic ?? cur.clip_iqa
+
+  // Metric bars for whatever scores this image has (all on a 0–1 scale).
+  const metrics = [
+    ['Quality', cur.combined],
+    ['Sharpness', cur.sharpness],
+    ['Aesthetic', aes],
+    ['Composition', cur.para_composition],
+    ['Light', cur.para_light],
+  ].filter(([, v]) => v != null)
+  // Red (low) → amber → green (high), so quality reads at a glance.
+  const barColor = (v) => `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 65%, 45%)`
 
   const keepBestDeleteRest = () => {
     onDecisionsBulk(items.map((it, i) => ({
@@ -56,6 +72,9 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
           <div>
             <b>Duplicate group #{group.dup_group}</b>
             <span className="review-sub"> · {items.length} photos · viewing {sel + 1}/{items.length}</span>
+            {someFiltered && (
+              <span className="review-filternote"> · {matchCount}/{items.length} match filter</span>
+            )}
           </div>
           <div className="review-actions">
             <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
@@ -71,13 +90,15 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
               key={it.id}
               className={'strip-thumb'
                 + (i === sel ? ' active' : '')
+                + (it.matches === false ? ' filtered' : '')
                 + (it.decision === 'del' ? ' is-del' : '')
                 + (it.decision === 'keep' ? ' is-keep' : '')}
               onClick={() => setSel(i)}
-              title={it.filename}
+              title={it.matches === false ? `${it.filename} (outside filter)` : it.filename}
             >
               <img src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
               {it.id === best.id && <span className="strip-best">★</span>}
+              {it.matches === false && <span className="strip-filtered">⊘</span>}
               {it.decision && <span className={'strip-flag ' + it.decision} />}
             </button>
           ))}
@@ -87,6 +108,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
         <div className="review-hero" onClick={() => setFull(true)} title="Click for full size">
           <img src={thumbUrl(cur.id)} alt={cur.filename} />
           {cur.id === best.id && <span className="badge-best">★ best</span>}
+          {cur.matches === false && <span className="badge-filtered">outside filter</span>}
           {cur.decision && (
             <span className={'badge-decision ' + cur.decision}>
               {cur.decision === 'keep' ? 'KEEP' : 'DEL'}
@@ -99,9 +121,20 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
         <div className="review-herobar">
           <div className="herobar-info">
             <span className="herobar-name">{cur.filename}</span>
-            <span className="herobar-scores">
-              Q <b>{fmt(cur.combined)}</b> · Sh <b>{fmt(cur.sharpness)}</b> · Ae <b>{fmt(aes)}</b>
-            </span>
+            <div className="metric-bars">
+              {metrics.map(([label, v]) => (
+                <div className="metric" key={label} title={`${label}: ${fmt(v)}`}>
+                  <span className="metric-label">{label}</span>
+                  <div className="metric-track">
+                    <div
+                      className="metric-fill"
+                      style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%`, background: barColor(v) }}
+                    />
+                  </div>
+                  <span className="metric-val">{fmt(v)}</span>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="herobar-btns">
             <button

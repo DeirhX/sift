@@ -42,8 +42,8 @@ export default function App() {
   })
 
   const groups = useInfiniteQuery({
-    queryKey: ['groups'],
-    queryFn: ({ pageParam = 0 }) => fetchGroups(pageParam, GROUP_PAGE),
+    queryKey: ['groups', filters],
+    queryFn: ({ pageParam = 0 }) => fetchGroups(filters, pageParam, GROUP_PAGE),
     initialPageParam: 0,
     getNextPageParam: (last) => {
       const next = last.offset + last.limit
@@ -61,6 +61,13 @@ export default function App() {
   }, [])
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
+
+  // After a face/person edit, refetch everything that renders names or counts.
+  const refetchPeople = useCallback(() => {
+    qc.invalidateQueries({
+      predicate: (q) => ['images', 'groups', 'meta'].includes(q.queryKey[0]),
+    })
+  }, [qc])
 
   const toggleInList = useCallback((key, value) => {
     setFilters((f) => {
@@ -130,6 +137,7 @@ export default function App() {
         resetFilters={resetFilters}
         total={total}
         view={view}
+        onPeopleChange={refetchPeople}
       />
       <div className="main">
         <div className="topbar">
@@ -168,6 +176,7 @@ export default function App() {
               onOpen={setLightboxIdx}
               onDecision={setDecision}
               people={meta.data?.clusters ?? []}
+              onFaceChange={refetchPeople}
             />
           )
         ) : (
