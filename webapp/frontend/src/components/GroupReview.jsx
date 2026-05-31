@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { thumbUrl } from '../api.js'
+import { thumbUrl, fullUrl } from '../api.js'
 import Lightbox from './Lightbox.jsx'
 
 // Review a duplicate group: a filmstrip of members up top, a large preview
@@ -45,6 +45,9 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
     ['Aesthetic', aes],
     ['Composition', cur.para_composition],
     ['Light', cur.para_light],
+    ['Portrait', cur.portrait],
+    ['Face sharp', cur.face_sharp],
+    ['Expression', cur.face_expr],
   ].filter(([, v]) => v != null)
   // Red (low) → amber → green (high), so quality reads at a glance.
   const barColor = (v) => `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 65%, 45%)`
@@ -105,8 +108,8 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
         </div>
 
         {/* Large preview of the selected member */}
-        <div className="review-hero" onClick={() => setFull(true)} title="Click for full size">
-          <img src={thumbUrl(cur.id)} alt={cur.filename} />
+        <div className="review-hero" onClick={() => setFull(true)} title="Click to zoom">
+          <img key={cur.id} src={fullUrl(cur.id)} alt={cur.filename} />
           {cur.id === best.id && <span className="badge-best">★ best</span>}
           {cur.matches === false && <span className="badge-filtered">outside filter</span>}
           {cur.decision && (
@@ -114,7 +117,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
               {cur.decision === 'keep' ? 'KEEP' : 'DEL'}
             </span>
           )}
-          <span className="hero-hint">Click for full size</span>
+          <span className="hero-hint">Click to zoom</span>
         </div>
 
         {/* Selected member info + decide */}

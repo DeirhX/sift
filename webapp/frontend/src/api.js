@@ -14,6 +14,8 @@ function appendFilters(p, filters) {
   p.set('sharp_max', filters.sharpMax)
   p.set('aes_min', filters.aesMin)
   p.set('aes_max', filters.aesMax)
+  if (filters.portraitMin > 0) p.set('portrait_min', filters.portraitMin)
+  if (filters.portraitMax < 1) p.set('portrait_max', filters.portraitMax)
   p.set('decision', filters.decision)
   if (filters.tags?.length) p.set('tags', filters.tags.join(','))
   if (filters.people?.length) p.set('people', filters.people.join(','))
@@ -56,11 +58,6 @@ export async function setDecision(hash, decision) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hash, decision }),
   })
-}
-
-export async function fetchClusters() {
-  const r = await fetch('/api/clusters')
-  return r.json()
 }
 
 export async function renameCluster(cluster_id, name) {

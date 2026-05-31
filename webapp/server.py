@@ -7,12 +7,13 @@ Serves:
   GET  /api/images                faceted, sorted, paginated image query
   GET  /thumb/{id}                cached WebP thumbnail
   GET  /img/{id}                  full-resolution original (served on click)
-  GET  /api/decisions             { hash: 'keep'|'del' }
   POST /api/decisions             { hash, decision|null }   set one decision
                                   (decisions are keyed by content hash, so they
                                    survive the underlying files being moved)
-  GET  /api/clusters              [ {cluster_id, name} ]
   POST /api/clusters              { cluster_id, name|null }  rename a cluster
+  POST /api/clusters/merge        { from, into }   merge people
+  POST /api/faces/{id}/assign     { cluster_id | new_person } reassign a face
+  DELETE /api/faces/{id}          remove a false-positive face box
   GET  /api/export                full decisions export (kept/deleted/unmarked)
 
 In production it also serves the built React app from ./frontend/dist.
@@ -60,6 +61,26 @@ def db():
         conn.close()
 
 
+def _ensure_schema():
+    """Add columns/tables introduced after a DB may have been built, so the
+    server runs against an older photos.db without a rebuild. New scores stay
+    NULL until the next build_db ingest populates them."""
+    with db() as conn:
+        icols = {c[1] for c in conn.execute("PRAGMA table_info(images)")}
+        for col in ("face_sharp", "face_expr", "portrait"):
+            if col not in icols:
+                conn.execute(f"ALTER TABLE images ADD COLUMN {col} REAL")
+        fcols = {c[1] for c in conn.execute("PRAGMA table_info(faces)")}
+        for col in ("sharp", "expr"):
+            if col not in fcols:
+                conn.execute(f"ALTER TABLE faces ADD COLUMN {col} REAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS face_overrides (
+                   hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
+                   cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
+        conn.commit()
+
+
 def _has_fts(conn) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images_fts'"
@@ -92,15 +113,22 @@ def get_meta():
                 "SELECT tag, COUNT(*) c FROM image_tags GROUP BY tag ORDER BY c DESC")
         ]
 
+        has_portrait_col = "portrait" in {c[1] for c in conn.execute("PRAGMA table_info(images)")}
+
         rng = conn.execute(
             """SELECT MIN(combined) cmin, MAX(combined) cmax,
                       MIN(sharpness) smin, MAX(sharpness) smax,
                       MIN(para_aesthetic) amin, MAX(para_aesthetic) amax
                FROM images""").fetchone()
 
+        n_portrait = (conn.execute(
+            "SELECT COUNT(*) FROM images WHERE portrait IS NOT NULL").fetchone()[0]
+            if has_portrait_col else 0)
+
         counts = {
             "total":    conn.execute("SELECT COUNT(*) FROM images").fetchone()[0],
             "with_faces": conn.execute("SELECT COUNT(*) FROM images WHERE n_faces>0").fetchone()[0],
+            "with_portrait": n_portrait,
             "dup_groups": int(meta.get("duplicate_groups", 0)),
         }
 
@@ -111,6 +139,8 @@ def get_meta():
             "sharpness": _histogram(conn, "sharpness"),
             "aesthetic": _histogram(conn, "COALESCE(para_aesthetic, clip_iqa)"),
         }
+        if has_portrait_col:
+            histograms["portrait"] = _histogram(conn, "portrait")
 
     return {
         "meta": meta,
@@ -120,6 +150,7 @@ def get_meta():
         "counts": counts,
         "histograms": histograms,
         "has_para": rng["amin"] is not None,
+        "has_portrait": n_portrait > 0,
     }
 
 
@@ -148,12 +179,14 @@ SORT_COLUMNS = {
     "combined":  "i.combined",
     "sharpness": "i.sharpness",
     "aesthetic": "COALESCE(i.para_aesthetic, i.clip_iqa)",
+    "portrait":  "i.portrait",
     "filename":  "i.filename",
 }
 
 
 def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
-                 aes_min, aes_max, tags, people, q, decision):
+                 aes_min, aes_max, tags, people, q, decision,
+                 portrait_min=0.0, portrait_max=1.0):
     """Build the shared image-level WHERE clauses + params used by both
     /api/images and /api/groups. Clauses reference alias `i` (images) and
     `d` (decisions LEFT JOIN on content hash)."""
@@ -164,6 +197,11 @@ def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
     # Aesthetic range only constrains rows that have a score.
     where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
     params += [aes_min, aes_max]
+
+    # Portrait range only constrains rows that have a portrait score (faces).
+    if portrait_min > 0.0 or portrait_max < 1.0:
+        where.append("(i.portrait IS NOT NULL AND i.portrait BETWEEN ? AND ?)")
+        params += [portrait_min, portrait_max]
 
     if tags:
         tag_list = [t for t in tags.split(",") if t]
@@ -206,6 +244,7 @@ def get_images(
     score_min: float = 0.0, score_max: float = 1.0,
     sharp_min: float = 0.0, sharp_max: float = 1.0,
     aes_min:   float = 0.0, aes_max:   float = 1.0,
+    portrait_min: float = 0.0, portrait_max: float = 1.0,
     tags:    str | None = None,     # comma-separated, OR match
     people:  str | None = None,     # comma-separated cluster ids, OR match
     dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
@@ -217,6 +256,7 @@ def get_images(
             conn, score_min=score_min, score_max=score_max,
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
+            portrait_min=portrait_min, portrait_max=portrait_max,
             tags=tags, people=people, q=q, decision=decision)
 
         if dup_mode == "groups-only":
@@ -263,12 +303,13 @@ def _rows_to_items(conn, rows) -> list[dict]:
     if ids:
         ph = ",".join("?" * len(ids))
         for fr in conn.execute(
-            f"""SELECT id, image_id, x1, y1, x2, y2, prob, cluster_id
+            f"""SELECT id, image_id, x1, y1, x2, y2, prob, cluster_id, sharp, expr
                 FROM faces WHERE image_id IN ({ph})""", ids):
             faces_by_img[fr["image_id"]].append({
                 "id": fr["id"],
                 "bbox": [fr["x1"], fr["y1"], fr["x2"], fr["y2"]],
                 "prob": fr["prob"], "cluster_id": fr["cluster_id"],
+                "sharp": fr["sharp"], "expr": fr["expr"],
             })
         for tr in conn.execute(
             f"SELECT image_id, tag FROM image_tags WHERE image_id IN ({ph})", ids):
@@ -288,6 +329,8 @@ def _rows_to_items(conn, rows) -> list[dict]:
             "dup_group": d["dup_group"],
             "caption": d["caption"],
             "imgw": d["imgw"], "imgh": d["imgh"],
+            "face_sharp": d.get("face_sharp"), "face_expr": d.get("face_expr"),
+            "portrait": d.get("portrait"),
             "decision": d.get("decision"),
             "faces": faces_by_img.get(d["id"], []),
             "tags": tags_by_img.get(d["id"], []),
@@ -305,6 +348,7 @@ def get_groups(
     score_min: float = 0.0, score_max: float = 1.0,
     sharp_min: float = 0.0, sharp_max: float = 1.0,
     aes_min:   float = 0.0, aes_max:   float = 1.0,
+    portrait_min: float = 0.0, portrait_max: float = 1.0,
     tags:    str | None = None,
     people:  str | None = None,
     decision: str = "all",
@@ -320,6 +364,7 @@ def get_groups(
             conn, score_min=score_min, score_max=score_max,
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
+            portrait_min=portrait_min, portrait_max=portrait_max,
             tags=tags, people=people, q=q, decision=decision)
         where.append("i.dup_group IS NOT NULL")
         where_sql = " AND ".join(where)
@@ -403,13 +448,6 @@ def serve_full(image_id: int):
 
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────
 
-@app.get("/api/decisions")
-def get_decisions():
-    with db() as conn:
-        return {r["hash"]: r["decision"]
-                for r in conn.execute("SELECT hash, decision FROM decisions")}
-
-
 @app.post("/api/decisions")
 def set_decision(payload: dict = Body(...)):
     h = payload.get("hash")
@@ -435,13 +473,6 @@ def set_decision(payload: dict = Body(...)):
 
 # ── Cluster names ─────────────────────────────────────────────────────────────
 
-@app.get("/api/clusters")
-def get_clusters():
-    with db() as conn:
-        return [dict(r) for r in
-                conn.execute("SELECT cluster_id, name FROM clusters ORDER BY cluster_id")]
-
-
 @app.post("/api/clusters")
 def rename_cluster(payload: dict = Body(...)):
     cid = payload.get("cluster_id")
@@ -455,19 +486,44 @@ def rename_cluster(payload: dict = Body(...)):
     return {"ok": True}
 
 
-def _next_cluster_id(conn) -> int:
-    """Smallest unused cluster id (>= 0), considering both named clusters
-    and assigned faces so we never collide with an existing identity."""
-    m1 = conn.execute("SELECT MAX(cluster_id) FROM clusters").fetchone()[0]
-    m2 = conn.execute("SELECT MAX(cluster_id) FROM faces").fetchone()[0]
-    return max(m1 if m1 is not None else -1,
-               m2 if m2 is not None else -1) + 1
+# Manually-created people get ids in a high range so they never collide with
+# the detector's cluster ids (0..N) when build_db re-ingests a fresh report.
+MANUAL_CLUSTER_BASE = 100_000
+
+
+def _ensure_overrides(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS face_overrides (
+               hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
+               cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
+
+
+def _bbox_key(x1, y1, x2, y2) -> str:
+    """Canonical face-bbox key, identical to build_db.bbox_key, so a recorded
+    override re-binds to the same face after a rebuild."""
+    return ",".join(f"{round(float(v), 1)}" for v in (x1, y1, x2, y2))
+
+
+def _next_manual_cluster_id(conn) -> int:
+    m = conn.execute("SELECT MAX(cluster_id) FROM clusters WHERE cluster_id >= ?",
+                     (MANUAL_CLUSTER_BASE,)).fetchone()[0]
+    return (m + 1) if m is not None else MANUAL_CLUSTER_BASE
+
+
+def _record_override(conn, hash_, bbox, action, cluster_id=None):
+    if not hash_:
+        return
+    _ensure_overrides(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO face_overrides (hash, bbox, action, cluster_id) "
+        "VALUES (?,?,?,?)", (hash_, bbox, action, cluster_id))
 
 
 @app.post("/api/clusters/merge")
 def merge_clusters(payload: dict = Body(...)):
     """Reassign every face of the `from` cluster(s) into `into`, then drop the
-    now-empty source cluster name rows. Pure DB edit — no re-embedding."""
+    now-empty source cluster name rows. Pure DB edit — no re-embedding. Each
+    moved face is also recorded as a persistent override."""
     into = payload.get("into")
     frm = payload.get("from")
     if into is None or frm is None:
@@ -480,6 +536,14 @@ def merge_clusters(payload: dict = Body(...)):
         return {"ok": True, "moved": 0}
     with db() as conn:
         ph = ",".join("?" * len(frm))
+        # Record an override per moved face before the cluster_id changes.
+        moving = conn.execute(
+            f"""SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2
+                FROM faces f JOIN images i ON i.id = f.image_id
+                WHERE f.cluster_id IN ({ph})""", frm).fetchall()
+        for r in moving:
+            _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                             "assign", into)
         cur = conn.execute(
             f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
         moved = cur.rowcount
@@ -490,17 +554,25 @@ def merge_clusters(payload: dict = Body(...)):
     return {"ok": True, "moved": moved}
 
 
+def _face_key(conn, face_id):
+    r = conn.execute(
+        """SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2, f.image_id AS img
+           FROM faces f JOIN images i ON i.id = f.image_id WHERE f.id=?""",
+        (face_id,)).fetchone()
+    return r
+
+
 @app.post("/api/faces/{face_id}/assign")
 def assign_face(face_id: int, payload: dict = Body(...)):
     """Move one face box to a different person. Either pass an existing
     `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
-    fresh identity. Survives only until the next build_db ingest."""
+    fresh identity. Recorded as a persistent override so it survives re-ingest."""
     with db() as conn:
-        row = conn.execute("SELECT image_id FROM faces WHERE id=?", (face_id,)).fetchone()
-        if not row:
+        r = _face_key(conn, face_id)
+        if not r:
             raise HTTPException(404, "face not found")
         if payload.get("new_person"):
-            target = _next_cluster_id(conn)
+            target = _next_manual_cluster_id(conn)
             conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
                          (target, payload.get("name") or None))
         else:
@@ -511,20 +583,25 @@ def assign_face(face_id: int, payload: dict = Body(...)):
             conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
                          (target,))
         conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
+        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                         "assign", target)
         conn.commit()
     return {"ok": True, "cluster_id": target}
 
 
 @app.delete("/api/faces/{face_id}")
 def delete_face(face_id: int):
-    """Drop a false-positive face box and decrement the image's face count."""
+    """Drop a false-positive face box, decrement the image's face count, and
+    record a persistent override so it stays deleted across re-ingest."""
     with db() as conn:
-        row = conn.execute("SELECT image_id FROM faces WHERE id=?", (face_id,)).fetchone()
-        if not row:
+        r = _face_key(conn, face_id)
+        if not r:
             raise HTTPException(404, "face not found")
         conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
         conn.execute("UPDATE images SET n_faces = MAX(0, n_faces - 1) WHERE id=?",
-                     (row["image_id"],))
+                     (r["img"],))
+        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                         "delete")
         conn.commit()
     return {"ok": True}
 
@@ -719,6 +796,7 @@ def main() -> None:
 
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")
+    _ensure_schema()
     _mount_frontend()
 
     import uvicorn

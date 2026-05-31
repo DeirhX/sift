@@ -29,3 +29,8 @@ huggingface_hub
 # Comment this out if you never use the face features; it drags in an older
 # torch-dependent stack.
 facenet-pytorch
+
+# ── Dev: test suite (pytest -q) ─────────────────────────────────────────────
+# httpx backs FastAPI's TestClient. Not needed at runtime.
+pytest
+httpx

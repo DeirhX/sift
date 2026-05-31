@@ -27,6 +27,9 @@ Options:
                         e.g.  --face-ref "Aja=aja_reference.jpg"
                         The cluster closest to the reference (cosine dist < 0.40)
                         is automatically labelled with that name.
+  --face-expr           Score portrait expression quality per face (CLIP ViT-B/32).
+                        Requires --faces. Per-face sharpness is scored automatically
+                        with --faces; this adds a coarse pleasant-vs-grimace score.
   --move-junk <path>    Move images scoring below --junk-threshold to this folder
   --junk-threshold <f>  Combined score threshold for --move-junk (0-1, default: 0.25)
   --top <n>             Print top-N worst images to console (default: 30)
@@ -48,6 +51,13 @@ Scores (all 0-1, higher = better):
   para_*           PARA quality/composition/light/color/dof/content heads / 5
   combined         0.4 * sharpness + 0.6 * primary_aesthetic
                    (primary = PARA aesthetic if available, else CLIP-IQA)
+
+Per-face scores (with --faces; stored on each face in the report):
+  sharp            Face-region Laplacian variance, normalised across all faces
+  expr             Portrait expression quality (with --face-expr); 0-1, higher
+                   = more flattering (pleasant vs awkward/grimace)
+  build_db aggregates the largest face per image into image-level
+  face_sharp / face_expr / portrait columns for sorting and filtering.
 """
 
 import sys
@@ -82,6 +92,24 @@ QUALITY_PAIRS = [
 
 PARA_KEYS = ["aesthetic", "quality", "composition", "light", "color", "dof", "content"]
 
+# ── Portrait expression bipolar prompts (CLIP ViT-B/32, on face crops) ────────
+# Coarse "is this a flattering expression" signal. CLIP is weak at fine facial
+# state, so these stay deliberately high-level (pleasant vs awkward/grimace).
+# We intentionally do NOT probe eye state here — closed-eye detection needs
+# eyelid landmarks, not CLIP.
+EXPRESSION_PAIRS = [
+    ("a flattering portrait with a pleasant, natural expression",
+     "an unflattering portrait with an awkward, distorted expression"),
+    ("a person with a relaxed, natural face",
+     "a person making a strange grimace"),
+    ("a nicely captured portrait of a person",
+     "a person caught at a bad moment with a contorted face"),
+]
+
+# Face-crop normalisation size so Laplacian variance is comparable across faces
+# of different pixel sizes (detail density, not absolute resolution).
+FACE_SHARP_PX = 160
+
 
 # ── Sharpness ────────────────────────────────────────────────────────────────
 
@@ -94,6 +122,80 @@ def laplacian_variance(path: Path) -> float:
         scale = 1920 / max(h, w)
         img = cv2.resize(img, (int(w * scale), int(h * scale)))
     return float(cv2.Laplacian(img, cv2.CV_64F).var())
+
+
+def face_laplacian_variance(pil_img, box) -> float:
+    """Laplacian variance of a single face region, normalised to FACE_SHARP_PX so
+    a small in-focus face isn't unfairly penalised against a large one. Operates
+    on the original-resolution crop (the aligned MTCNN tensor is post-processed
+    and would understate blur)."""
+    w_img, h_img = pil_img.size
+    x1, y1, x2, y2 = (int(round(v)) for v in box)
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w_img, x2), min(h_img, y2)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return 0.0
+    g = np.asarray(pil_img.crop((x1, y1, x2, y2)).convert("L"))
+    h, w = g.shape
+    m = max(h, w)
+    if m != FACE_SHARP_PX:
+        s = FACE_SHARP_PX / m
+        g = cv2.resize(g, (max(1, int(w * s)), max(1, int(h * s))))
+    return float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+
+def expand_box(pil_img, box, margin: float = 0.4):
+    """Expand a face bbox by `margin` on each side (clamped to the image) so an
+    expression classifier sees a bit of head/shoulders context, which CLIP reads
+    better than a tight face-only crop."""
+    w_img, h_img = pil_img.size
+    x1, y1, x2, y2 = box
+    bw, bh = x2 - x1, y2 - y1
+    x1 = max(0, int(x1 - bw * margin)); y1 = max(0, int(y1 - bh * margin))
+    x2 = min(w_img, int(x2 + bw * margin)); y2 = min(h_img, int(y2 + bh * margin))
+    return pil_img.crop((x1, y1, x2, y2))
+
+
+def _bipolar_score(img_feat, pos_feats, neg_feats) -> float:
+    """Mean positive-vs-negative softmax probability across prompt pairs."""
+    import torch, torch.nn.functional as F
+    vals = []
+    for pf, nf in zip(pos_feats, neg_feats):
+        logits = torch.tensor([float(img_feat @ pf), float(img_feat @ nf)])
+        vals.append(F.softmax(logits, dim=0)[0].item())
+    return float(np.mean(vals))
+
+
+def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
+    """Score a list of (expanded) face crops for expression quality (0-1, higher
+    = more flattering) via zero-shot CLIP ViT-B/32. Returns one float per crop."""
+    import torch, open_clip
+
+    print(f"\nScoring portrait expression on {len(crops)} faces (CLIP ViT-B/32)...")
+    model, _, prep = open_clip.create_model_and_transforms(
+        "ViT-B-32", pretrained="openai", device=device)
+    tok = open_clip.get_tokenizer("ViT-B-32")
+    model.eval()
+
+    pos = tok([f"a photo of {p}" for p, _ in EXPRESSION_PAIRS]).to(device)
+    neg = tok([f"a photo of {n}" for _, n in EXPRESSION_PAIRS]).to(device)
+    with torch.no_grad(), torch.amp.autocast(device):
+        pf = model.encode_text(pos); pf = pf / pf.norm(dim=-1, keepdim=True)
+        nf = model.encode_text(neg); nf = nf / nf.norm(dim=-1, keepdim=True)
+    pf, nf = pf.cpu().float(), nf.cpu().float()
+
+    scores: list = []
+    for i in tqdm(range(0, len(crops), batch_size), desc="Expression"):
+        batch = crops[i:i + batch_size]
+        t = torch.stack([prep(c.convert("RGB")) for c in batch]).to(device)
+        with torch.no_grad(), torch.amp.autocast(device):
+            feats = model.encode_image(t).cpu().float()
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        for fe in feats:
+            scores.append(round(_bipolar_score(fe, pf, nf), 4))
+
+    del model
+    return scores
 
 
 def normalise_sharpness(values: list[float]) -> list[float]:
@@ -410,7 +512,8 @@ def run_faces(paths: list[Path], device: str,
               min_prob: float = 0.90,
               min_face_size: int = 80,
               min_face_rel: float = 0.04,
-              eps: float = 0.50) -> tuple[dict, dict]:
+              eps: float = 0.50,
+              score_expr: bool = False) -> tuple[dict, dict]:
     """
     Detect faces, embed with InceptionResnetV1(VGGFace2), cluster with DBSCAN.
 
@@ -445,7 +548,8 @@ def run_faces(paths: list[Path], device: str,
     resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
 
     # ── Phase 1: detect + embed every face ────────────────────────────────────
-    # all_faces entries: (path, face_slot_idx, embedding_np, bbox, prob)
+    # all_faces entries: (path, face_slot_idx, embedding_np, bbox, prob,
+    #                     face_sharp_raw, expr_crop|None)
     all_faces: list[tuple] = []
     img_sizes: dict[Path, tuple] = {}
     n_filtered_rel = 0
@@ -485,8 +589,11 @@ def run_faces(paths: list[Path], device: str,
                 embs = resnet(batch_t).cpu().numpy()   # (len(valid), 512)
 
             for rank, vi in enumerate(valid):
-                all_faces.append((p, vi, embs[rank],
-                                  boxes[vi].tolist(), float(probs[vi])))
+                box = boxes[vi].tolist()
+                sharp_raw = face_laplacian_variance(img, box)
+                expr_crop = expand_box(img, box) if score_expr else None
+                all_faces.append((p, vi, embs[rank], box, float(probs[vi]),
+                                  sharp_raw, expr_crop))
         except Exception as e:
             print(f"  face error {p.name}: {e}")
 
@@ -550,17 +657,28 @@ def run_faces(paths: list[Path], device: str,
             except Exception as e:
                 print(f"    Reference error '{name}': {e}")
 
-    # ── Phase 5: build per-image face records ──────────────────────────────────
+    # ── Phase 5: face-region sharpness + (optional) expression ─────────────────
+    # Normalise sharpness across all detected faces so the score is a relative
+    # 0-1 like the global image sharpness.
+    norm_sharp = normalise_sharpness([f[5] for f in all_faces])
+    expr_scores = (run_face_expression([f[6] for f in all_faces], device)
+                   if score_expr else [None] * len(all_faces))
+
+    # ── Phase 6: build per-image face records ──────────────────────────────────
     face_data: dict[Path, list] = {}
-    for idx, (p, _vi, _emb, box, prob) in enumerate(all_faces):
+    for idx, (p, _vi, _emb, box, prob, _sr, _ec) in enumerate(all_faces):
         cid  = int(labels[idx])
         name = cluster_names.get(cid) if cid >= 0 else None
-        face_data.setdefault(p, []).append({
+        rec = {
             "bbox":       [round(v, 1) for v in box],
             "prob":       round(prob, 3),
             "cluster_id": cid,
             "name":       name,
-        })
+            "sharp":      round(norm_sharp[idx], 4),
+        }
+        if expr_scores[idx] is not None:
+            rec["expr"] = expr_scores[idx]
+        face_data.setdefault(p, []).append(rec)
 
     del resnet
     return face_data, img_sizes
@@ -593,6 +711,9 @@ def main():
                     help="Min face width as fraction of image width (default: 0.04)")
     ap.add_argument("--face-eps",       type=float, default=0.50, metavar="F",
                     help="DBSCAN cosine-distance epsilon for clustering (default: 0.50)")
+    ap.add_argument("--face-expr",      action="store_true",
+                    help="Score portrait expression quality per face (CLIP ViT-B/32). "
+                         "Requires --faces. Face-region sharpness is always scored with --faces.")
     ap.add_argument("--move-junk",      default=None)
     ap.add_argument("--junk-threshold", type=float, default=0.25)
     ap.add_argument("--top",            type=int,   default=30)
@@ -630,10 +751,11 @@ def main():
             # Only trust the cache when it was produced with the same scoring
             # configuration, so reused records have exactly the expected shape.
             cur_cfg = ("none" if args.no_clip else args.backend,
-                       bool(args.caption), bool(args.faces))
+                       bool(args.caption), bool(args.faces), bool(args.face_expr))
             prev_cfg = (prev.get("backend"),
                         prev.get("caption_model") is not None,
-                        prev.get("face_model") is not None)
+                        prev.get("face_model") is not None,
+                        prev.get("face_expr_model") is not None)
             if prev_cfg == cur_cfg:
                 prev_by_path = {r["path"]: r for r in prev.get("images", [])}
             else:
@@ -746,6 +868,7 @@ def main():
             min_face_size=args.face_min_size,
             min_face_rel=args.face_min_rel,
             eps=args.face_eps,
+            score_expr=bool(args.face_expr),
         )
 
     # ── Build report ──
@@ -827,6 +950,7 @@ def main():
             "backend":          "none" if args.no_clip else args.backend,
             "caption_model":    "blip-base+clip-b32" if args.caption else None,
             "face_model":       "mtcnn+vggface2" if args.faces else None,
+            "face_expr_model":  "clip-b32-expr" if (args.faces and args.face_expr) else None,
             "total_images":     len(records),
             "duplicate_groups": len(dup_groups),
             "faces_images":     n_faces_images if args.faces else None,

@@ -59,6 +59,7 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
           <option value="combined">Quality (combined)</option>
           <option value="sharpness">Sharpness</option>
           <option value="aesthetic">Aesthetic</option>
+          {meta?.has_portrait && <option value="portrait">Portrait quality</option>}
           <option value="filename">Filename</option>
         </select>
         <Seg
@@ -71,6 +72,9 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
       <RangeSlider label="Quality range" minKey="scoreMin" maxKey="scoreMax" filters={filters} updateFilter={updateFilter} histogram={hist.combined} />
       <RangeSlider label="Sharpness range" minKey="sharpMin" maxKey="sharpMax" filters={filters} updateFilter={updateFilter} histogram={hist.sharpness} />
       <RangeSlider label="Aesthetic range" minKey="aesMin" maxKey="aesMax" filters={filters} updateFilter={updateFilter} histogram={hist.aesthetic} />
+      {meta?.has_portrait && (
+        <RangeSlider label="Portrait quality" minKey="portraitMin" maxKey="portraitMax" filters={filters} updateFilter={updateFilter} histogram={hist.portrait} />
+      )}
 
       <div className="filter-group">
         <label className="group-label">Duplicates</label>

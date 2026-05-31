@@ -109,6 +109,8 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
           <div className="face-editor-row">
             <span className="face-editor-label">
               Face {fmt(face.prob)}
+              {face.sharp != null && ` · sharp ${fmt(face.sharp)}`}
+              {face.expr != null && ` · expr ${fmt(face.expr)}`}
             </span>
             <select value={face.cluster_id ?? ''} onChange={onSelect} disabled={busy}>
               {people.every((p) => p.cluster_id !== face.cluster_id) && (
