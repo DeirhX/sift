@@ -701,6 +701,11 @@ select:focus, input:focus {
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
+/* Centre the thumbs when they fit. Auto margins (rather than justify-content:
+   center) collapse to 0 on overflow, so a large group stays fully scrollable
+   instead of clipping its leading thumbs out of reach. */
+.review-strip > :first-child { margin-left: auto; }
+.review-strip > :last-child { margin-right: auto; }
 .strip-thumb {
   position: relative;
   flex: 0 0 auto;
@@ -768,6 +773,49 @@ select:focus, input:focus {
   cursor: zoom-in;
   padding: 12px;
 }
+
+/* List-of-previews view (toggled from the header) */
+.review-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #000;
+}
+.review-list-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  text-align: left;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+  color: var(--text);
+  cursor: pointer;
+}
+.review-list-row:hover { border-color: var(--accent); }
+.review-list-row.active { border-color: var(--accent); background: var(--bg-panel); }
+.review-list-row.filtered { opacity: 0.55; }
+.rl-thumb {
+  flex: 0 0 auto;
+  width: 132px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #000;
+}
+.rl-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.rl-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rl-name { font-size: 13px; font-weight: 600; }
+.rl-best { font-size: 11px; color: var(--accent); }
+.rl-flt { font-size: 11px; color: var(--text-dim); }
+.rl-scores { font-size: 12px; color: var(--text-dim); }
+.rl-cap { font-size: 12px; color: var(--text); line-height: 1.4; }
+.rl-cap.empty { color: var(--text-dim); font-style: italic; }
 .review-hero img {
   max-width: 100%;
   max-height: 100%;

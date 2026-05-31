@@ -13,6 +13,18 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
   const best = items[0]            // server returns members best-first
   const [sel, setSel] = useState(0)
   const [full, setFull] = useState(false)
+  const [showList, setShowList] = useState(false)
+
+  // Tooltip / list text for a member: name, key scores, then the caption.
+  // \n works in title tooltips; the list renders the same parts as elements.
+  const describe = (it) => {
+    const parts = [it.filename,
+      `Q ${fmt(it.combined)} · Sh ${fmt(it.sharpness)} · Ae ${fmt(aestheticScore(it))}`]
+    if (it.portrait != null) parts.push(`Portrait ${fmt(it.portrait)}`)
+    if (it.caption) parts.push(it.caption)
+    if (it.matches === false) parts.push('(outside filter)')
+    return parts.join('\n')
+  }
 
   // How many members pass the active filters (server-computed). When some
   // don't, the filmstrip dims them so you still see the full duplicate set.
@@ -84,6 +96,9 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
           <div className="review-actions">
             <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
             <button className="btn" onClick={clearGroup}>Clear</button>
+            <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
+              {showList ? 'Preview' : 'List'}
+            </button>
             <button className="btn" onClick={onClose}>Close</button>
           </div>
         </div>
@@ -99,7 +114,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
                 + (it.decision === 'del' ? ' is-del' : '')
                 + (it.decision === 'keep' ? ' is-keep' : '')}
               onClick={() => setSel(i)}
-              title={it.matches === false ? `${it.filename} (outside filter)` : it.filename}
+              title={describe(it)}
             >
               <img src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
               {it.id === best.id && <span className="strip-best">★</span>}
@@ -109,14 +124,49 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
           ))}
         </div>
 
-        {/* Large preview of the selected member */}
-        <div className="review-hero" onClick={() => setFull(true)} title="Click to zoom">
-          <img key={cur.id} src={fullUrl(cur.id)} alt={cur.filename} />
-          {cur.id === best.id && <span className="badge-best">★ best</span>}
-          {cur.matches === false && <span className="badge-filtered">outside filter</span>}
-          <DecisionBadge decision={cur.decision} />
-          <span className="hero-hint">Click to zoom</span>
-        </div>
+        {/* Large preview of the selected member, or a list of all members */}
+        {showList ? (
+          <div className="review-list">
+            {items.map((it, i) => {
+              const a = aestheticScore(it)
+              return (
+                <button
+                  key={it.id}
+                  className={'review-list-row'
+                    + (i === sel ? ' active' : '')
+                    + (it.matches === false ? ' filtered' : '')}
+                  onClick={() => { setSel(i); setShowList(false) }}
+                  title="Show in preview"
+                >
+                  <img className="rl-thumb" src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
+                  <div className="rl-main">
+                    <div className="rl-top">
+                      <span className="rl-name">{it.filename}</span>
+                      {it.id === best.id && <span className="rl-best">★ best</span>}
+                      {it.matches === false && <span className="rl-flt">outside filter</span>}
+                      <DecisionBadge decision={it.decision} />
+                    </div>
+                    <div className="rl-scores">
+                      Q {fmt(it.combined)} · Sh {fmt(it.sharpness)} · Ae {fmt(a)}
+                      {it.portrait != null && ` · Portrait ${fmt(it.portrait)}`}
+                    </div>
+                    <div className={'rl-cap' + (it.caption ? '' : ' empty')}>
+                      {it.caption || 'no description'}
+                    </div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="review-hero" onClick={() => setFull(true)} title="Click to zoom">
+            <img key={cur.id} src={fullUrl(cur.id)} alt={cur.filename} />
+            {cur.id === best.id && <span className="badge-best">★ best</span>}
+            {cur.matches === false && <span className="badge-filtered">outside filter</span>}
+            <DecisionBadge decision={cur.decision} />
+            <span className="hero-hint">Click to zoom</span>
+          </div>
+        )}
 
         {/* Selected member info + decide */}
         <div className="review-herobar">
