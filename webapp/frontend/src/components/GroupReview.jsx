@@ -172,6 +172,9 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
         <div className="review-herobar">
           <div className="herobar-info">
             <span className="herobar-name">{cur.filename}</span>
+            <div className={'herobar-caption' + (cur.caption ? '' : ' empty')}>
+              {cur.caption || 'no description'}
+            </div>
             <div className="metric-bars">
               {metrics.map(([label, v]) => (
                 <div className="metric" key={label} title={`${label}: ${fmt(v)}`}>
