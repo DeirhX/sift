@@ -23,7 +23,14 @@ test('caption search narrows the grid', async ({ page }) => {
 test('keep decision persists across reload', async ({ page }) => {
   await page.goto('/')
   const first = page.locator('.card').first()
-  await first.getByRole('button', { name: 'Keep' }).click()
+  // Wait for the server to actually ack the decision before reloading; the
+  // badge alone is just an optimistic cache update and would race the POST.
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) =>
+      r.url().includes('/api/decisions') && r.request().method() === 'POST'),
+    first.getByRole('button', { name: 'Keep' }).click(),
+  ])
+  expect(resp.ok()).toBeTruthy()
   await expect(first.locator('.badge-decision.keep')).toBeVisible()
 
   await page.reload()

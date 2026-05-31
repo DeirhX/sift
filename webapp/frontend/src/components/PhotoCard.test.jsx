@@ -23,9 +23,9 @@ const baseProps = {
 describe('PhotoCard', () => {
   it('renders formatted scores', () => {
     render(<PhotoCard item={makeItem()} onDecision={() => {}} {...baseProps} />)
-    expect(screen.getByText('0.80')).toBeInTheDocument()   // combined
-    expect(screen.getByText('0.70')).toBeInTheDocument()   // sharpness
-    expect(screen.getByText('0.75')).toBeInTheDocument()   // aesthetic
+    expect(screen.getByText('Q 0.80')).toBeInTheDocument()  // composite quality pill
+    expect(screen.getByText('0.70')).toBeInTheDocument()    // sharpness
+    expect(screen.getByText('0.75')).toBeInTheDocument()    // aesthetic
   })
 
   it('shows the duplicate-group badge', () => {
