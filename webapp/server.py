@@ -27,6 +27,7 @@ import os
 import sys
 import json
 import time
+import string
 import shutil
 import asyncio
 import sqlite3
@@ -632,6 +633,68 @@ def delete_root(payload: dict = Body(...)):
         conn.commit()
         _refresh_roots(conn)
     return _roots_payload()
+
+
+# ── Filesystem path autocomplete (settings folder field) ──────────────────────
+#
+# A browser can't return an absolute folder path from a native picker, so the
+# add-root field needs server-side completion instead. This enumerates directory
+# *names* only (never file contents), but it is still broader than /api/reveal:
+# it is NOT bounded to the configured roots, because you must be able to browse
+# anywhere to add a new root. That is consistent with /api/settings/roots, which
+# already accepts arbitrary directory paths — but it does mean the endpoint leaks
+# directory structure. Keep the server bound to 127.0.0.1.
+
+_FS_COMPLETE_LIMIT = 60
+
+
+def _list_drives() -> list[str]:
+    """Top-level entries when the query is empty: drive roots on Windows, the
+    filesystem root on POSIX."""
+    if not sys.platform.startswith("win"):
+        return ["/"]
+    return [f"{c}:\\" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")]
+
+
+@app.get("/api/fs/complete")
+def fs_complete(q: str = Query("")):
+    """Directory autocomplete for the settings folder field. Given a partial
+    path, return matching child directories (full paths). If the query ends in a
+    separator we list that directory's children; otherwise the last segment is
+    treated as a case-insensitive prefix filter against its parent's children."""
+    raw = (q or "").strip().strip('"')
+    if not raw:
+        return {"entries": _list_drives(), "truncated": False}
+
+    # A bare drive ("E:") means that drive's root.
+    if sys.platform.startswith("win") and len(raw) == 2 and raw[1] == ":":
+        raw += "\\"
+
+    if raw.endswith(("\\", "/")):
+        base, prefix = Path(raw), ""
+    else:
+        p = Path(raw)
+        base, prefix = p.parent, p.name
+
+    if not base.is_dir():
+        return {"entries": [], "truncated": False}
+
+    pl = prefix.lower()
+    entries: list[str] = []
+    try:
+        with os.scandir(base) as it:
+            for e in it:
+                try:
+                    if e.is_dir() and (not pl or e.name.lower().startswith(pl)):
+                        entries.append(e.path)
+                except OSError:
+                    continue        # unreadable/locked child — skip it
+    except (OSError, PermissionError):
+        return {"entries": [], "truncated": False}
+
+    entries.sort(key=str.lower)
+    return {"entries": entries[:_FS_COMPLETE_LIMIT],
+            "truncated": len(entries) > _FS_COMPLETE_LIMIT}
 
 
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────

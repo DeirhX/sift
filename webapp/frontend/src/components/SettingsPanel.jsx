@@ -1,18 +1,63 @@
-import { useState, useEffect } from 'react'
-import { getRoots, addRoot, removeRoot } from '../api.js'
+import { useState, useEffect, useRef } from 'react'
+import { getRoots, addRoot, removeRoot, fsComplete } from '../api.js'
+
+// Infer the path separator from a sample path (backend may be Windows or POSIX).
+const sepOf = (p) => (p.includes('\\') ? '\\' : '/')
 
 // Manage the photo-root directories that bound the file-reveal feature. These
 // persist in the DB (survive restarts and build_db rebuilds) and gate which
-// folders the lightbox path breadcrumbs can open.
+// folders the lightbox path breadcrumbs can open. The add field autocompletes
+// against the server filesystem, since the browser can't enumerate it itself.
 export default function SettingsPanel({ onClose, onChange }) {
   const [roots, setRoots] = useState(null)
   const [input, setInput] = useState('')
   const [error, setError] = useState(null)
   const [busy, setBusy] = useState(false)
 
+  const [suggest, setSuggest] = useState([])
+  const [truncated, setTruncated] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [hi, setHi] = useState(-1)        // highlighted suggestion index
+
+  const debounce = useRef(null)
+  const reqSeq = useRef(0)                 // guards against stale async responses
+  const listRef = useRef(null)
+
   useEffect(() => {
     getRoots().then((d) => setRoots(d.photo_roots)).catch(() => setRoots([]))
   }, [])
+
+  // Keep the highlighted row scrolled into view during keyboard nav.
+  useEffect(() => {
+    if (hi < 0 || !listRef.current) return
+    listRef.current.children[hi]?.scrollIntoView({ block: 'nearest' })
+  }, [hi])
+
+  const fetchSuggest = (q) => {
+    const seq = ++reqSeq.current
+    fsComplete(q).then((d) => {
+      if (seq !== reqSeq.current) return   // a newer request already fired
+      setSuggest(d.entries || [])
+      setTruncated(!!d.truncated)
+      setOpen(true)
+      setHi(-1)
+    })
+  }
+
+  const onInput = (v) => {
+    setInput(v)
+    setError(null)
+    clearTimeout(debounce.current)
+    debounce.current = setTimeout(() => fetchSuggest(v), 150)
+  }
+
+  // Pick a suggestion: fill the field, append a separator, and drill into it.
+  const pick = (entry) => {
+    const s = sepOf(entry)
+    const next = entry.endsWith(s) ? entry : entry + s
+    setInput(next)
+    fetchSuggest(next)
+  }
 
   const apply = async (fn) => {
     setBusy(true)
@@ -29,9 +74,38 @@ export default function SettingsPanel({ onClose, onChange }) {
   }
 
   const add = () => {
-    const p = input.trim()
+    const p = input.trim().replace(/[\\/]+$/, '')   // tolerate a trailing sep
     if (!p) return
-    apply(() => addRoot(p)).then(() => setInput(''))
+    apply(() => addRoot(p)).then(() => {
+      setInput('')
+      setSuggest([])
+      setOpen(false)
+    })
+  }
+
+  const onKeyDown = (e) => {
+    if (open && suggest.length) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setHi((i) => (i + 1) % suggest.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setHi((i) => (i <= 0 ? suggest.length - 1 : i - 1))
+        return
+      }
+      if (e.key === 'Enter' && hi >= 0) {
+        e.preventDefault()
+        pick(suggest[hi])
+        return
+      }
+      if (e.key === 'Escape') {
+        setOpen(false)
+        return
+      }
+    }
+    if (e.key === 'Enter') add()
   }
 
   return (
@@ -66,14 +140,35 @@ export default function SettingsPanel({ onClose, onChange }) {
           )}
 
           <div className="root-add">
-            <input
-              type="text"
-              value={input}
-              disabled={busy}
-              placeholder="Paste a folder path to add…"
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') add() }}
-            />
+            <div className="root-add-field">
+              <input
+                type="text"
+                value={input}
+                disabled={busy}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="Type a folder path — suggestions appear as you go…"
+                onChange={(e) => onInput(e.target.value)}
+                onFocus={() => { if (suggest.length) setOpen(true) }}
+                onBlur={() => setTimeout(() => setOpen(false), 120)}
+                onKeyDown={onKeyDown}
+              />
+              {open && suggest.length > 0 && (
+                <ul className="fs-suggest" ref={listRef}>
+                  {suggest.map((s, i) => (
+                    <li
+                      key={s}
+                      className={i === hi ? 'fs-opt active' : 'fs-opt'}
+                      onMouseEnter={() => setHi(i)}
+                      onMouseDown={(e) => { e.preventDefault(); pick(s) }}
+                    >
+                      {s}
+                    </li>
+                  ))}
+                  {truncated && <li className="fs-more">…more — keep typing to narrow</li>}
+                </ul>
+              )}
+            </div>
             <button className="btn primary" disabled={busy || !input.trim()} onClick={add}>Add</button>
           </div>
           {error && <div className="settings-error">{error}</div>}
