@@ -7,6 +7,7 @@ import PhotoGrid from './components/PhotoGrid.jsx'
 import GroupView from './components/GroupView.jsx'
 import Lightbox from './components/Lightbox.jsx'
 import AnalyzePanel from './components/AnalyzePanel.jsx'
+import SettingsPanel from './components/SettingsPanel.jsx'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -19,6 +20,7 @@ export default function App() {
   const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups'
   const [lightboxIdx, setLightboxIdx] = useState(null)
   const [showAnalyze, setShowAnalyze] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
 
   // Mirror filter + view state into the URL (replace, so we don't spam history).
@@ -166,6 +168,9 @@ export default function App() {
           <button className="btn" onClick={() => setShowAnalyze(true)} title="Re-run analysis from the web">
             Re-analyze
           </button>
+          <button className="btn" onClick={() => setShowSettings(true)} title="Settings">
+            Settings
+          </button>
           <div className="seg view-toggle">
             <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>Grid</button>
             <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
@@ -213,6 +218,13 @@ export default function App() {
           defaultFolder={meta.data?.meta?.folder || ''}
           onClose={() => setShowAnalyze(false)}
           onDone={refetchPeople}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsPanel
+          onClose={() => setShowSettings(false)}
+          onChange={() => qc.invalidateQueries({ queryKey: ['meta'] })}
         />
       )}
     </div>

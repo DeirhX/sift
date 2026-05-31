@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS face_overrides (
 );
 """
 
+# Runtime-configurable photo roots: the directories the server's file-reveal
+# guardrail is allowed to open into. Persisted here (not in meta) so they
+# survive a build_db rebuild — build_db only clears images/faces/tags and never
+# touches this table.
+PHOTO_ROOTS_DDL = """
+CREATE TABLE IF NOT EXISTS photo_roots (
+    path TEXT PRIMARY KEY
+);
+"""
+
 # Columns introduced after the initial release. CREATE IF NOT EXISTS can't add a
 # column to an existing table, so ensure_schema() adds them with ALTER on demand.
 _IMAGE_LATE_COLUMNS = (
@@ -160,9 +170,25 @@ def ensure_schema(conn) -> None:
         if col not in fcols:
             conn.execute(f"ALTER TABLE faces ADD COLUMN {col} {decl}")
     ensure_overrides(conn)
+    conn.executescript(PHOTO_ROOTS_DDL)
     # Created after the ALTERs so legacy tables don't index a missing column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_portrait ON images(portrait)")
+
+
+def get_photo_roots(conn) -> list[str]:
+    """The configured photo-root directories, as stored (display) paths."""
+    conn.executescript(PHOTO_ROOTS_DDL)
+    return [r[0] for r in conn.execute("SELECT path FROM photo_roots ORDER BY path")]
+
+
+def add_photo_root(conn, path: str) -> None:
+    conn.executescript(PHOTO_ROOTS_DDL)
+    conn.execute("INSERT OR IGNORE INTO photo_roots (path) VALUES (?)", (path,))
+
+
+def remove_photo_root(conn, path: str) -> None:
+    conn.execute("DELETE FROM photo_roots WHERE path = ?", (path,))
 
 
 def bbox_key(x1, y1, x2, y2) -> str:

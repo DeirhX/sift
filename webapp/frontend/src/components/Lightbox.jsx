@@ -1,13 +1,24 @@
 import { useEffect, useCallback, useState } from 'react'
-import { fullUrl, thumbUrl, fetchLocations, revealPath } from '../api.js'
+import { useQuery } from '@tanstack/react-query'
+import { fullUrl, thumbUrl, fetchLocations, revealPath, fetchMeta } from '../api.js'
 import { fmt, aestheticScore } from '../format.js'
 
 const qColor = (v) =>
   v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
 
-// Render a filesystem path as breadcrumb segments: clicking a directory opens
-// it in the OS file manager; clicking the filename reveals the file selected.
-function PathLink({ path }) {
+// Normalise a path for prefix comparison against the configured roots: lower
+// case, forward slashes, no trailing slash (mirrors the server's normcase).
+const normPath = (s) => s.toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '')
+const withinRoots = (target, roots) => {
+  const t = normPath(target)
+  return roots.some((r) => { const rr = normPath(r); return t === rr || t.startsWith(rr + '/') })
+}
+
+// Render a filesystem path as breadcrumb segments. Segments at or below a
+// configured photo root open in the OS file manager (a directory opens, the
+// filename reveals the file selected); segments above the root are inert (the
+// server guardrail would reject them anyway), so we don't offer dead clicks.
+function PathLink({ path, roots = [] }) {
   const sep = path.includes('\\') ? '\\' : '/'
   const parts = path.split(/[\\/]/)
   const items = []
@@ -22,20 +33,28 @@ function PathLink({ path }) {
       items.push({ label: part, target: acc })
     }
   })
+  const restrict = roots && roots.length > 0
   const open = (target) => (e) => {
     e.stopPropagation()
     revealPath(target).catch(() => {})
   }
   return (
     <span className="path-link">
-      {items.map((it, i) => (
-        <span key={i}>
-          {i > 0 && <span className="path-sep">{sep}</span>}
-          <span className="path-seg" title={`Open ${it.target}`} onClick={open(it.target)}>
-            {it.label}
+      {items.map((it, i) => {
+        const clickable = !restrict || withinRoots(it.target, roots)
+        return (
+          <span key={i}>
+            {i > 0 && <span className="path-sep">{sep}</span>}
+            {clickable ? (
+              <span className="path-seg" title={`Open ${it.target}`} onClick={open(it.target)}>
+                {it.label}
+              </span>
+            ) : (
+              <span className="path-seg-static">{it.label}</span>
+            )}
           </span>
-        </span>
-      ))}
+        )
+      })}
     </span>
   )
 }
@@ -45,6 +64,9 @@ function PathLink({ path }) {
 // the supplied items (used for navigating duplicate-group members).
 export default function Lightbox({ items, index, setIndex, onDecision, showStrip = false }) {
   const item = items[index]
+  // Read the already-cached meta to bound which path segments are clickable.
+  const { data: meta } = useQuery({ queryKey: ['meta'], queryFn: fetchMeta, staleTime: Infinity })
+  const roots = meta?.photo_roots ?? []
 
   const go = useCallback((delta) => {
     setIndex((i) => {
@@ -126,14 +148,14 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
                     className={'lb-loc' + (l.id === item.id ? ' current' : '') + (l.exists ? '' : ' missing')}
                   >
                     {l.id === item.id ? '▶ ' : '\u00a0\u00a0\u00a0'}
-                    {l.exists ? <PathLink path={l.path} /> : <span>{l.path}  (missing)</span>}
+                    {l.exists ? <PathLink path={l.path} roots={roots} /> : <span>{l.path}  (missing)</span>}
                   </div>
                 ))}
               </>
             ) : (
               <div className="lb-loc">
                 {locs.locations[0]?.exists
-                  ? <PathLink path={locs.locations[0].path} />
+                  ? <PathLink path={locs.locations[0].path} roots={roots} />
                   : <span>{locs.locations[0]?.path}  (missing)</span>}
               </div>
             )}

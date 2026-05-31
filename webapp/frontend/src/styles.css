@@ -974,3 +974,54 @@ select:focus, input:focus {
 .path-sep { color: var(--text-dim); margin: 0 1px; }
 .path-seg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
 .path-seg:hover { color: var(--accent); background: rgba(79,156,249,0.12); text-decoration: underline; }
+.path-seg-static { color: var(--text-dim); opacity: 0.7; }
+
+/* ── Settings panel ────────────────────────────────────────────────────────── */
+.settings-panel {
+  width: 92vw;
+  max-width: 680px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.settings-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.settings-note { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin: 0; }
+.settings-empty { color: var(--text-dim); font-style: italic; font-size: 13px; }
+.settings-error { color: var(--del); font-size: 12.5px; }
+.root-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.root-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.root-path {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+.root-del {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  border: none; border-radius: 5px;
+  background: var(--bg-hover); color: var(--text-dim);
+  cursor: pointer; font-size: 16px; line-height: 1;
+}
+.root-del:hover { background: var(--del); color: #2a0a06; }
+.root-add { display: flex; gap: 8px; }
+.root-add input {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+}

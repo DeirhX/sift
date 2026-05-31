@@ -49,6 +49,13 @@ from photodb import bbox_key, MANUAL_CLUSTER_BASE
 DB_PATH:    Path = Path()
 THUMB_DIR:  Path = Path()
 FRONTEND_DIST: Path | None = None
+# Directories the /api/reveal guardrail will open into. Bounds reveals to the
+# photo library so this can't open arbitrary parts of the filesystem.
+# PHOTO_ROOT_DIRS holds the stored (display) paths; PHOTO_ROOTS holds their
+# case-normalised forms used for prefix matching. Both are refreshed from the
+# photo_roots table whenever it changes.
+PHOTO_ROOT_DIRS: list[str] = []
+PHOTO_ROOTS: list[str] = []
 
 app = FastAPI(title="Photo Audit")
 app.add_middleware(
@@ -154,6 +161,7 @@ def get_meta():
         "histograms": histograms,
         "has_para": rng["amin"] is not None,
         "has_portrait": n_portrait > 0,
+        "photo_roots": PHOTO_ROOT_DIRS,
     }
 
 
@@ -471,6 +479,72 @@ def image_locations(image_id: int):
     return {"hash": chash, "count": len(locations), "locations": locations}
 
 
+def _norm_path(p) -> str:
+    """Absolute, case-normalised, trailing-separator-stripped path for prefix
+    comparisons (Windows is case-insensitive; normcase also unifies slashes)."""
+    return os.path.normcase(os.path.abspath(str(p))).rstrip("\\/")
+
+
+def _within_roots(norm: str) -> bool:
+    """True if `norm` is one of the configured photo roots or sits below it.
+    Crucially this also rejects *ancestors* of the roots (e.g. a drive root),
+    which the old per-image check wrongly allowed."""
+    return any(norm == r or norm.startswith(r + os.sep) for r in PHOTO_ROOTS)
+
+
+def _minimal_roots(dirs: set[str]) -> list[str]:
+    """Collapse a set of dirs to the minimal covering set (drop any dir that is
+    a descendant of another), so we don't keep redundant nested roots."""
+    out: list[str] = []
+    for d in sorted(dirs, key=len):
+        if not any(d == o or d.startswith(o + os.sep) for o in out):
+            out.append(d)
+    return out
+
+
+def _refresh_roots(conn) -> None:
+    """Reload PHOTO_ROOT_DIRS (display) + PHOTO_ROOTS (normalised) from the
+    photo_roots table. Call after any mutation and at startup."""
+    global PHOTO_ROOT_DIRS, PHOTO_ROOTS
+    PHOTO_ROOT_DIRS = photodb.get_photo_roots(conn)
+    PHOTO_ROOTS = [_norm_path(p) for p in PHOTO_ROOT_DIRS]
+
+
+def _default_roots(conn, explicit: list[str] | None) -> list[str]:
+    """Seed roots for a DB that has none configured yet. Priority:
+      1. explicit --photo-root args,
+      2. the DB's stored library folder (meta.folder),
+      3. the minimal set of directories that actually contain indexed images."""
+    if explicit:
+        good = [str(Path(p).resolve()) for p in explicit if Path(p).is_dir()]
+        missing = [p for p in explicit if not Path(p).is_dir()]
+        if missing:
+            print(f"  Warning: --photo-root not found, ignored: {missing}")
+        if good:
+            return good
+    row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+    if row and row[0] and Path(row[0]).is_dir():
+        return [str(Path(row[0]).resolve())]
+    parents = {_norm_path(Path(r[0]).parent)
+               for r in conn.execute("SELECT path FROM images")}
+    return _minimal_roots({d for d in parents if os.path.isdir(d)})
+
+
+def _init_photo_roots(explicit: list[str] | None) -> None:
+    """Load persisted photo roots; if none are stored yet, seed them from the
+    launch flag / library folder so the guardrail works out of the box. After
+    seeding, roots are managed at runtime via /api/settings."""
+    with db() as conn:
+        if not photodb.get_photo_roots(conn):
+            for p in _default_roots(conn, explicit):
+                photodb.add_photo_root(conn, p)
+            conn.commit()
+        elif explicit:
+            print("  Note: --photo-root ignored; roots are configured in settings")
+        _refresh_roots(conn)
+    print(f"Reveal roots: {PHOTO_ROOT_DIRS or '(none — folder reveal disabled)'}")
+
+
 def _reveal_in_os(target: Path) -> None:
     """Open a path in the OS file manager: a directory opens directly, a file
     opens its folder with the file selected."""
@@ -488,38 +562,76 @@ def _reveal_in_os(target: Path) -> None:
 
 @app.post("/api/reveal")
 def reveal_path(payload: dict = Body(...)):
-    """Open a path in the OS file manager. Authorized to the photo library only:
-    the target must be a known image file or an ancestor directory of one, so this
-    can't be turned into an open-anything primitive (localhost tool, but still)."""
+    """Open a path in the OS file manager. Bounded to the configured photo
+    root(s) (see --photo-root / meta.folder): the target must be a root or sit
+    below one, so this can't be turned into an open-anything primitive — and
+    unlike the old check, it won't open a root's ancestors (e.g. a drive)."""
     raw = (payload.get("path") or "").strip()
     if not raw:
         raise HTTPException(400, "path required")
+    if not PHOTO_ROOTS:
+        raise HTTPException(403, "no photo root configured")
     target = Path(raw)
     if not target.exists():
         raise HTTPException(404, "path not found")
-
-    norm = os.path.normcase(os.path.abspath(str(target))).rstrip("\\/")
-    with db() as conn:
-        img_paths = [r[0] for r in conn.execute("SELECT path FROM images")]
-    is_file = target.is_file()
-    allowed = False
-    for p in img_paths:
-        ap = os.path.normcase(os.path.abspath(p))
-        if is_file:
-            if ap == norm:
-                allowed = True
-                break
-        elif ap == norm or ap.startswith(norm + os.sep):
-            allowed = True
-            break
-    if not allowed:
-        raise HTTPException(403, "path is outside the library")
+    if not _within_roots(_norm_path(target)):
+        raise HTTPException(403, "path is outside the configured photo root")
 
     try:
         _reveal_in_os(target)
     except OSError as e:
         raise HTTPException(500, f"could not open path: {e}")
     return {"ok": True}
+
+
+# ── Settings: photo roots (runtime-configurable reveal guardrail) ─────────────
+
+def _roots_payload():
+    return {"photo_roots": PHOTO_ROOT_DIRS}
+
+
+@app.get("/api/settings/roots")
+def get_roots():
+    return _roots_payload()
+
+
+@app.post("/api/settings/roots")
+def add_root(payload: dict = Body(...)):
+    """Add a directory to the configured photo roots. Validates it exists and is
+    a directory, stores its resolved absolute path, and de-dupes case-insensitively."""
+    raw = (payload.get("path") or "").strip().strip('"')
+    if not raw:
+        raise HTTPException(400, "path required")
+    p = Path(raw)
+    if not p.is_dir():
+        raise HTTPException(400, f"not a directory: {raw}")
+    resolved = str(p.resolve())
+    norm = _norm_path(resolved)
+    if norm in PHOTO_ROOTS:
+        raise HTTPException(409, "already a photo root")
+    # Refuse a root nested under an existing one (or vice versa) — redundant and
+    # confusing. The narrower/wider pair would both match the same files.
+    for existing in PHOTO_ROOTS:
+        if norm.startswith(existing + os.sep) or existing.startswith(norm + os.sep):
+            raise HTTPException(409, f"overlaps an existing root: {existing}")
+    with db() as conn:
+        photodb.add_photo_root(conn, resolved)
+        conn.commit()
+        _refresh_roots(conn)
+    return _roots_payload()
+
+
+@app.delete("/api/settings/roots")
+def delete_root(payload: dict = Body(...)):
+    """Remove a configured photo root by its stored path."""
+    raw = (payload.get("path") or "").strip()
+    if not raw:
+        raise HTTPException(400, "path required")
+    with db() as conn:
+        photodb.remove_photo_root(conn, raw)
+        conn.commit()
+        _refresh_roots(conn)
+    return _roots_payload()
 
 
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────
@@ -1092,6 +1204,9 @@ def main() -> None:
     ap.add_argument("--thumbs", default=None)
     ap.add_argument("--host",   default="127.0.0.1")
     ap.add_argument("--port",   type=int, default=8000)
+    ap.add_argument("--photo-root", action="append", default=None, metavar="DIR",
+                    help="Directory the file-reveal feature may open into (repeatable). "
+                         "Defaults to the library folder stored in the DB.")
     args = ap.parse_args()
 
     DB_PATH = Path(args.db)
@@ -1103,6 +1218,7 @@ def main() -> None:
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")
     _ensure_schema()
+    _init_photo_roots(args.photo_root)
     _mount_frontend()
 
     import uvicorn
