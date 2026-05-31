@@ -182,6 +182,21 @@ def portrait_score(face_sharp, face_expr):
     return round(0.6 * face_sharp + 0.4 * face_expr, 4)
 
 
+def largest_face_aggregate(faces):
+    """Per-image face aggregate driven by the largest face by bbox area:
+    returns (n_faces, face_sharp, face_expr, portrait). `faces` is an iterable
+    of (x1, y1, x2, y2, sharp, expr) tuples; an empty set yields
+    (0, None, None, None). This is the single definition of how a photo's
+    portrait fields are derived from its faces, shared by the ingest insert and
+    the override-replay recompute so the two can't disagree."""
+    faces = list(faces)
+    if not faces:
+        return 0, None, None, None
+    big = max(faces, key=lambda f: max(0.0, f[2] - f[0]) * max(0.0, f[3] - f[1]))
+    sharp, expr = big[4], big[5]
+    return len(faces), sharp, expr, portrait_score(sharp, expr)
+
+
 def next_manual_cluster_id(conn) -> int:
     """Allocate the next manual person id, above MANUAL_CLUSTER_BASE so it never
     collides with a detector cluster id on the next ingest."""

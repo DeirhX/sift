@@ -45,7 +45,7 @@ from PIL import Image, ImageOps
 from tqdm import tqdm
 
 import photodb
-from photodb import bbox_key, portrait_score
+from photodb import bbox_key, largest_face_aggregate
 
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 
@@ -208,15 +208,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
         # Aggregate portrait quality from the largest detected face.
         faces_list = im.get("faces", [])
-        face_sharp = face_expr = portrait = None
-        if faces_list:
-            def _area(f):
-                x1, y1, x2, y2 = f["bbox"]
-                return max(0.0, x2 - x1) * max(0.0, y2 - y1)
-            big = max(faces_list, key=_area)
-            face_sharp = big.get("sharp")
-            face_expr = big.get("expr")
-            portrait = portrait_score(face_sharp, face_expr)
+        _, face_sharp, face_expr, portrait = largest_face_aggregate(
+            (*f["bbox"], f.get("sharp"), f.get("expr")) for f in faces_list)
 
         conn.execute(
             """INSERT INTO images
@@ -294,16 +287,10 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             rows = conn.execute(
                 "SELECT x1, y1, x2, y2, sharp, expr FROM faces WHERE image_id=?",
                 (img_id,)).fetchall()
-            if rows:
-                big = max(rows, key=lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1]))
-                fs, fe = big[4], big[5]
-                conn.execute(
-                    "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
-                    (len(rows), fs, fe, portrait_score(fs, fe), img_id))
-            else:
-                conn.execute(
-                    "UPDATE images SET n_faces=0, face_sharp=NULL, face_expr=NULL, portrait=NULL WHERE id=?",
-                    (img_id,))
+            n, fs, fe, portrait = largest_face_aggregate(rows)
+            conn.execute(
+                "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
+                (n, fs, fe, portrait, img_id))
         print(f"  Re-applied {applied} reassign + {dropped} delete face overrides")
 
     # ── Re-seed clusters: keep prior names, add any new cluster ids ──────────

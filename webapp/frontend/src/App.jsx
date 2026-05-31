@@ -62,6 +62,11 @@ export default function App() {
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
 
+  // Refetch the photo/group list queries (used to roll back a failed decision).
+  const invalidateLists = useCallback(() => {
+    qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
+  }, [qc])
+
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
     qc.invalidateQueries({
@@ -110,9 +115,9 @@ export default function App() {
     try {
       await apiSetDecision(item.hash, next)
     } catch {
-      qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
+      invalidateLists()
     }
-  }, [patchDecision, qc])
+  }, [patchDecision, invalidateLists])
 
   // Bulk apply (e.g. "keep best, delete rest"). updates: [{id, hash, decision}]
   const setDecisionsBulk = useCallback(async (updates) => {
@@ -120,9 +125,9 @@ export default function App() {
     try {
       await Promise.all(updates.map((u) => apiSetDecision(u.hash, u.decision)))
     } catch {
-      qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
+      invalidateLists()
     }
-  }, [patchDecision, qc])
+  }, [patchDecision, invalidateLists])
 
   const headerCount = view === 'grid' ? total : groupTotal
   const headerLabel = view === 'grid' ? 'photos' : 'duplicate groups'

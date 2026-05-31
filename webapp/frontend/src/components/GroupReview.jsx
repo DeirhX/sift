@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
 import { thumbUrl, fullUrl } from '../api.js'
+import { fmt, aestheticScore } from '../format.js'
 import Lightbox from './Lightbox.jsx'
+import DecisionBadge from './DecisionBadge.jsx'
+import DecideButtons from './DecideButtons.jsx'
 
 // Review a duplicate group: a filmstrip of members up top, a large preview
 // of the selected one below. Click any strip thumb to swap the preview;
@@ -35,8 +38,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
   }, [full, items, sel, onClose, onDecision])
 
   const cur = items[sel]
-  const fmt = (v) => (v == null ? '–' : v.toFixed(2))
-  const aes = cur.para_aesthetic ?? cur.clip_iqa
+  const aes = aestheticScore(cur)
 
   // Metric bars for whatever scores this image has (all on a 0–1 scale).
   const metrics = [
@@ -112,11 +114,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
           <img key={cur.id} src={fullUrl(cur.id)} alt={cur.filename} />
           {cur.id === best.id && <span className="badge-best">★ best</span>}
           {cur.matches === false && <span className="badge-filtered">outside filter</span>}
-          {cur.decision && (
-            <span className={'badge-decision ' + cur.decision}>
-              {cur.decision === 'keep' ? 'KEEP' : 'DEL'}
-            </span>
-          )}
+          <DecisionBadge decision={cur.decision} />
           <span className="hero-hint">Click to zoom</span>
         </div>
 
@@ -140,14 +138,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
             </div>
           </div>
           <div className="herobar-btns">
-            <button
-              className={'keep' + (cur.decision === 'keep' ? ' active' : '')}
-              onClick={() => onDecision(cur, 'keep')}
-            >Keep</button>
-            <button
-              className={'del' + (cur.decision === 'del' ? ' active' : '')}
-              onClick={() => onDecision(cur, 'del')}
-            >Delete</button>
+            <DecideButtons item={cur} onDecision={onDecision} />
           </div>
         </div>
       </div>

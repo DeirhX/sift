@@ -1,9 +1,21 @@
 // Thin fetch wrappers around the FastAPI backend.
 
-export async function fetchMeta() {
-  const r = await fetch('/api/meta')
-  if (!r.ok) throw new Error('meta failed')
+// Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
+async function jsonFetch(url, opts) {
+  const r = await fetch(url, opts)
+  if (!r.ok) throw new Error(`request to ${url} failed`)
   return r.json()
+}
+
+// Request init for a JSON POST body.
+const jsonBody = (body) => ({
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
+export function fetchMeta() {
+  return jsonFetch('/api/meta')
 }
 
 // Shared image-level filter params, applied to both grid and groups queries.
@@ -34,91 +46,57 @@ export function buildImagesQuery(filters, offset, limit) {
   return p.toString()
 }
 
-export async function fetchImages(filters, offset, limit) {
-  const qs = buildImagesQuery(filters, offset, limit)
-  const r = await fetch(`/api/images?${qs}`)
-  if (!r.ok) throw new Error('images query failed')
-  return r.json()
+export function fetchImages(filters, offset, limit) {
+  return jsonFetch(`/api/images?${buildImagesQuery(filters, offset, limit)}`)
 }
 
-export async function fetchGroups(filters, offset, limit, order = 'size') {
+export function fetchGroups(filters, offset, limit, order = 'size') {
   const p = new URLSearchParams()
   p.set('offset', offset)
   p.set('limit', limit)
   p.set('order', order)
   appendFilters(p, filters)
-  const r = await fetch(`/api/groups?${p.toString()}`)
-  if (!r.ok) throw new Error('groups query failed')
-  return r.json()
+  return jsonFetch(`/api/groups?${p.toString()}`)
 }
 
+// Fire-and-forget: optimistic UI owns rollback, so these don't await a result.
 export async function setDecision(hash, decision) {
-  await fetch('/api/decisions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ hash, decision }),
-  })
+  await fetch('/api/decisions', jsonBody({ hash, decision }))
 }
 
 export async function renameCluster(cluster_id, name) {
-  await fetch('/api/clusters', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cluster_id, name }),
-  })
+  await fetch('/api/clusters', jsonBody({ cluster_id, name }))
 }
 
 // Reassign every face of one or more clusters into another person.
-export async function mergeClusters(from, into) {
-  const r = await fetch('/api/clusters/merge', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, into }),
-  })
-  if (!r.ok) throw new Error('merge failed')
-  return r.json()
+export function mergeClusters(from, into) {
+  return jsonFetch('/api/clusters/merge', jsonBody({ from, into }))
 }
 
 // Move a single face box to an existing person, or to a brand-new one.
-export async function assignFace(faceId, { cluster_id, new_person, name } = {}) {
-  const r = await fetch(`/api/faces/${faceId}/assign`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cluster_id, new_person, name }),
-  })
-  if (!r.ok) throw new Error('assign failed')
-  return r.json()
+export function assignFace(faceId, { cluster_id, new_person, name } = {}) {
+  return jsonFetch(`/api/faces/${faceId}/assign`, jsonBody({ cluster_id, new_person, name }))
 }
 
 // Remove a false-positive face box.
-export async function deleteFace(faceId) {
-  const r = await fetch(`/api/faces/${faceId}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error('delete face failed')
-  return r.json()
+export function deleteFace(faceId) {
+  return jsonFetch(`/api/faces/${faceId}`, { method: 'DELETE' })
 }
 
-export async function autocullGroups() {
-  const r = await fetch('/api/groups/autocull', { method: 'POST' })
-  if (!r.ok) throw new Error('autocull failed')
-  return r.json()
+export function autocullGroups() {
+  return jsonFetch('/api/groups/autocull', { method: 'POST' })
 }
 
-export async function fetchApplyStatus() {
-  const r = await fetch('/api/apply/status')
-  if (!r.ok) throw new Error('apply status failed')
-  return r.json()
+export function fetchApplyStatus() {
+  return jsonFetch('/api/apply/status')
 }
 
-export async function applyDecisions() {
-  const r = await fetch('/api/apply', { method: 'POST' })
-  if (!r.ok) throw new Error('apply failed')
-  return r.json()
+export function applyDecisions() {
+  return jsonFetch('/api/apply', { method: 'POST' })
 }
 
-export async function undoApply() {
-  const r = await fetch('/api/apply/undo', { method: 'POST' })
-  if (!r.ok) throw new Error('undo failed')
-  return r.json()
+export function undoApply() {
+  return jsonFetch('/api/apply/undo', { method: 'POST' })
 }
 
 export const thumbUrl = (id) => `/thumb/${id}`

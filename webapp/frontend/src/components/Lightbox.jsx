@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from 'react'
 import { fullUrl, thumbUrl } from '../api.js'
+import { fmt, aestheticScore } from '../format.js'
 
 // Full-resolution overlay with keyboard nav (←/→/Esc) and keep/del.
 // When `showStrip` is set, a small thumbnail strip lets you jump between
@@ -28,8 +29,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
   }, [go, item, onDecision, setIndex])
 
   if (!item) return null
-  const aes = item.para_aesthetic ?? item.clip_iqa
-  const fmt = (v) => (v == null ? '–' : v.toFixed(2))
+  const aes = aestheticScore(item)
 
   return (
     <div className="lightbox" onClick={() => setIndex(null)}>

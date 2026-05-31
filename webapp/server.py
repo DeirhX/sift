@@ -80,6 +80,12 @@ def _has_fts(conn) -> bool:
     return row is not None
 
 
+# Decisions are keyed by content hash, so every query that needs a photo's
+# keep/del state joins on it the same way. One definition so the join key can't
+# drift across the half-dozen queries that use it.
+DEC_ON = "decisions d ON d.hash = i.content_hash"
+
+
 # ── Metadata + facets ─────────────────────────────────────────────────────────
 
 @app.get("/api/meta")
@@ -268,7 +274,7 @@ def get_images(
 
         base = f"""
             FROM images i
-            LEFT JOIN decisions d ON d.hash = i.content_hash
+            LEFT JOIN {DEC_ON}
             WHERE {where_sql}
         """
 
@@ -363,7 +369,7 @@ def get_groups(
 
         # dup_groups with at least one member passing the filters
         qual = (f"SELECT DISTINCT i.dup_group FROM images i "
-                f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                f"LEFT JOIN {DEC_ON} "
                 f"WHERE {where_sql}")
 
         total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
@@ -385,7 +391,7 @@ def get_groups(
         if page_gids:
             gph = ",".join("?" * len(page_gids))
             match_sql = (f"SELECT i.id FROM images i "
-                         f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                         f"LEFT JOIN {DEC_ON} "
                          f"WHERE {where_sql} AND i.dup_group IN ({gph})")
             match_ids = {r[0] for r in conn.execute(match_sql, params + page_gids)}
 
@@ -393,9 +399,9 @@ def get_groups(
         for gr in grp_rows:
             gid = gr["dup_group"]
             members = conn.execute(
-                """SELECT i.*, d.decision
+                f"""SELECT i.*, d.decision
                    FROM images i
-                   LEFT JOIN decisions d ON d.hash = i.content_hash
+                   LEFT JOIN {DEC_ON}
                    WHERE i.dup_group = ?
                    ORDER BY i.combined DESC, i.id ASC""",
                 (gid,),
@@ -580,8 +586,8 @@ def delete_face(face_id: int):
 def export_decisions():
     with db() as conn:
         rows = conn.execute(
-            """SELECT i.path, i.filename, i.combined, d.decision
-               FROM images i LEFT JOIN decisions d ON d.hash = i.content_hash""").fetchall()
+            f"""SELECT i.path, i.filename, i.combined, d.decision
+               FROM images i LEFT JOIN {DEC_ON}""").fetchall()
     out = {"kept": [], "deleted": [], "unmarked": []}
     for r in rows:
         entry = {"path": r["path"], "filename": r["filename"], "combined": r["combined"]}
@@ -663,8 +669,8 @@ def apply_status():
         # Files marked 'del' that still live outside _rejected = movable.
         pending = 0
         for r in conn.execute(
-            """SELECT i.path FROM images i
-               JOIN decisions d ON d.hash = i.content_hash
+            f"""SELECT i.path FROM images i
+               JOIN {DEC_ON}
                WHERE d.decision='del'"""):
             if not str(r["path"]).startswith(rej_str):
                 pending += 1
@@ -682,8 +688,8 @@ def apply_decisions():
         rej = _rejected_dir(conn)
         rej_str = str(rej)
         rows = conn.execute(
-            """SELECT i.id, i.path FROM images i
-               JOIN decisions d ON d.hash = i.content_hash
+            f"""SELECT i.id, i.path FROM images i
+               JOIN {DEC_ON}
                WHERE d.decision='del'""").fetchall()
         if rows:
             rej.mkdir(parents=True, exist_ok=True)

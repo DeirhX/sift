@@ -1,4 +1,5 @@
 import { thumbUrl } from '../api.js'
+import { fmt } from '../format.js'
 
 // A duplicate group shown as a stack: the best photo on top, up to two
 // others fanned behind it, with a count badge and decision summary.
@@ -15,7 +16,6 @@ export default function GroupPile({ group, onOpen }) {
   const scores = items.map((i) => i.combined).filter((v) => v != null)
   const best = scores.length ? Math.max(...scores) : null
   const worst = scores.length ? Math.min(...scores) : null
-  const fmt = (v) => (v == null ? '–' : v.toFixed(2))
 
   return (
     <div className="pile" onClick={onOpen} title={`${items.length} near-duplicates`}>
