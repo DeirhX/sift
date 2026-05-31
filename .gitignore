@@ -21,6 +21,7 @@ webapp/frontend/dist/
 webapp/frontend/test-results/
 webapp/frontend/playwright-report/
 webapp/frontend/e2e/.fixtures/
+webapp/frontend/e2e/.real/
 .coverage
 htmlcov/
 
