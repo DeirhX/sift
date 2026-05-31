@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api.js'
+import { fmt, aestheticScore } from '../format.js'
+import DecisionBadge from './DecisionBadge.jsx'
+import DecideButtons from './DecideButtons.jsx'
 
 // One photo tile with face overlays, scores, caption, tags and keep/delete
 // actions. thumbH is chosen by the grid to preserve the photo's aspect ratio;
@@ -12,8 +15,7 @@ import { thumbUrl, assignFace, deleteFace } from '../api.js'
 // false-positive box. These are pure DB edits and last until the next
 // build_db ingest.
 export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, personName, people = [], onFaceChange }) {
-  const aes = item.para_aesthetic ?? item.clip_iqa
-  const fmt = (v) => (v == null ? '–' : v.toFixed(2))
+  const aes = aestheticScore(item)
   const [editFace, setEditFace] = useState(null)   // index into item.faces
   const [busy, setBusy] = useState(false)
 
@@ -73,11 +75,7 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
           )
         })}
         {item.dup_group != null && <span className="badge-dup">dup #{item.dup_group}</span>}
-        {item.decision && (
-          <span className={'badge-decision ' + item.decision}>
-            {item.decision === 'keep' ? 'KEEP' : 'DEL'}
-          </span>
-        )}
+        <DecisionBadge decision={item.decision} />
       </div>
 
       <div className="meta">
@@ -93,14 +91,7 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
           </div>
         )}
         <div className="actions">
-          <button
-            className={'keep' + (item.decision === 'keep' ? ' active' : '')}
-            onClick={() => onDecision(item, 'keep')}
-          >Keep</button>
-          <button
-            className={'del' + (item.decision === 'del' ? ' active' : '')}
-            onClick={() => onDecision(item, 'del')}
-          >Delete</button>
+          <DecideButtons item={item} onDecision={onDecision} />
         </div>
       </div>
 

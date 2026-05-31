@@ -42,6 +42,9 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+import photodb
+from photodb import bbox_key, MANUAL_CLUSTER_BASE
+
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
 THUMB_DIR:  Path = Path()
@@ -67,22 +70,11 @@ def db():
 
 
 def _ensure_schema():
-    """Add columns/tables introduced after a DB may have been built, so the
-    server runs against an older photos.db without a rebuild. New scores stay
-    NULL until the next build_db ingest populates them."""
+    """Run the shared migration authority so the server works against an older
+    photos.db without a rebuild. New score columns stay NULL until the next
+    build_db ingest populates them."""
     with db() as conn:
-        icols = {c[1] for c in conn.execute("PRAGMA table_info(images)")}
-        for col in ("face_sharp", "face_expr", "portrait"):
-            if col not in icols:
-                conn.execute(f"ALTER TABLE images ADD COLUMN {col} REAL")
-        fcols = {c[1] for c in conn.execute("PRAGMA table_info(faces)")}
-        for col in ("sharp", "expr"):
-            if col not in fcols:
-                conn.execute(f"ALTER TABLE faces ADD COLUMN {col} REAL")
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS face_overrides (
-                   hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
-                   cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
+        photodb.ensure_schema(conn)
         conn.commit()
 
 
@@ -91,6 +83,12 @@ def _has_fts(conn) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images_fts'"
     ).fetchone()
     return row is not None
+
+
+# Decisions are keyed by content hash, so every query that needs a photo's
+# keep/del state joins on it the same way. One definition so the join key can't
+# drift across the half-dozen queries that use it.
+DEC_ON = "decisions d ON d.hash = i.content_hash"
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -281,7 +279,7 @@ def get_images(
 
         base = f"""
             FROM images i
-            LEFT JOIN decisions d ON d.hash = i.content_hash
+            LEFT JOIN {DEC_ON}
             WHERE {where_sql}
         """
 
@@ -376,7 +374,7 @@ def get_groups(
 
         # dup_groups with at least one member passing the filters
         qual = (f"SELECT DISTINCT i.dup_group FROM images i "
-                f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                f"LEFT JOIN {DEC_ON} "
                 f"WHERE {where_sql}")
 
         total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
@@ -398,7 +396,7 @@ def get_groups(
         if page_gids:
             gph = ",".join("?" * len(page_gids))
             match_sql = (f"SELECT i.id FROM images i "
-                         f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                         f"LEFT JOIN {DEC_ON} "
                          f"WHERE {where_sql} AND i.dup_group IN ({gph})")
             match_ids = {r[0] for r in conn.execute(match_sql, params + page_gids)}
 
@@ -406,9 +404,9 @@ def get_groups(
         for gr in grp_rows:
             gid = gr["dup_group"]
             members = conn.execute(
-                """SELECT i.*, d.decision
+                f"""SELECT i.*, d.decision
                    FROM images i
-                   LEFT JOIN decisions d ON d.hash = i.content_hash
+                   LEFT JOIN {DEC_ON}
                    WHERE i.dup_group = ?
                    ORDER BY i.combined DESC, i.id ASC""",
                 (gid,),
@@ -513,34 +511,10 @@ def rename_cluster(payload: dict = Body(...)):
     return {"ok": True}
 
 
-# Manually-created people get ids in a high range so they never collide with
-# the detector's cluster ids (0..N) when build_db re-ingests a fresh report.
-MANUAL_CLUSTER_BASE = 100_000
-
-
-def _ensure_overrides(conn):
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS face_overrides (
-               hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
-               cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
-
-
-def _bbox_key(x1, y1, x2, y2) -> str:
-    """Canonical face-bbox key, identical to build_db.bbox_key, so a recorded
-    override re-binds to the same face after a rebuild."""
-    return ",".join(f"{round(float(v), 1)}" for v in (x1, y1, x2, y2))
-
-
-def _next_manual_cluster_id(conn) -> int:
-    m = conn.execute("SELECT MAX(cluster_id) FROM clusters WHERE cluster_id >= ?",
-                     (MANUAL_CLUSTER_BASE,)).fetchone()[0]
-    return (m + 1) if m is not None else MANUAL_CLUSTER_BASE
-
-
 def _record_override(conn, hash_, bbox, action, cluster_id=None):
     if not hash_:
         return
-    _ensure_overrides(conn)
+    photodb.ensure_overrides(conn)
     conn.execute(
         "INSERT OR REPLACE INTO face_overrides (hash, bbox, action, cluster_id) "
         "VALUES (?,?,?,?)", (hash_, bbox, action, cluster_id))
@@ -569,7 +543,7 @@ def merge_clusters(payload: dict = Body(...)):
                 FROM faces f JOIN images i ON i.id = f.image_id
                 WHERE f.cluster_id IN ({ph})""", frm).fetchall()
         for r in moving:
-            _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+            _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                              "assign", into)
         cur = conn.execute(
             f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
@@ -599,7 +573,7 @@ def assign_face(face_id: int, payload: dict = Body(...)):
         if not r:
             raise HTTPException(404, "face not found")
         if payload.get("new_person"):
-            target = _next_manual_cluster_id(conn)
+            target = photodb.next_manual_cluster_id(conn)
             conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
                          (target, payload.get("name") or None))
         else:
@@ -610,7 +584,7 @@ def assign_face(face_id: int, payload: dict = Body(...)):
             conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
                          (target,))
         conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
-        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+        _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                          "assign", target)
         conn.commit()
     return {"ok": True, "cluster_id": target}
@@ -627,7 +601,7 @@ def delete_face(face_id: int):
         conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
         conn.execute("UPDATE images SET n_faces = MAX(0, n_faces - 1) WHERE id=?",
                      (r["img"],))
-        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+        _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                          "delete")
         conn.commit()
     return {"ok": True}
@@ -639,8 +613,8 @@ def delete_face(face_id: int):
 def export_decisions():
     with db() as conn:
         rows = conn.execute(
-            """SELECT i.path, i.filename, i.combined, d.decision
-               FROM images i LEFT JOIN decisions d ON d.hash = i.content_hash""").fetchall()
+            f"""SELECT i.path, i.filename, i.combined, d.decision
+               FROM images i LEFT JOIN {DEC_ON}""").fetchall()
     out = {"kept": [], "deleted": [], "unmarked": []}
     for r in rows:
         entry = {"path": r["path"], "filename": r["filename"], "combined": r["combined"]}
@@ -722,8 +696,8 @@ def apply_status():
         # Files marked 'del' that still live outside _rejected = movable.
         pending = 0
         for r in conn.execute(
-            """SELECT i.path FROM images i
-               JOIN decisions d ON d.hash = i.content_hash
+            f"""SELECT i.path FROM images i
+               JOIN {DEC_ON}
                WHERE d.decision='del'"""):
             if not str(r["path"]).startswith(rej_str):
                 pending += 1
@@ -741,8 +715,8 @@ def apply_decisions():
         rej = _rejected_dir(conn)
         rej_str = str(rej)
         rows = conn.execute(
-            """SELECT i.id, i.path FROM images i
-               JOIN decisions d ON d.hash = i.content_hash
+            f"""SELECT i.id, i.path FROM images i
+               JOIN {DEC_ON}
                WHERE d.decision='del'""").fetchall()
         if rows:
             rej.mkdir(parents=True, exist_ok=True)
