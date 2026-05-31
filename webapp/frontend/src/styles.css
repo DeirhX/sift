@@ -1015,13 +1015,50 @@ select:focus, input:focus {
   cursor: pointer; font-size: 16px; line-height: 1;
 }
 .root-del:hover { background: var(--del); color: #2a0a06; }
-.root-add { display: flex; gap: 8px; }
+.root-add { display: flex; gap: 8px; align-items: flex-start; }
+.root-add-field { position: relative; flex: 1; }
 .root-add input {
-  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
   background: var(--bg-card);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
   padding: 8px 10px;
   font-size: 13px;
+}
+
+.fs-suggest {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.fs-opt {
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fs-opt.active { background: var(--accent, #3a6df0); color: #fff; }
+.fs-more {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text-dim, #888);
+  font-style: italic;
 }

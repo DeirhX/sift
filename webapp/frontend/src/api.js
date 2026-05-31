@@ -172,5 +172,14 @@ export async function removeRoot(path) {
   return r.json()
 }
 
+// Server-side directory autocomplete for the settings folder field. Returns
+// { entries: string[], truncated: bool }. The browser can't enumerate the FS,
+// hence the round-trip.
+export async function fsComplete(q) {
+  const r = await fetch(`/api/fs/complete?q=${encodeURIComponent(q || '')}`)
+  if (!r.ok) return { entries: [], truncated: false }
+  return r.json()
+}
+
 export const thumbUrl = (id) => `/thumb/${id}`
 export const fullUrl = (id) => `/img/${id}`
