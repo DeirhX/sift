@@ -1,0 +1,77 @@
+"""Coverage for the re-analysis endpoints WITHOUT spawning subprocesses: status
+when idle, cancel/conflict guards, and argv building + validation/clamping."""
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
+import server
+
+
+@pytest.fixture(autouse=True)
+def reset_job():
+    """No analysis job before/after each test, so we never touch a real run."""
+    server.CURRENT_JOB = None
+    yield
+    server.CURRENT_JOB = None
+
+
+def test_status_idle(env):
+    assert env.client.get("/api/analyze/status").json() == {"state": "idle", "commands": []}
+
+
+def test_cancel_with_no_job_conflicts(env):
+    assert env.client.post("/api/analyze/cancel").status_code == 409
+
+
+def test_start_conflicts_when_already_running(env):
+    server.CURRENT_JOB = SimpleNamespace(state="running")
+    r = env.client.post("/api/analyze", json={"folder": str(env.db.parent)})
+    assert r.status_code == 409
+
+
+def test_start_rejects_missing_folder(env):
+    r = env.client.post("/api/analyze", json={"folder": "/no/such/folder/xyz"})
+    assert r.status_code == 400
+
+
+# ── argv builder (pure, no process launch) ───────────────────────────────────
+
+def test_build_steps_bad_folder_raises(env):
+    with pytest.raises(HTTPException) as ei:
+        server._build_analyze_steps({"folder": "/no/such/folder/xyz"})
+    assert ei.value.status_code == 400
+
+
+def test_build_steps_bad_backend_raises(env, tmp_path):
+    with pytest.raises(HTTPException) as ei:
+        server._build_analyze_steps({"folder": str(tmp_path), "backend": "bogus"})
+    assert ei.value.status_code == 400
+
+
+def test_build_steps_emits_two_steps_with_flags(env, tmp_path):
+    steps = server._build_analyze_steps({
+        "folder": str(tmp_path), "backend": "para",
+        "recurse": True, "faces": True, "face_expr": True,
+    })
+    assert [name for name, _ in steps] == ["photo_audit", "build_db"]
+    audit = steps[0][1]
+    assert "--backend" in audit and "para" in audit
+    assert "--recurse" in audit and "--faces" in audit and "--face-expr" in audit
+
+
+def test_build_steps_clamps_numeric_knobs(env, tmp_path):
+    audit = dict(server._build_analyze_steps({
+        "folder": str(tmp_path), "backend": "para",
+        "dup_threshold": 999, "face_min_rel": 2.0,
+    }))["photo_audit"]
+    # dup_threshold clamps to [0,64]; face_min_rel to [0,1].
+    assert audit[audit.index("--dup-threshold") + 1] == "64"
+    assert audit[audit.index("--face-min-rel") + 1] == "1.0"
+
+
+def test_build_steps_rejects_bad_numeric(env, tmp_path):
+    with pytest.raises(HTTPException) as ei:
+        server._build_analyze_steps({
+            "folder": str(tmp_path), "backend": "para", "dup_threshold": "abc"})
+    assert ei.value.status_code == 400

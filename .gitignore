@@ -17,6 +17,13 @@ webapp/frontend/dist/
 *.tsbuildinfo
 .vite/
 
+# ── Test artifacts (Playwright e2e) ────────────────────────────────────────
+webapp/frontend/test-results/
+webapp/frontend/playwright-report/
+webapp/frontend/e2e/.fixtures/
+.coverage
+htmlcov/
+
 # ── Generated data artifacts (this tool produces these; never commit) ──────
 *.db
 *.db-shm
