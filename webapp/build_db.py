@@ -293,8 +293,21 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                 (n, fs, fe, portrait, img_id))
         print(f"  Re-applied {applied} reassign + {dropped} delete face overrides")
 
-    # ── Re-seed clusters: keep prior names, add any new cluster ids ──────────
-    # Also pick up names embedded in the report (from --face-ref matching).
+    # ── Re-seed clusters: re-bind names to people, add any new cluster ids ───
+    # Names are anchored to member faces (by content hash + bbox), so they
+    # follow the actual people even when the detector hands a cluster a new id.
+    # Resolve each cluster's name from its members' anchors first; fall back to
+    # the old id-keyed name (still correct for stable manual-cluster ids), then
+    # to any name embedded in the report (from --face-ref matching).
+    members_by_cluster: dict[int, list] = {}
+    for fr in conn.execute(
+            "SELECT image_id, x1, y1, x2, y2, cluster_id FROM faces WHERE cluster_id >= 0"):
+        h = hashes.get(fr[0])
+        if h:
+            members_by_cluster.setdefault(fr[5], []).append(
+                (h, bbox_key(fr[1], fr[2], fr[3], fr[4])))
+    anchor_names = photodb.resolve_anchor_names(conn, members_by_cluster)
+
     report_names: dict[int, str] = {}
     for im in images:
         for f in im.get("faces", []):
@@ -302,11 +315,17 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             if cid >= 0 and f.get("name"):
                 report_names[cid] = f["name"]
 
+    rebound = 0
     for cid in sorted(cluster_ids_seen):
-        name = prev_names.get(cid) or report_names.get(cid)
+        name = anchor_names.get(cid) or prev_names.get(cid) or report_names.get(cid)
+        if cid in anchor_names and anchor_names[cid] != prev_names.get(cid):
+            rebound += 1
         conn.execute(
             "INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
             (cid, name))
+    if anchor_names:
+        print(f"  Re-bound {len(anchor_names)} person names via face anchors"
+              f" ({rebound} to a different cluster id than before)")
 
     # ── Restore decisions, keyed by content hash ─────────────────────────────
     if dec_key != "hash":
