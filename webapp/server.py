@@ -153,10 +153,21 @@ def get_meta():
         if has_portrait_col:
             histograms["portrait"] = _histogram(conn, "portrait")
 
+        # Folder facet: every directory that directly holds images, with its
+        # direct image count. The sidebar reconstructs the tree (compressing
+        # single-child chains) and sums subtree totals client-side. dirname is
+        # done in Python because SQLite has no portable path-dirname function.
+        folder_counts: dict[str, int] = {}
+        for (p,) in conn.execute("SELECT path FROM images"):
+            d = os.path.dirname(p)
+            folder_counts[d] = folder_counts.get(d, 0) + 1
+        folders = [{"path": k, "count": v} for k, v in sorted(folder_counts.items())]
+
     return {
         "meta": meta,
         "clusters": clusters,
         "tags": tags,
+        "folders": folders,
         "ranges": dict(rng),
         "counts": counts,
         "histograms": histograms,
@@ -196,15 +207,41 @@ SORT_COLUMNS = {
 }
 
 
+def _folder_sep(folder: str) -> str:
+    """Path separator embedded in `folder`. Falls back to the server's native
+    separator for degenerate inputs like a bare drive letter ("E:")."""
+    if "\\" in folder:
+        return "\\"
+    if "/" in folder:
+        return "/"
+    return os.sep
+
+
 def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
                  aes_min, aes_max, tags, people, q, decision,
-                 portrait_min=0.0, portrait_max=1.0):
+                 portrait_min=0.0, portrait_max=1.0,
+                 folder=None, folder_recursive=True):
     """Build the shared image-level WHERE clauses + params used by both
     /api/images and /api/groups. Clauses reference alias `i` (images) and
     `d` (decisions LEFT JOIN on content hash)."""
     where = ["i.combined BETWEEN ? AND ?",
              "i.sharpness BETWEEN ? AND ?"]
     params: list = [score_min, score_max, sharp_min, sharp_max]
+
+    # Folder filter: prefix-match the stored path. Recursive matches everything
+    # below `folder`; non-recursive additionally requires no further separator
+    # after the prefix, i.e. the file sits directly in `folder`. Done with
+    # substr/instr (not LIKE) to sidestep LIKE's %/_ wildcard escaping across
+    # both Windows and POSIX separators.
+    if folder:
+        sep = _folder_sep(folder)
+        prefix = folder.rstrip("\\/") + sep
+        plen = len(prefix)
+        where.append("substr(i.path, 1, ?) = ?")
+        params += [plen, prefix]
+        if not folder_recursive:
+            where.append("instr(substr(i.path, ?), ?) = 0")
+            params += [plen + 1, sep]
 
     # Aesthetic range only constrains rows that have a score.
     where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
@@ -259,6 +296,8 @@ def get_images(
     portrait_min: float = 0.0, portrait_max: float = 1.0,
     tags:    str | None = None,     # comma-separated, OR match
     people:  str | None = None,     # comma-separated cluster ids, OR match
+    folder:  str | None = None,     # folder-hierarchy prefix filter
+    folder_recursive: bool = True,  # include photos in subfolders of `folder`
     dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
     decision: str = "all",          # all | keep | del | unmarked
     q:       str | None = None,     # caption text search
@@ -269,7 +308,8 @@ def get_images(
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
-            tags=tags, people=people, q=q, decision=decision)
+            tags=tags, people=people, q=q, decision=decision,
+            folder=folder, folder_recursive=folder_recursive)
 
         if dup_mode == "groups-only":
             where.append("i.dup_group IS NOT NULL")
@@ -363,6 +403,8 @@ def get_groups(
     portrait_min: float = 0.0, portrait_max: float = 1.0,
     tags:    str | None = None,
     people:  str | None = None,
+    folder:  str | None = None,
+    folder_recursive: bool = True,
     decision: str = "all",
     q:       str | None = None,
 ):
@@ -377,7 +419,8 @@ def get_groups(
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
-            tags=tags, people=people, q=q, decision=decision)
+            tags=tags, people=people, q=q, decision=decision,
+            folder=folder, folder_recursive=folder_recursive)
         where.append("i.dup_group IS NOT NULL")
         where_sql = " AND ".join(where)
 

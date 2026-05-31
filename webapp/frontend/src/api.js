@@ -31,6 +31,11 @@ function appendFilters(p, filters) {
   p.set('decision', filters.decision)
   if (filters.tags?.length) p.set('tags', filters.tags.join(','))
   if (filters.people?.length) p.set('people', filters.people.join(','))
+  if (filters.folder) {
+    p.set('folder', filters.folder)
+    // Backend defaults to recursive; only send the flag when turning it off.
+    if (!filters.folderRecursive) p.set('folder_recursive', 'false')
+  }
   if (filters.q?.trim()) p.set('q', filters.q.trim())
 }
 
