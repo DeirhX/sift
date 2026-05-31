@@ -394,10 +394,13 @@ select:focus, input:focus {
 .card .scores {
   display: flex;
   gap: 8px;
+  align-items: center;
   font-size: 11px;
   color: var(--text-dim);
 }
 .card .scores b { color: var(--text); }
+.card .scores .score-sub { font-size: 10.5px; }
+.lb-sub { color: var(--text-dim); font-size: 13px; }
 .card .caption {
   font-size: 11px;
   color: var(--text-dim);
@@ -601,12 +604,46 @@ select:focus, input:focus {
 }
 .pile-flag.del { background: var(--del); color: #2a0a06; }
 
-.pile-meta { display: flex; flex-direction: column; gap: 3px; padding: 0 2px; }
-.pile-range { font-size: 12px; color: var(--text); }
-.pile-status { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 5px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-.dot.keep { background: var(--keep); }
-.dot.del { background: var(--del); }
+/* One row: prominent quality pill on the left, decision count pills on the
+   right. margin-top clears the fanned back-card corners that poke out below
+   the square stack, so nothing overlaps the meta. */
+.pile-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 0 2px;
+  margin-top: 6px;
+}
+.pile-pills { display: flex; gap: 5px; flex-wrap: wrap; }
+
+/* Shared composite-quality pill (grid card, lightbox, group pile). */
+.q-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+  text-shadow: 0 1px 1px rgba(0,0,0,0.35);
+}
+.q-pill.big { font-size: 14px; padding: 4px 12px; }
+
+/* Decision count pills (keep / del / undecided). */
+.cpill {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.cpill.keep { background: rgba(46,204,113,0.16); color: var(--keep); border-color: rgba(46,204,113,0.45); }
+.cpill.del  { background: rgba(231,76,60,0.16);  color: var(--del);  border-color: rgba(231,76,60,0.45); }
+.cpill.left { background: var(--bg-hover);        color: var(--text-dim); border-color: var(--border); }
 
 /* ---------- Group review modal ---------- */
 .review-overlay {
@@ -933,3 +970,7 @@ select:focus, input:focus {
 }
 .lb-loc.current { color: var(--text); }
 .lb-loc.missing { color: var(--del); opacity: 0.8; }
+.path-link { white-space: normal; word-break: break-all; }
+.path-sep { color: var(--text-dim); margin: 0 1px; }
+.path-seg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
+.path-seg:hover { color: var(--accent); background: rgba(79,156,249,0.12); text-decoration: underline; }

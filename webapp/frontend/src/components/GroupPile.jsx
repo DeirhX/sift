@@ -16,6 +16,9 @@ export default function GroupPile({ group, onOpen }) {
   const scores = items.map((i) => i.combined).filter((v) => v != null)
   const best = scores.length ? Math.max(...scores) : null
   const worst = scores.length ? Math.min(...scores) : null
+  // Red (low) → green (high), matching the metric bars elsewhere.
+  const qColor = (v) =>
+    v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
 
   return (
     <div className="pile" onClick={onOpen} title={`${items.length} near-duplicates`}>
@@ -32,12 +35,13 @@ export default function GroupPile({ group, onOpen }) {
         </div>
       </div>
       <div className="pile-meta">
-        <div className="pile-range">Q {fmt(worst)}–{fmt(best)}</div>
-        <div className="pile-status">
-          {del > 0 && <span className="dot del" />}
-          {kept > 0 && <span className="dot keep" />}
-          {undecided === items.length ? 'unreviewed' :
-            `${kept} keep · ${del} del · ${undecided} left`}
+        <span className="q-pill" style={{ background: qColor(best) }} title="Composite quality (range across the group)">
+          Q {fmt(worst)}{worst !== best ? `–${fmt(best)}` : ''}
+        </span>
+        <div className="pile-pills">
+          {kept > 0 && <span className="cpill keep">{kept} keep</span>}
+          {del > 0 && <span className="cpill del">{del} del</span>}
+          {undecided > 0 && <span className="cpill left">{undecided} left</span>}
         </div>
       </div>
     </div>
