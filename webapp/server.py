@@ -471,6 +471,57 @@ def image_locations(image_id: int):
     return {"hash": chash, "count": len(locations), "locations": locations}
 
 
+def _reveal_in_os(target: Path) -> None:
+    """Open a path in the OS file manager: a directory opens directly, a file
+    opens its folder with the file selected."""
+    if sys.platform.startswith("win"):
+        if target.is_dir():
+            os.startfile(str(target))                       # noqa: S606 (trusted, validated)
+        else:
+            # explorer returns exit 1 even on success — fire and forget.
+            subprocess.Popen(["explorer", f"/select,{os.path.normpath(str(target))}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open"] + (["-R", str(target)] if target.is_file() else [str(target)]))
+    else:
+        subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
+
+
+@app.post("/api/reveal")
+def reveal_path(payload: dict = Body(...)):
+    """Open a path in the OS file manager. Authorized to the photo library only:
+    the target must be a known image file or an ancestor directory of one, so this
+    can't be turned into an open-anything primitive (localhost tool, but still)."""
+    raw = (payload.get("path") or "").strip()
+    if not raw:
+        raise HTTPException(400, "path required")
+    target = Path(raw)
+    if not target.exists():
+        raise HTTPException(404, "path not found")
+
+    norm = os.path.normcase(os.path.abspath(str(target))).rstrip("\\/")
+    with db() as conn:
+        img_paths = [r[0] for r in conn.execute("SELECT path FROM images")]
+    is_file = target.is_file()
+    allowed = False
+    for p in img_paths:
+        ap = os.path.normcase(os.path.abspath(p))
+        if is_file:
+            if ap == norm:
+                allowed = True
+                break
+        elif ap == norm or ap.startswith(norm + os.sep):
+            allowed = True
+            break
+    if not allowed:
+        raise HTTPException(403, "path is outside the library")
+
+    try:
+        _reveal_in_os(target)
+    except OSError as e:
+        raise HTTPException(500, f"could not open path: {e}")
+    return {"ok": True}
+
+
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────
 
 @app.post("/api/decisions")
