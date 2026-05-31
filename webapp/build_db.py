@@ -44,98 +44,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
+import photodb
+from photodb import bbox_key, portrait_score
+
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
-
-
-SCHEMA = """
-PRAGMA journal_mode = WAL;
-
-CREATE TABLE IF NOT EXISTS images (
-    id              INTEGER PRIMARY KEY,
-    path            TEXT NOT NULL,
-    filename        TEXT NOT NULL,
-    sharpness       REAL,
-    combined        REAL,
-    raw_laplacian   REAL,
-    dup_group       INTEGER,
-    para_aesthetic  REAL,
-    para_quality    REAL,
-    para_composition REAL,
-    para_light      REAL,
-    para_color      REAL,
-    para_dof        REAL,
-    para_content    REAL,
-    clip_iqa        REAL,
-    caption         TEXT,
-    imgw            INTEGER,
-    imgh            INTEGER,
-    thumb           TEXT,
-    content_hash    TEXT,
-    mtime           REAL,
-    fsize           INTEGER,
-    n_faces         INTEGER DEFAULT 0,
-    face_sharp      REAL,   -- largest face's normalised sharpness
-    face_expr       REAL,   -- largest face's expression quality (if scored)
-    portrait        REAL    -- combined portrait quality of the largest face
-);
-
-CREATE TABLE IF NOT EXISTS faces (
-    id          INTEGER PRIMARY KEY,
-    image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-    x1 REAL, y1 REAL, x2 REAL, y2 REAL,
-    prob        REAL,
-    cluster_id  INTEGER,
-    sharp       REAL,   -- face-region Laplacian variance, normalised 0-1
-    expr        REAL    -- portrait expression quality 0-1 (NULL if not scored)
-);
-
--- Manual face edits that must survive a fresh build_db ingest. Keyed by the
--- image's content hash + the face bbox, so they re-apply to the same face after
--- the faces table is rebuilt from a regenerated report.
-CREATE TABLE IF NOT EXISTS face_overrides (
-    hash        TEXT NOT NULL,
-    bbox        TEXT NOT NULL,   -- "x1,y1,x2,y2" rounded to 1 decimal
-    action      TEXT NOT NULL,   -- 'assign' | 'delete'
-    cluster_id  INTEGER,         -- target cluster for 'assign'
-    PRIMARY KEY (hash, bbox)
-);
-
-CREATE TABLE IF NOT EXISTS image_tags (
-    image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-    tag         TEXT NOT NULL
-);
-
--- Persisted across rebuilds:
-CREATE TABLE IF NOT EXISTS clusters (
-    cluster_id  INTEGER PRIMARY KEY,
-    name        TEXT
-);
-
-CREATE TABLE IF NOT EXISTS decisions (
-    hash        TEXT PRIMARY KEY,   -- content hash: survives renames AND moves
-    decision    TEXT                -- 'keep' | 'del'
-);
-
-CREATE TABLE IF NOT EXISTS meta (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_images_combined   ON images(combined);
-CREATE INDEX IF NOT EXISTS idx_images_sharpness  ON images(sharpness);
-CREATE INDEX IF NOT EXISTS idx_images_aesthetic  ON images(para_aesthetic);
-CREATE INDEX IF NOT EXISTS idx_images_dup        ON images(dup_group);
-CREATE INDEX IF NOT EXISTS idx_faces_image       ON faces(image_id);
-CREATE INDEX IF NOT EXISTS idx_faces_cluster     ON faces(cluster_id);
-CREATE INDEX IF NOT EXISTS idx_tags_image        ON image_tags(image_id);
-CREATE INDEX IF NOT EXISTS idx_tags_tag          ON image_tags(tag);
-"""
-
-# FTS5 caption search (separate so we can fall back gracefully if unavailable)
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS images_fts
-    USING fts5(caption, content='images', content_rowid='id');
-"""
 
 
 def hash_file(path: Path) -> str:
@@ -187,23 +99,6 @@ def _columns(conn, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
-def bbox_key(x1, y1, x2, y2) -> str:
-    """Canonical face-bbox key shared with the server, so manual face overrides
-    re-match the same face after a rebuild. Mirrors photo_audit's 1-decimal
-    rounding of bbox coordinates."""
-    return ",".join(f"{round(float(v), 1)}" for v in (x1, y1, x2, y2))
-
-
-def _portrait_score(face_sharp, face_expr):
-    """Combine a face's sharpness and expression into one portrait quality.
-    Sharpness dominates (a blurry face is unusable regardless of expression)."""
-    if face_sharp is None:
-        return None
-    if face_expr is None:
-        return round(face_sharp, 4)
-    return round(0.6 * face_sharp + 0.4 * face_expr, 4)
-
-
 def build(report_path: Path, db_path: Path, thumb_dir: Path,
           thumb_size: int, thumb_quality: int, workers: int,
           skip_thumbs: bool, force_thumbs: bool, prune: bool = True) -> None:
@@ -216,27 +111,18 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     thumb_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SCHEMA)
+    photodb.create_base_schema(conn)
     has_fts = True
     try:
-        conn.executescript(FTS_SCHEMA)
+        conn.executescript(photodb.FTS_SCHEMA)
     except sqlite3.OperationalError:
         has_fts = False
         print("  (FTS5 unavailable — caption search will use LIKE fallback)")
 
-    # ── Upgrade pre-incremental DBs: add columns CREATE IF NOT EXISTS can't ───
-    img_cols = set(_columns(conn, "images"))
-    for col, decl in (("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER"),
-                      ("face_sharp", "REAL"), ("face_expr", "REAL"), ("portrait", "REAL")):
-        if col not in img_cols:
-            conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
-    face_cols = set(_columns(conn, "faces"))
-    for col in ("sharp", "expr"):
-        if col not in face_cols:
-            conn.execute(f"ALTER TABLE faces ADD COLUMN {col} REAL")
-    # Index created after the ALTER so legacy tables don't reference a missing column.
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_images_portrait ON images(portrait)")
+    # Single migration authority (shared with the server): add late columns,
+    # the overrides table, and the indexes that depend on those columns, so an
+    # older photos.db is upgraded in place rather than needing a full rebuild.
+    photodb.ensure_schema(conn)
 
     # ── Snapshot prior state before wiping ───────────────────────────────────
     prev_names = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
@@ -330,7 +216,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             big = max(faces_list, key=_area)
             face_sharp = big.get("sharp")
             face_expr = big.get("expr")
-            portrait = _portrait_score(face_sharp, face_expr)
+            portrait = portrait_score(face_sharp, face_expr)
 
         conn.execute(
             """INSERT INTO images
@@ -413,7 +299,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                 fs, fe = big[4], big[5]
                 conn.execute(
                     "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
-                    (len(rows), fs, fe, _portrait_score(fs, fe), img_id))
+                    (len(rows), fs, fe, portrait_score(fs, fe), img_id))
             else:
                 conn.execute(
                     "UPDATE images SET n_faces=0, face_sharp=NULL, face_expr=NULL, portrait=NULL WHERE id=?",
