@@ -1,5 +1,5 @@
-import { useEffect, useCallback } from 'react'
-import { fullUrl, thumbUrl } from '../api.js'
+import { useEffect, useCallback, useState } from 'react'
+import { fullUrl, thumbUrl, fetchLocations } from '../api.js'
 import { fmt, aestheticScore } from '../format.js'
 
 // Full-resolution overlay with keyboard nav (←/→/Esc) and keep/del.
@@ -27,6 +27,16 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [go, item, onDecision, setIndex])
+
+  // Exact-duplicate locations (same content hash) for the current image.
+  const [locs, setLocs] = useState(null)
+  useEffect(() => {
+    if (!item) return
+    let alive = true
+    setLocs(null)
+    fetchLocations(item.id).then((d) => { if (alive) setLocs(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [item?.id])
 
   if (!item) return null
   const aes = aestheticScore(item)
@@ -59,6 +69,30 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
           >Delete (d)</button>
         </div>
         {item.caption && <div style={{ marginTop: 6, color: 'var(--text-dim)' }}>{item.caption}</div>}
+        {locs && (
+          <div className="lb-locations">
+            {locs.count > 1 ? (
+              <>
+                <div className="lb-loc-head">
+                  Exact duplicate — {locs.count} locations (identical bytes, one shared verdict)
+                </div>
+                {locs.locations.map((l) => (
+                  <div
+                    key={l.id}
+                    className={'lb-loc' + (l.id === item.id ? ' current' : '') + (l.exists ? '' : ' missing')}
+                    title={l.exists ? l.path : l.path + '  (file missing)'}
+                  >
+                    {l.id === item.id ? '▶ ' : '   '}{l.path}{l.exists ? '' : '  (missing)'}
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="lb-loc" title={locs.locations[0]?.path}>
+                {locs.locations[0]?.path}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {showStrip && items.length > 1 && (

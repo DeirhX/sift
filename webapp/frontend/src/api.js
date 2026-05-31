@@ -99,5 +99,37 @@ export function undoApply() {
   return jsonFetch('/api/apply/undo', { method: 'POST' })
 }
 
+// ── Re-analysis (run photo_audit + build_db from the web, stream output) ──────
+export async function startAnalyze(params) {
+  const r = await fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}))
+    throw new Error(msg.detail || 'analyze failed to start')
+  }
+  return r.json()
+}
+
+export async function analyzeStatus() {
+  const r = await fetch('/api/analyze/status')
+  return r.json()
+}
+
+export async function cancelAnalyze() {
+  await fetch('/api/analyze/cancel', { method: 'POST' })
+}
+
+export const analyzeStreamUrl = '/api/analyze/stream'
+
+// Every path holding the exact same bytes as this image (content-hash match).
+export async function fetchLocations(id) {
+  const r = await fetch(`/api/images/${id}/locations`)
+  if (!r.ok) throw new Error('locations failed')
+  return r.json()
+}
+
 export const thumbUrl = (id) => `/thumb/${id}`
 export const fullUrl = (id) => `/img/${id}`

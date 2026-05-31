@@ -23,17 +23,22 @@ Usage:
   # open http://localhost:8000   (prod build)  or run Vite dev on :5173
 """
 
+import os
 import sys
 import json
+import time
 import shutil
+import asyncio
 import sqlite3
 import argparse
+import threading
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Body
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -444,6 +449,28 @@ def serve_full(image_id: int):
     return FileResponse(path)
 
 
+@app.get("/api/images/{image_id}/locations")
+def image_locations(image_id: int):
+    """Every path holding the exact same file bytes (matched on content_hash) as
+    this image. Lets the UI surface 'this file also lives at N other locations'
+    to aid organizing/consolidation. Read-only; decisions stay hash-keyed so all
+    copies share one verdict."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT content_hash FROM images WHERE id=?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "image not found")
+        chash = row["content_hash"]
+        if not chash:
+            return {"hash": None, "count": 1, "locations": []}
+        rows = conn.execute(
+            "SELECT id, path FROM images WHERE content_hash=? ORDER BY path", (chash,)
+        ).fetchall()
+        locations = [{"id": r["id"], "path": r["path"],
+                      "exists": Path(r["path"]).exists()} for r in rows]
+    return {"hash": chash, "count": len(locations), "locations": locations}
+
+
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────
 
 @app.post("/api/decisions")
@@ -740,6 +767,260 @@ def undo_apply():
             conn.execute("DELETE FROM applied_moves WHERE id=?", (r["id"],))
         conn.commit()
     return {"restored": restored, "skipped": skipped}
+
+
+# ── Web-driven re-analysis (run photo_audit.py + build_db.py, stream output) ──
+# A single job at a time shells out to the existing scripts and streams their
+# stdout/stderr live (including tqdm carriage-return progress) to the browser
+# via Server-Sent Events. The launcher is *constrained*: the server builds the
+# argv from a fixed set of known flags — only the target folder is free text,
+# and it's validated to be an existing directory. No raw commands.
+
+AUDIT_SCRIPT = Path(__file__).resolve().parent.parent / "photo_audit.py"
+BUILD_SCRIPT = Path(__file__).resolve().parent / "build_db.py"
+REPO_ROOT    = AUDIT_SCRIPT.parent
+
+_BACKENDS = {"para", "clip-iqa", "both"}
+
+
+class AnalysisJob:
+    """Runs an ordered list of (label, argv) steps in a background thread,
+    capturing output as committed lines (split on \\n) plus a single live
+    'partial' line that tqdm's \\r progress updates overwrite in place."""
+
+    def __init__(self, steps: list[tuple[str, list[str]]], cwd: Path):
+        self.steps = steps
+        self.cwd = str(cwd)
+        self.lines: list[str] = []      # committed (newline-terminated) lines
+        self.partial: str = ""          # current in-progress line (\r updates)
+        self.state = "running"          # running | done | failed | cancelled
+        self.exit_code: int | None = None
+        self.started = time.time()
+        self.ended: float | None = None
+        self._proc: subprocess.Popen | None = None
+        self._cancel = False
+        self._cond = threading.Condition()
+
+    # ── output buffer (thread-safe) ──
+    def _commit(self, text: str):
+        with self._cond:
+            self.lines.append(text)
+            self.partial = ""
+            self._cond.notify_all()
+
+    def _set_partial(self, text: str):
+        with self._cond:
+            self.partial = text
+            self._cond.notify_all()
+
+    def _finish(self, state: str, code: int | None):
+        with self._cond:
+            self.state = state
+            self.exit_code = code
+            self.ended = time.time()
+            self._cond.notify_all()
+
+    def snapshot(self):
+        with self._cond:
+            return {
+                "state": self.state, "exit_code": self.exit_code,
+                "started": self.started, "ended": self.ended,
+                "commands": [" ".join(_shell_quote(a) for a in argv)
+                             for _, argv in self.steps],
+            }
+
+    def cancel(self):
+        self._cancel = True
+        p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        for label, argv in self.steps:
+            if self._cancel:
+                self._finish("cancelled", None)
+                return
+            self._commit(f"$ {' '.join(_shell_quote(a) for a in argv)}")
+            try:
+                self._proc = subprocess.Popen(
+                    argv, cwd=self.cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except Exception as e:
+                self._commit(f"[error] failed to launch {label}: {e}")
+                self._finish("failed", -1)
+                return
+            self._pump(self._proc.stdout)
+            code = self._proc.wait()
+            self._commit(f"[{label} exited with code {code}]")
+            if self._cancel:
+                self._finish("cancelled", code)
+                return
+            if code != 0:
+                self._finish("failed", code)
+                return
+        self._finish("done", 0)
+
+    def _pump(self, stream):
+        """Read raw bytes, splitting into lines. A lone \\r is a tqdm progress
+        update (overwrites the live 'partial' line); \\r\\n and \\n commit a line.
+        Distinguishing the two matters on Windows, where child stdout turns every
+        '\\n' print into '\\r\\n' — naive \\r handling would blank every line."""
+        buf = bytearray()
+        pending_cr = False
+        while True:
+            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+            if not chunk:
+                break
+            for b in chunk:
+                if pending_cr:
+                    pending_cr = False
+                    if b == 0x0A:            # \r\n → one committed line
+                        self._commit(buf.decode("utf-8", "replace"))
+                        buf = bytearray()
+                        continue
+                    # lone \r → progress update; show buf, then handle b below
+                    self._set_partial(buf.decode("utf-8", "replace"))
+                    buf = bytearray()
+                if b == 0x0D:                # \r → defer (could be \r\n)
+                    pending_cr = True
+                elif b == 0x0A:              # bare \n → commit
+                    self._commit(buf.decode("utf-8", "replace"))
+                    buf = bytearray()
+                else:
+                    buf.append(b)
+        if pending_cr or buf:
+            self._commit(buf.decode("utf-8", "replace"))
+
+
+def _shell_quote(s: str) -> str:
+    s = str(s)
+    return f'"{s}"' if (" " in s or "!" in s) else s
+
+
+CURRENT_JOB: AnalysisJob | None = None
+
+
+def _build_analyze_steps(payload: dict) -> list[tuple[str, list[str]]]:
+    """Translate the UI payload into argv for photo_audit + build_db. Only
+    known flags are emitted; the folder is validated. Raises HTTPException."""
+    folder = (payload.get("folder") or "").strip()
+    if not folder:
+        with db() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+            folder = row["value"] if row else ""
+    fpath = Path(folder)
+    if not folder or not fpath.is_dir():
+        raise HTTPException(400, f"folder not found: {folder!r}")
+
+    report_path = DB_PATH.parent / "audit_report.json"
+    py = sys.executable
+
+    audit = [py, str(AUDIT_SCRIPT), str(fpath), "--out", str(report_path)]
+    if payload.get("recurse"):
+        audit.append("--recurse")
+    if payload.get("no_clip"):
+        audit.append("--no-clip")
+    else:
+        backend = payload.get("backend", "para")
+        if backend not in _BACKENDS:
+            raise HTTPException(400, f"bad backend: {backend!r}")
+        audit += ["--backend", backend]
+    if payload.get("caption"):
+        audit.append("--caption")
+    if payload.get("faces"):
+        audit.append("--faces")
+        if payload.get("face_expr"):
+            audit.append("--face-expr")
+    if payload.get("no_cache"):
+        audit.append("--no-cache")
+
+    # Numeric knobs — parsed/clamped, never passed through verbatim.
+    def _num(key, flag, lo, hi, cast):
+        v = payload.get(key)
+        if v is None or v == "":
+            return
+        try:
+            v = cast(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"bad {key}: {v!r}")
+        audit.extend([flag, str(max(lo, min(hi, v)))])
+
+    _num("dup_threshold", "--dup-threshold", 0, 64, int)
+    _num("face_min_rel", "--face-min-rel", 0.0, 1.0, float)
+    _num("face_eps", "--face-eps", 0.05, 1.5, float)
+
+    build = [py, str(BUILD_SCRIPT), str(report_path),
+             "--db", str(DB_PATH), "--thumbs", str(THUMB_DIR)]
+
+    # scope=both (confirmed): audit then rebuild the DB the server is serving.
+    return [("photo_audit", audit), ("build_db", build)]
+
+
+@app.post("/api/analyze")
+def start_analyze(payload: dict = Body(...)):
+    global CURRENT_JOB
+    if CURRENT_JOB and CURRENT_JOB.state == "running":
+        raise HTTPException(409, "an analysis is already running")
+    steps = _build_analyze_steps(payload)
+    CURRENT_JOB = AnalysisJob(steps, cwd=REPO_ROOT)
+    threading.Thread(target=CURRENT_JOB.run, daemon=True).start()
+    return {"ok": True, **CURRENT_JOB.snapshot()}
+
+
+@app.get("/api/analyze/status")
+def analyze_status():
+    if not CURRENT_JOB:
+        return {"state": "idle", "commands": []}
+    return CURRENT_JOB.snapshot()
+
+
+@app.post("/api/analyze/cancel")
+def analyze_cancel():
+    if not CURRENT_JOB or CURRENT_JOB.state != "running":
+        raise HTTPException(409, "no analysis running")
+    CURRENT_JOB.cancel()
+    return {"ok": True}
+
+
+@app.get("/api/analyze/stream")
+async def analyze_stream():
+    """SSE stream of the current job's output. Replays from the start so a
+    reconnect/late join gets the full log, then tails live."""
+    job = CURRENT_JOB
+
+    def _sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def gen():
+        if not job:
+            yield _sse("end", {"state": "idle"})
+            return
+        cursor = 0
+        last_partial = None
+        while True:
+            with job._cond:
+                new = job.lines[cursor:]
+                cursor = len(job.lines)
+                partial = job.partial
+                state = job.state
+                code = job.exit_code
+            for ln in new:
+                yield _sse("line", ln)
+            if partial != last_partial:
+                last_partial = partial
+                yield _sse("partial", partial)
+            if state != "running" and cursor >= len(job.lines):
+                yield _sse("end", {"state": state, "exit_code": code})
+                return
+            await asyncio.sleep(0.15)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 # ── Serve built frontend (production) ─────────────────────────────────────────

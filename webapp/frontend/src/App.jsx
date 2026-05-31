@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar.jsx'
 import PhotoGrid from './components/PhotoGrid.jsx'
 import GroupView from './components/GroupView.jsx'
 import Lightbox from './components/Lightbox.jsx'
+import AnalyzePanel from './components/AnalyzePanel.jsx'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -17,6 +18,7 @@ export default function App() {
   const [filters, setFilters] = useState(INITIAL.filters)
   const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups'
   const [lightboxIdx, setLightboxIdx] = useState(null)
+  const [showAnalyze, setShowAnalyze] = useState(false)
   const qc = useQueryClient()
 
   // Mirror filter + view state into the URL (replace, so we don't spam history).
@@ -161,6 +163,9 @@ export default function App() {
             {headerCount.toLocaleString()} {headerLabel}
           </span>
           <div className="spacer" />
+          <button className="btn" onClick={() => setShowAnalyze(true)} title="Re-run analysis from the web">
+            Re-analyze
+          </button>
           <div className="seg view-toggle">
             <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>Grid</button>
             <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
@@ -200,6 +205,14 @@ export default function App() {
           index={lightboxIdx}
           setIndex={setLightboxIdx}
           onDecision={setDecision}
+        />
+      )}
+
+      {showAnalyze && (
+        <AnalyzePanel
+          defaultFolder={meta.data?.meta?.folder || ''}
+          onClose={() => setShowAnalyze(false)}
+          onDone={refetchPeople}
         />
       )}
     </div>
