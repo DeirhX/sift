@@ -142,5 +142,35 @@ export async function revealPath(path) {
   return r.json()
 }
 
+// ── Settings: photo roots (reveal guardrail) ──────────────────────────────────
+export async function getRoots() {
+  const r = await fetch('/api/settings/roots')
+  if (!r.ok) throw new Error('failed to load roots')
+  return r.json()
+}
+
+export async function addRoot(path) {
+  const r = await fetch('/api/settings/roots', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}))
+    throw new Error(msg.detail || 'failed to add folder')
+  }
+  return r.json()
+}
+
+export async function removeRoot(path) {
+  const r = await fetch('/api/settings/roots', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error('failed to remove folder')
+  return r.json()
+}
+
 export const thumbUrl = (id) => `/thumb/${id}`
 export const fullUrl = (id) => `/img/${id}`
