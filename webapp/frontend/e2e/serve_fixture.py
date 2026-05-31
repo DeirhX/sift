@@ -65,6 +65,11 @@ def seed():
     report = {"folder": str(LIB), "backend": "para", "caption_model": "blip",
               "face_model": "mtcnn+vggface2", "duplicate_groups": 1, "images": images}
     FIXROOT.mkdir(parents=True, exist_ok=True)
+    # Start from a clean DB every run: build_db deliberately *preserves*
+    # decisions across rebuilds, so a stale photos.db would leak verdicts from
+    # a previous run and make tests non-deterministic.
+    for leftover in (DB, DB.with_suffix(".db-wal"), DB.with_suffix(".db-shm")):
+        leftover.unlink(missing_ok=True)
     report_path = FIXROOT / "audit_report.json"
     report_path.write_text(json.dumps(report), encoding="utf-8")
     build_db.build(report_path, DB, THUMBS, thumb_size=400, thumb_quality=80,

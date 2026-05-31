@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "vite build && playwright test"
+    "test:e2e": "vite build && playwright test",
+    "test:e2e:real": "vite build && playwright test --config playwright.real.config.js"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",

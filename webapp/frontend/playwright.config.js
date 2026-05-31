@@ -7,6 +7,8 @@ const PORT = Number(process.env.E2E_PORT || 8765)
 // builds dist first. Single worker: the tests share one server + SQLite DB.
 export default defineConfig({
   testDir: './e2e',
+  // The real-pipeline suite has its own config (playwright.real.config.js).
+  testIgnore: ['real/**'],
   workers: 1,
   timeout: 30_000,
   expect: { timeout: 7_000 },
