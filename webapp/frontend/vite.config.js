@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -15,5 +16,15 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+  },
+  // Vitest: component/unit tests live next to source as *.test.jsx. Playwright
+  // e2e specs under e2e/ are excluded so the two runners don't collide.
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './vitest.setup.js',
+    include: ['src/**/*.test.{js,jsx}'],
+    exclude: ['e2e/**', 'node_modules/**'],
+    css: false,
   },
 })
