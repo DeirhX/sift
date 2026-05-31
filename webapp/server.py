@@ -776,6 +776,8 @@ def rename_cluster(payload: dict = Body(...)):
     with db() as conn:
         conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
                      (int(cid), name or None))
+        # Anchor the name to this cluster's faces so it survives re-clustering.
+        photodb.set_cluster_name_anchors(conn, int(cid), name or None)
         conn.commit()
     return {"ok": True}
 
@@ -820,6 +822,12 @@ def merge_clusters(payload: dict = Body(...)):
         conn.execute(f"DELETE FROM clusters WHERE cluster_id IN ({ph})", frm)
         conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
                      (into,))
+        # Re-anchor the destination to its current name across all of its faces
+        # (now including the moved ones); this also clears the moved faces' old
+        # source-cluster anchors so a stale name can't resurface on rebuild.
+        into_name = conn.execute(
+            "SELECT name FROM clusters WHERE cluster_id=?", (into,)).fetchone()
+        photodb.set_cluster_name_anchors(conn, into, into_name[0] if into_name else None)
         conn.commit()
     return {"ok": True, "moved": moved}
 
@@ -855,6 +863,10 @@ def assign_face(face_id: int, payload: dict = Body(...)):
         conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
         _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                          "assign", target)
+        # Keep the target's name anchors in step with its new membership.
+        tgt_name = conn.execute(
+            "SELECT name FROM clusters WHERE cluster_id=?", (target,)).fetchone()
+        photodb.set_cluster_name_anchors(conn, target, tgt_name[0] if tgt_name else None)
         conn.commit()
     return {"ok": True, "cluster_id": target}
 
