@@ -17,6 +17,9 @@ export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, o
   const [width, setWidth] = useState(0)
   const [viewport, setViewport] = useState(0)
   const [scrollTop, setScrollTop] = useState(0)
+  // Index of the keyboard-focused tile (roving focus). null until the grid is
+  // first navigated; arrows then drive it and scroll it into view.
+  const [focusIdx, setFocusIdx] = useState(null)
 
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -72,13 +75,91 @@ export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, o
     if (scrollTop + viewport >= totalHeight - viewport) fetchNext()
   }, [scrollTop, viewport, totalHeight, hasNext, isFetchingNext, fetchNext])
 
-  // Only render tiles intersecting the viewport (+ overscan).
+  // Only render tiles intersecting the viewport (+ overscan). The focused tile
+  // is always rendered too, so its ring shows even mid-scroll.
   const top = scrollTop - OVERSCAN
   const bot = scrollTop + viewport + OVERSCAN
   const visible = useMemo(
-    () => layout.filter((l) => l.top < bot && l.top + l.height > top),
-    [layout, top, bot],
+    () => layout.filter((l) => (l.top < bot && l.top + l.height > top) || l.index === focusIdx),
+    [layout, top, bot, focusIdx],
   )
+
+  // Spatial neighbour for arrow keys. Left/right prefer the same row, up/down
+  // the same column (weighting the off-axis distance), so movement feels
+  // natural in the ragged masonry instead of jumping by raw index.
+  const neighbor = useCallback((from, dir) => {
+    const cur = layout[from]
+    if (!cur) return from
+    const cx = cur.left + colWidth / 2
+    const cy = cur.top + cur.height / 2
+    let best = from
+    let bestScore = Infinity
+    for (const l of layout) {
+      if (l.index === from) continue
+      const x = l.left + colWidth / 2
+      const y = l.top + l.height / 2
+      const dx = x - cx
+      const dy = y - cy
+      let ok = false
+      let score = 0
+      if (dir === 'right') { ok = dx > 1; score = dx + Math.abs(dy) * 3 }
+      else if (dir === 'left') { ok = dx < -1; score = -dx + Math.abs(dy) * 3 }
+      else if (dir === 'down') { ok = dy > 1; score = dy + Math.abs(dx) * 3 }
+      else if (dir === 'up') { ok = dy < -1; score = -dy + Math.abs(dx) * 3 }
+      if (ok && score < bestScore) { bestScore = score; best = l.index }
+    }
+    return best
+  }, [layout, colWidth])
+
+  // Keep the focused tile within the scroll viewport.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || focusIdx == null || !layout[focusIdx]) return
+    const { top: t, height: h } = layout[focusIdx]
+    if (t < el.scrollTop) el.scrollTo({ top: t - GAP, behavior: 'smooth' })
+    else if (t + h > el.scrollTop + el.clientHeight) {
+      el.scrollTo({ top: t + h - el.clientHeight + GAP, behavior: 'smooth' })
+    }
+  }, [focusIdx, layout])
+
+  const onKeyDown = useCallback((e) => {
+    // Don't hijack typing in the search box, face-editor select, etc.
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return
+    const last = items.length - 1
+    if (last < 0) return
+    const move = (next) => {
+      e.preventDefault()
+      const n = Math.max(0, Math.min(last, next))
+      setFocusIdx(n)
+      if (hasNext && !isFetchingNext && n >= last - cols * 2) fetchNext()
+    }
+    const cur = focusIdx == null ? 0 : focusIdx
+    switch (e.key) {
+      case 'ArrowRight': return move(focusIdx == null ? 0 : neighbor(cur, 'right'))
+      case 'ArrowLeft':  return move(focusIdx == null ? 0 : neighbor(cur, 'left'))
+      case 'ArrowDown':  return move(focusIdx == null ? 0 : neighbor(cur, 'down'))
+      case 'ArrowUp':    return move(focusIdx == null ? 0 : neighbor(cur, 'up'))
+      case 'Home':       return move(0)
+      case 'End':        return move(last)
+      case 'PageDown':   return move(cur + cols * 3)
+      case 'PageUp':     return move(cur - cols * 3)
+      case 'Enter':
+        if (focusIdx != null) { e.preventDefault(); onOpen(focusIdx) }
+        return
+      case 'k': case 'K':
+        if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'keep') }
+        return
+      case 'd': case 'D':
+        if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'del') }
+        return
+      default: return
+    }
+  }, [items, focusIdx, neighbor, cols, hasNext, isFetchingNext, fetchNext, onOpen, onDecision])
+
+  // Drop focus if the list shrinks under it (e.g. after a filter change).
+  useEffect(() => {
+    if (focusIdx != null && focusIdx > items.length - 1) setFocusIdx(null)
+  }, [items.length, focusIdx])
 
   const personName = useCallback((cid) => {
     const c = people.find((p) => p.cluster_id === cid)
@@ -86,11 +167,20 @@ export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, o
   }, [people])
 
   return (
-    <div className="grid-scroll" ref={scrollRef} onScroll={onScroll}>
+    <div
+      className="grid-scroll"
+      ref={scrollRef}
+      onScroll={onScroll}
+      onKeyDown={onKeyDown}
+      tabIndex={0}
+      role="grid"
+      aria-label="Photo results — arrow keys to move, Enter to open, k/d to keep/delete"
+    >
       <div style={{ height: totalHeight, position: 'relative' }}>
         {visible.map((l) => (
           <div
             key={l.item.id}
+            className={'card-slot' + (l.index === focusIdx ? ' focused' : '')}
             style={{
               position: 'absolute',
               top: 0,
@@ -99,12 +189,13 @@ export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, o
               width: colWidth,
               height: l.height,
             }}
+            onMouseDown={() => setFocusIdx(l.index)}
           >
             <PhotoCard
               item={l.item}
               colWidth={colWidth}
               thumbH={l.thumbH}
-              onOpen={() => onOpen(l.index)}
+              onOpen={() => { setFocusIdx(l.index); onOpen(l.index) }}
               onDecision={onDecision}
               personName={personName}
               people={people}

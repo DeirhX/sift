@@ -30,6 +30,14 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }) {
 
   const set = (patch) => setP((v) => ({ ...v, ...patch }))
 
+  // Escape closes the panel. The job (if any) keeps running server-side and
+  // re-attaches when the panel is reopened.
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const attachStream = useCallback(() => {
     esRef.current?.close()
     const es = new EventSource(analyzeStreamUrl)
