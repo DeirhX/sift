@@ -144,6 +144,55 @@ test.describe('group review', () => {
   })
 })
 
+test.describe('scenes (rough hierarchy)', () => {
+  test('scene -> nested near-dup set -> review, plus loose members', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Scenes' }).click()
+
+    // Two multi-photo scenes; the lone blurry shot is a singleton (no scene).
+    const piles = page.locator('.scene-pile')
+    await expect(piles).toHaveCount(2)
+
+    // Scenes are time-ordered: scene 0 (the beach burst) comes first and
+    // advertises its single near-duplicate set.
+    const first = piles.first()
+    await expect(first).toContainText('1 near-dup set')
+    await first.click()
+
+    // Scene panel nests one near-dup sub-pile plus one loose member (city).
+    const scene = page.locator('.scene-panel')
+    await expect(scene).toBeVisible()
+    await expect(scene).toContainText('Near-duplicate sets')
+    await expect(scene.locator('.pile')).toHaveCount(1)        // the beach set
+    await expect(scene.locator('.scene-loose')).toHaveCount(1) // the loose city shot
+
+    // Drilling into the sub-pile opens the existing duplicate-group review.
+    await scene.locator('.pile').first().click()
+    const review = page.locator('.review-panel:not(.scene-panel)')
+    await expect(review).toBeVisible()
+    await expect(review).toContainText('Duplicate group #0')
+    await expect(review.locator('.strip-thumb')).toHaveCount(2) // beach + beach2
+
+    await review.getByRole('button', { name: 'Close' }).click()
+    await expect(review).toHaveCount(0)
+    await scene.getByRole('button', { name: 'Close' }).click()
+    await expect(scene).toHaveCount(0)
+  })
+
+  test('loose member opens the full-size lightbox over the scene', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Scenes' }).click()
+    await page.locator('.scene-pile').first().click()
+
+    const scene = page.locator('.scene-panel')
+    await scene.locator('.scene-loose').first().click()
+    await expect(page.locator('.lightbox')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.lightbox')).toHaveCount(0)
+    await scene.getByRole('button', { name: 'Close' }).click()
+  })
+})
+
 test.describe('people management', () => {
   test('rename a person and see it reflected', async ({ page }) => {
     await page.goto('/')

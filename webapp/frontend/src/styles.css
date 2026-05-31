@@ -1201,3 +1201,54 @@ select:focus, input:focus {
   cursor: pointer;
 }
 .folder-subtoggle input { margin: 0; }
+
+/* ---------- Scenes (rough hierarchy) ---------- */
+/* Scene piles reuse the duplicate-pile look; a touch wider since the caption
+   carries a capture-time range as well as decision counts. */
+.scene-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+.scene-when {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.cpill.dup {
+  background: rgba(52,152,219,0.16);
+  color: #6cb6ff;
+  border-color: rgba(52,152,219,0.45);
+}
+
+/* The scene drill-down reuses the review modal shell but scrolls vertically,
+   since it stacks a sub-pile grid and a loose-thumb grid of variable height. */
+.scene-panel { overflow-y: auto; padding-bottom: 18px; }
+.scene-panel .pile-grid { padding: 4px 18px 10px; }
+.scene-section-label {
+  padding: 12px 18px 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.scene-loose-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  padding: 4px 18px 10px;
+}
+.scene-loose {
+  position: relative;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-hover);
+  cursor: pointer;
+  padding: 0;
+  aspect-ratio: 1 / 1;
+}
+.scene-loose img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.scene-loose.is-del  { border-color: var(--del); }
+.scene-loose.is-keep { border-color: var(--keep); }
+.scene-loose:hover { border-color: var(--accent); }

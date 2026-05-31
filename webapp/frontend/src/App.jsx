@@ -1,23 +1,25 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, setDecision as apiSetDecision } from './api.js'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, setDecision as apiSetDecision } from './api.js'
 import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState.js'
 import Sidebar from './components/Sidebar.jsx'
 import PhotoGrid from './components/PhotoGrid.jsx'
 import GroupView from './components/GroupView.jsx'
+import SceneView from './components/SceneView.jsx'
 import Lightbox from './components/Lightbox.jsx'
 import AnalyzePanel from './components/AnalyzePanel.jsx'
 import SettingsPanel from './components/SettingsPanel.jsx'
 
 const PAGE = 60
 const GROUP_PAGE = 30
+const SCENE_PAGE = 30
 
 // Hydrate initial state from the URL so reloads/shared links restore the view.
 const INITIAL = parseState(window.location.search)
 
 export default function App() {
   const [filters, setFilters] = useState(INITIAL.filters)
-  const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups'
+  const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups' | 'scenes'
   const [lightboxIdx, setLightboxIdx] = useState(null)
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -86,9 +88,21 @@ export default function App() {
     enabled: view === 'groups',
   })
 
+  const scenes = useInfiniteQuery({
+    queryKey: ['scenes', filters],
+    queryFn: ({ pageParam = 0 }) => fetchScenes(filters, pageParam, SCENE_PAGE),
+    initialPageParam: 0,
+    getNextPageParam: (last) => {
+      const next = last.offset + last.limit
+      return next < last.total ? next : undefined
+    },
+    enabled: view === 'scenes',
+  })
+
   const items = images.data?.pages.flatMap((p) => p.items) ?? []
   const total = images.data?.pages[0]?.total ?? 0
   const groupTotal = groups.data?.pages[0]?.total ?? 0
+  const sceneTotal = scenes.data?.pages[0]?.total ?? 0
 
   const updateFilter = useCallback((patch) => {
     setFilters((f) => ({ ...f, ...patch }))
@@ -96,15 +110,15 @@ export default function App() {
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
 
-  // Refetch the photo/group list queries (used to roll back a failed decision).
+  // Refetch the photo/group/scene list queries (roll back a failed decision).
   const invalidateLists = useCallback(() => {
-    qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) })
+    qc.invalidateQueries({ predicate: (q) => ['images', 'groups', 'scenes'].includes(q.queryKey[0]) })
   }, [qc])
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
     qc.invalidateQueries({
-      predicate: (q) => ['images', 'groups', 'meta'].includes(q.queryKey[0]),
+      predicate: (q) => ['images', 'groups', 'scenes', 'meta'].includes(q.queryKey[0]),
     })
   }, [qc])
 
@@ -124,18 +138,17 @@ export default function App() {
   // it — works for both the flat images cache and the nested groups cache.
   const patchDecision = useCallback((id, decision) => {
     qc.setQueriesData(
-      { predicate: (q) => ['images', 'groups'].includes(q.queryKey[0]) },
+      { predicate: (q) => ['images', 'groups', 'scenes'].includes(q.queryKey[0]) },
       (data) => {
         if (!data?.pages) return data
+        const patchItems = (arr) => arr?.map((it) => (it.id === id ? { ...it, decision } : it))
         return {
           ...data,
           pages: data.pages.map((pg) => ({
             ...pg,
-            items: pg.items?.map((it) => (it.id === id ? { ...it, decision } : it)),
-            groups: pg.groups?.map((g) => ({
-              ...g,
-              items: g.items.map((it) => (it.id === id ? { ...it, decision } : it)),
-            })),
+            items: patchItems(pg.items),
+            groups: pg.groups?.map((g) => ({ ...g, items: patchItems(g.items) })),
+            scenes: pg.scenes?.map((s) => ({ ...s, items: patchItems(s.items) })),
           })),
         }
       },
@@ -163,8 +176,9 @@ export default function App() {
     }
   }, [patchDecision, invalidateLists])
 
-  const headerCount = view === 'grid' ? total : groupTotal
-  const headerLabel = view === 'grid' ? 'photos' : 'duplicate groups'
+  const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal : groupTotal
+  const headerLabel = view === 'grid' ? 'photos'
+    : view === 'scenes' ? 'scenes' : 'duplicate groups'
 
   return (
     <div className="app">
@@ -207,6 +221,7 @@ export default function App() {
           </button>
           <div className="seg view-toggle">
             <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>Grid</button>
+            <button className={view === 'scenes' ? 'active' : ''} onClick={() => setView('scenes')}>Scenes</button>
             <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
           </div>
         </div>
@@ -228,6 +243,13 @@ export default function App() {
               onFaceChange={refetchPeople}
             />
           )
+        ) : view === 'scenes' ? (
+          <SceneView
+            query={scenes}
+            onDecision={setDecision}
+            onDecisionsBulk={setDecisionsBulk}
+            people={meta.data?.clusters ?? []}
+          />
         ) : (
           <GroupView
             query={groups}

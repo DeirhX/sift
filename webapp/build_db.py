@@ -217,8 +217,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                 para_aesthetic, para_quality, para_composition, para_light,
                 para_color, para_dof, para_content, clip_iqa, caption,
                 imgw, imgh, thumb, content_hash, mtime, fsize, n_faces,
-                face_sharp, face_expr, portrait)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                face_sharp, face_expr, portrait, scene_group, capture_time)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (idx, im["path"], im["filename"],
              im.get("sharpness"), im.get("combined"), im.get("raw_laplacian"),
              im.get("dup_group"),
@@ -227,7 +227,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
              im.get("para_color"), im.get("para_dof"), im.get("para_content"),
              im.get("clip_iqa"), im.get("caption"),
              imgw, imgh, thumb_name, chash, jobs[idx][8], jobs[idx][9],
-             len(faces_list), face_sharp, face_expr, portrait),
+             len(faces_list), face_sharp, face_expr, portrait,
+             im.get("scene_group"), im.get("capture_time")),
         )
 
         for f in faces_list:
@@ -351,13 +352,15 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                          (h, decision))
 
     # ── Meta ─────────────────────────────────────────────────────────────────
-    for k in ("folder", "backend", "caption_model", "face_model"):
+    for k in ("folder", "backend", "caption_model", "face_model", "scene_model"):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                      (k, str(report.get(k))))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("total_images", str(len(images))))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("duplicate_groups", str(report.get("duplicate_groups", 0))))
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                 ("scene_groups", str(report.get("scene_groups", 0))))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("thumb_size", str(thumb_size)))
 

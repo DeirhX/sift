@@ -34,18 +34,25 @@ def default_report():
         "caption_model": None,
         "face_model": "mtcnn+vggface2",
         "face_expr_model": "clip-b32-expr",
+        "scene_model": "exif+clip-b32",
         "duplicate_groups": 1,
+        "scene_groups": 1,
         "images": [
+            # a + b are a near-dup set; all three share scene 0, so scene 0
+            # nests one dup set ({a, b}) plus a loose member (c).
             {"path": "/fake/a.jpg", "filename": "a.jpg", "combined": 0.80,
-             "sharpness": 0.70, "para_aesthetic": 0.75, "dup_group": 0, "imgw": 400, "imgh": 300,
+             "sharpness": 0.70, "para_aesthetic": 0.75, "dup_group": 0,
+             "scene_group": 0, "capture_time": 1000.0, "imgw": 400, "imgh": 300,
              "faces": [{"bbox": [10.0, 10.0, 50.0, 50.0], "prob": 0.99,
                         "cluster_id": 0, "name": None, "sharp": 0.90, "expr": 0.80}]},
             {"path": "/fake/b.jpg", "filename": "b.jpg", "combined": 0.60,
-             "sharpness": 0.50, "para_aesthetic": 0.55, "dup_group": 0, "imgw": 400, "imgh": 300,
+             "sharpness": 0.50, "para_aesthetic": 0.55, "dup_group": 0,
+             "scene_group": 0, "capture_time": 1010.0, "imgw": 400, "imgh": 300,
              "faces": [{"bbox": [20.0, 20.0, 60.0, 60.0], "prob": 0.95,
                         "cluster_id": 1, "name": None, "sharp": 0.30, "expr": 0.40}]},
             {"path": "/fake/c.jpg", "filename": "c.jpg", "combined": 0.50,
-             "sharpness": 0.40, "para_aesthetic": 0.45, "dup_group": None, "imgw": 400, "imgh": 300,
+             "sharpness": 0.40, "para_aesthetic": 0.45, "dup_group": None,
+             "scene_group": 0, "capture_time": 1020.0, "imgw": 400, "imgh": 300,
              "faces": [
                  {"bbox": [5.0, 5.0, 80.0, 80.0], "prob": 0.97,
                   "cluster_id": 0, "name": None, "sharp": 0.60, "expr": 0.50},

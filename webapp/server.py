@@ -141,6 +141,7 @@ def get_meta():
             "with_faces": conn.execute("SELECT COUNT(*) FROM images WHERE n_faces>0").fetchone()[0],
             "with_portrait": n_portrait,
             "dup_groups": int(meta.get("duplicate_groups", 0)),
+            "scene_groups": int(meta.get("scene_groups", 0)),
         }
 
         # Fixed-domain [0,1] histograms so the slider track shows the value
@@ -379,6 +380,8 @@ def _rows_to_items(conn, rows) -> list[dict]:
             "para_light": d["para_light"],
             "clip_iqa": d["clip_iqa"],
             "dup_group": d["dup_group"],
+            "scene_group": d.get("scene_group"),
+            "capture_time": d.get("capture_time"),
             "caption": d["caption"],
             "imgw": d["imgw"], "imgh": d["imgh"],
             "face_sharp": d.get("face_sharp"), "face_expr": d.get("face_expr"),
@@ -472,6 +475,101 @@ def get_groups(
                            "match_count": n_match, "items": items})
 
     return {"total": total, "offset": offset, "limit": limit, "groups": groups}
+
+
+# ── Scenes (rough hierarchy: scene -> nested near-dup sets) ────────────────────
+
+@app.get("/api/scenes")
+def get_scenes(
+    offset: int = 0,
+    limit:  int = Query(40, le=200),
+    order:  str = "time",          # time | size | id
+    score_min: float = 0.0, score_max: float = 1.0,
+    sharp_min: float = 0.0, sharp_max: float = 1.0,
+    aes_min:   float = 0.0, aes_max:   float = 1.0,
+    portrait_min: float = 0.0, portrait_max: float = 1.0,
+    tags:    str | None = None,
+    people:  str | None = None,
+    folder:  str | None = None,
+    folder_recursive: bool = True,
+    decision: str = "all",
+    q:       str | None = None,
+):
+    """Return rough scene groups (paginated by scene), each with all member
+    photos ordered best-first. Every item carries its `dup_group`, so the client
+    nests near-duplicate sub-piles with a cheap groupBy(dup_group). Same filter
+    semantics as /api/groups: a scene is included when at least one member
+    matches, but every member is returned so the full scene stays reviewable."""
+    if order == "size":
+        order_sql = "c DESC, scene_group ASC"
+    elif order == "id":
+        order_sql = "scene_group ASC"
+    else:  # time: oldest scene first (by earliest capture)
+        order_sql = "tmin ASC, scene_group ASC"
+
+    with db() as conn:
+        where, params = _image_where(
+            conn, score_min=score_min, score_max=score_max,
+            sharp_min=sharp_min, sharp_max=sharp_max,
+            aes_min=aes_min, aes_max=aes_max,
+            portrait_min=portrait_min, portrait_max=portrait_max,
+            tags=tags, people=people, q=q, decision=decision,
+            folder=folder, folder_recursive=folder_recursive)
+        where.append("i.scene_group IS NOT NULL")
+        where_sql = " AND ".join(where)
+
+        # scenes with at least one member passing the filters
+        qual = (f"SELECT DISTINCT i.scene_group FROM images i "
+                f"LEFT JOIN {DEC_ON} "
+                f"WHERE {where_sql}")
+
+        total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
+
+        scene_rows = conn.execute(
+            f"""SELECT scene_group, COUNT(*) c,
+                       MIN(capture_time) tmin, MAX(capture_time) tmax
+                FROM images WHERE scene_group IN ({qual})
+                GROUP BY scene_group
+                ORDER BY {order_sql}
+                LIMIT ? OFFSET ?""",
+            params + [limit, offset],
+        ).fetchall()
+
+        page_sids = [sr["scene_group"] for sr in scene_rows]
+
+        match_ids: set[int] = set()
+        if page_sids:
+            sph = ",".join("?" * len(page_sids))
+            match_sql = (f"SELECT i.id FROM images i "
+                         f"LEFT JOIN {DEC_ON} "
+                         f"WHERE {where_sql} AND i.scene_group IN ({sph})")
+            match_ids = {r[0] for r in conn.execute(match_sql, params + page_sids)}
+
+        scenes = []
+        for sr in scene_rows:
+            sid = sr["scene_group"]
+            members = conn.execute(
+                f"""SELECT i.*, d.decision
+                   FROM images i
+                   LEFT JOIN {DEC_ON}
+                   WHERE i.scene_group = ?
+                   ORDER BY i.combined DESC, i.id ASC""",
+                (sid,),
+            ).fetchall()
+            items = _rows_to_items(conn, members)
+            n_match = 0
+            for it in items:
+                it["matches"] = it["id"] in match_ids
+                n_match += it["matches"]
+            # how many distinct near-dup sets this scene contains
+            n_dup_sets = len({it["dup_group"] for it in items
+                              if it["dup_group"] is not None})
+            scenes.append({"scene_group": sid, "count": len(items),
+                           "match_count": n_match, "dup_sets": n_dup_sets,
+                           "time_start": sr["tmin"], "time_end": sr["tmax"],
+                           "items": items})
+
+    return {"total": total, "offset": offset, "limit": limit, "scenes": scenes}
 
 
 # ── Image serving ─────────────────────────────────────────────────────────────
@@ -1218,6 +1316,8 @@ def _build_analyze_steps(payload: dict) -> list[tuple[str, list[str]]]:
             audit.append("--face-expr")
     if payload.get("no_cache"):
         audit.append("--no-cache")
+    if payload.get("no_scenes"):
+        audit.append("--no-scenes")
 
     # Numeric knobs — parsed/clamped, never passed through verbatim.
     def _num(key, flag, lo, hi, cast):
@@ -1233,6 +1333,8 @@ def _build_analyze_steps(payload: dict) -> list[tuple[str, list[str]]]:
     _num("dup_threshold", "--dup-threshold", 0, 64, int)
     _num("face_min_rel", "--face-min-rel", 0.0, 1.0, float)
     _num("face_eps", "--face-eps", 0.05, 1.5, float)
+    _num("scene_time_gap", "--scene-time-gap", 1, 1440, float)
+    _num("scene_sim", "--scene-sim", 0.0, 1.0, float)
 
     build = [py, str(BUILD_SCRIPT), str(report_path),
              "--db", str(DB_PATH), "--thumbs", str(THUMB_DIR)]

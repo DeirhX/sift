@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS images (
     n_faces         INTEGER DEFAULT 0,
     face_sharp      REAL,   -- largest face's normalised sharpness
     face_expr       REAL,   -- largest face's expression quality (if scored)
-    portrait        REAL    -- combined portrait quality of the largest face
+    portrait        REAL,   -- combined portrait quality of the largest face
+    scene_group     INTEGER,-- rough scene id (near-dup dup_group nests inside)
+    capture_time    REAL    -- EXIF capture time (epoch), mtime fallback
 );
 
 CREATE TABLE IF NOT EXISTS faces (
@@ -94,6 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_images_combined   ON images(combined);
 CREATE INDEX IF NOT EXISTS idx_images_sharpness  ON images(sharpness);
 CREATE INDEX IF NOT EXISTS idx_images_aesthetic  ON images(para_aesthetic);
 CREATE INDEX IF NOT EXISTS idx_images_dup        ON images(dup_group);
+CREATE INDEX IF NOT EXISTS idx_images_scene      ON images(scene_group);
 CREATE INDEX IF NOT EXISTS idx_faces_image       ON faces(image_id);
 CREATE INDEX IF NOT EXISTS idx_faces_cluster     ON faces(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_tags_image        ON image_tags(image_id);
@@ -151,6 +154,7 @@ CREATE TABLE IF NOT EXISTS cluster_name_anchors (
 _IMAGE_LATE_COLUMNS = (
     ("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER"),
     ("face_sharp", "REAL"), ("face_expr", "REAL"), ("portrait", "REAL"),
+    ("scene_group", "INTEGER"), ("capture_time", "REAL"),
 )
 _FACE_LATE_COLUMNS = (("sharp", "REAL"), ("expr", "REAL"))
 

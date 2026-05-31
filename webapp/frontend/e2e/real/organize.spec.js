@@ -92,3 +92,55 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   expect(rejectedCount(lib)).toBe(0)
   expect(rootFileCount(lib)).toBe(beforeRoot)
 })
+
+// Proves the REAL pipeline (EXIF read + CLIP scene grouping) computed and
+// surfaced the rough-scene hierarchy on the sample photos. Reuses the DB built
+// by the analyze test above (same server, workers:1), so it must run after it;
+// skips cleanly if analysis hasn't populated the library yet.
+test('rough scenes are computed and surfaced from the real analysis', async ({ page, request }) => {
+  // Decide on the API, not the UI: reading the grid text races the images
+  // query (it shows "0 photos" for a beat on load).
+  const meta = await (await request.get('/api/meta')).json()
+  test.skip(meta.counts.total === 0, 'library not analyzed yet (run the analyze test)')
+  await page.goto('/')
+
+  // Scene grouping ran: the model is recorded and the count key is present.
+  expect(meta.meta.scene_model).toMatch(/exif/)        // "exif+clip-b32" by default
+  expect(typeof meta.counts.scene_groups).toBe('number')
+
+  // capture_time flows through the real pipeline for every image (EXIF or the
+  // mtime fallback — never null), proving the new column is populated.
+  const imgs = await (await request.get('/api/images?limit=10')).json()
+  expect(imgs.items.length).toBeGreaterThan(0)
+  expect(imgs.items.some((it) => it.capture_time != null)).toBeTruthy()
+
+  // /api/scenes is well-formed; every member carries its dup_group so the
+  // client can nest near-duplicate sub-piles.
+  const scenesApi = await (await request.get('/api/scenes')).json()
+  expect(scenesApi.total).toBe(meta.counts.scene_groups)
+  for (const sc of scenesApi.scenes) {
+    expect(sc.items.length).toBeGreaterThan(1)         // scenes are multi-member
+    expect(sc.items.every((it) => 'dup_group' in it)).toBeTruthy()
+    expect(sc.time_start).not.toBeNull()
+  }
+
+  // The Scenes view is reachable either way.
+  await page.getByRole('button', { name: 'Scenes' }).click()
+
+  if (meta.counts.scene_groups > 0) {
+    // Real multi-photo scenes formed: drill into the first and confirm it
+    // renders its nested sub-piles and/or loose members.
+    const piles = page.locator('.scene-pile')
+    await expect(piles.first()).toBeVisible()
+    await piles.first().click()
+    const scene = page.locator('.scene-panel')
+    await expect(scene).toBeVisible()
+    const sub = await scene.locator('.pile').count()
+    const loose = await scene.locator('.scene-loose').count()
+    expect(sub + loose).toBeGreaterThan(0)
+    await scene.getByRole('button', { name: 'Close' }).click()
+  } else {
+    // The sample produced no multi-photo scene; the view should say so.
+    await expect(page.locator('.empty')).toContainText('No scenes found')
+  }
+})

@@ -64,6 +64,7 @@ import sys
 import json
 import argparse
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 # Make sure aesthetic_scorer.py is importable regardless of working directory
@@ -505,6 +506,144 @@ def group_duplicates(hashes: dict, threshold: int = 6) -> list[list[Path]]:
     return groups
 
 
+def assign_dup_groups(paths: list[Path], hashes: dict, threshold: int,
+                      scene_of: dict | None = None) -> tuple[dict, list]:
+    """Assign fine near-duplicate group ids. When `scene_of` is given, duplicates
+    are detected only *within* a scene (so every dup_group nests inside exactly
+    one scene_group); singleton scenes (scene id None) never produce dups. When
+    `scene_of` is None, duplicates are detected globally (legacy behaviour)."""
+    if scene_of is None:
+        buckets = [[p for p in paths if p in hashes]]
+    else:
+        from collections import defaultdict
+        by_scene: dict = defaultdict(list)
+        for p in paths:
+            sid = scene_of.get(p)
+            if sid is not None and p in hashes:
+                by_scene[sid].append(p)
+        # Deterministic order: by scene id.
+        buckets = [by_scene[sid] for sid in sorted(by_scene)]
+
+    groups: list = []
+    for members in buckets:
+        groups.extend(group_duplicates({p: hashes[p] for p in members}, threshold))
+
+    path_to_group: dict = {}
+    for gid, group in enumerate(groups):
+        for p in group:
+            path_to_group[p] = gid
+    return path_to_group, groups
+
+
+# ── Capture time (EXIF) + scene grouping ──────────────────────────────────────
+
+def read_capture_time(path: Path) -> float | None:
+    """Best-effort capture timestamp (epoch seconds) from EXIF: DateTimeOriginal,
+    then DateTimeDigitized, then the IFD0 DateTime. Returns None when absent or
+    unparseable, so callers can fall back to filesystem mtime."""
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return None
+            dt = None
+            try:
+                sub = exif.get_ifd(0x8769)          # ExifIFD pointer
+                dt = sub.get(0x9003) or sub.get(0x9004)  # DateTimeOriginal/Digitized
+            except Exception:
+                pass
+            dt = dt or exif.get(0x0132)             # IFD0 DateTime
+            if not dt:
+                return None
+            return datetime.strptime(str(dt).strip(), "%Y:%m:%d %H:%M:%S").timestamp()
+    except Exception:
+        return None
+
+
+def compute_clip_embeddings(paths: list[Path], device: str,
+                            batch_size: int = 64) -> dict:
+    """L2-normalised CLIP ViT-B/32 image embeddings per path, for semantic scene
+    similarity. Standardised on ViT-B/32 regardless of the aesthetic backend so
+    scene grouping is consistent. Returns {path: 1-D float32 ndarray}."""
+    import torch
+    import open_clip
+
+    model, _, prep = open_clip.create_model_and_transforms(
+        "ViT-B-32", pretrained="openai", device=device)
+    model.eval()
+
+    embs: dict = {}
+    for i in tqdm(range(0, len(paths), batch_size), desc="Scene embeddings (CLIP)"):
+        batch = paths[i:i + batch_size]
+        tensors, bpaths = [], []
+        for p in batch:
+            try:
+                tensors.append(prep(Image.open(p).convert("RGB")))
+                bpaths.append(p)
+            except Exception as e:
+                print(f"  skip {p.name}: {e}")
+        if not tensors:
+            continue
+        t = torch.stack(tensors).to(device)
+        with torch.no_grad(), torch.amp.autocast(device):
+            f = model.encode_image(t)
+            f = f / f.norm(dim=-1, keepdim=True)
+        for p, v in zip(bpaths, f.cpu().float().numpy()):
+            embs[p] = v
+
+    del model
+    return embs
+
+
+def _visually_similar(a: Path, b: Path, embeddings: dict | None, hashes: dict | None,
+                      sim: float, phash_dist: int) -> bool:
+    """Whether two images look like the same scene. Prefers CLIP cosine when
+    embeddings are present, else falls back to perceptual-hash distance."""
+    if embeddings is not None and a in embeddings and b in embeddings:
+        return float(np.dot(embeddings[a], embeddings[b])) >= sim
+    if hashes is not None and a in hashes and b in hashes:
+        return (hashes[a] - hashes[b]) <= phash_dist
+    return False
+
+
+def group_scenes(paths: list[Path], times: dict,
+                 embeddings: dict | None = None, hashes: dict | None = None,
+                 big_gap: float = 3600.0, small_gap: float = 120.0,
+                 sim: float = 0.85, phash_dist: int = 18) -> tuple[dict, int]:
+    """Segment images into rough "scenes" in capture-time order. EXIF time is the
+    primary signal; visual similarity (CLIP cosine, or phash fallback) refines it.
+
+    Boundary between two time-adjacent images when:
+      - the gap exceeds `big_gap` (always a new scene), or
+      - the gap exceeds `small_gap` AND they are not visually similar.
+    Tight bursts (gap <= small_gap) always stay together.
+
+    Returns ({path: scene_id|None}, n_scenes). Like dup groups, only multi-member
+    scenes get an id; lone images get None."""
+    if not paths:
+        return {}, 0
+    ordered = sorted(paths, key=lambda p: (times.get(p, 0.0), str(p)))
+    segments: list = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        dt = times.get(cur, 0.0) - times.get(prev, 0.0)
+        similar = _visually_similar(prev, cur, embeddings, hashes, sim, phash_dist)
+        if dt > big_gap or (dt > small_gap and not similar):
+            segments.append([cur])
+        else:
+            segments[-1].append(cur)
+
+    scene_of: dict = {}
+    sid = 0
+    for seg in segments:
+        if len(seg) > 1:
+            for p in seg:
+                scene_of[p] = sid
+            sid += 1
+        else:
+            scene_of[seg[0]] = None
+    return scene_of, sid
+
+
 # ── Face detection / clustering (facenet-pytorch + DBSCAN) ───────────────────
 
 def run_faces(paths: list[Path], device: str,
@@ -692,6 +831,14 @@ def main():
     ap.add_argument("--recurse",        action="store_true")
     ap.add_argument("--out",            default=None)
     ap.add_argument("--dup-threshold",  type=int,   default=6)
+    ap.add_argument("--no-scenes",      action="store_true",
+                    help="Skip rough scene grouping (only fine near-dup groups)")
+    ap.add_argument("--scene-time-gap", type=float, default=60.0, metavar="MIN",
+                    help="Minutes between shots that always starts a new scene (default: 60)")
+    ap.add_argument("--scene-small-gap", type=float, default=2.0, metavar="MIN",
+                    help="Below this gap (minutes) shots always stay in one scene (default: 2)")
+    ap.add_argument("--scene-sim",      type=float, default=0.85, metavar="F",
+                    help="CLIP cosine similarity for 'same scene' (default: 0.85)")
     ap.add_argument("--backend",        choices=["clip-iqa", "para", "both"],
                     default="para",
                     help="Aesthetic scoring backend (default: para)")
@@ -734,6 +881,7 @@ def main():
 
     use_clip_iqa = not args.no_clip and args.backend in ("clip-iqa", "both")
     use_para     = not args.no_clip and args.backend in ("para",     "both")
+    use_scenes   = not args.no_scenes
 
     out_path = Path(args.out) if args.out else folder / "audit_report.json"
 
@@ -751,11 +899,13 @@ def main():
             # Only trust the cache when it was produced with the same scoring
             # configuration, so reused records have exactly the expected shape.
             cur_cfg = ("none" if args.no_clip else args.backend,
-                       bool(args.caption), bool(args.faces), bool(args.face_expr))
+                       bool(args.caption), bool(args.faces), bool(args.face_expr),
+                       bool(use_scenes))
             prev_cfg = (prev.get("backend"),
                         prev.get("caption_model") is not None,
                         prev.get("face_model") is not None,
-                        prev.get("face_expr_model") is not None)
+                        prev.get("face_expr_model") is not None,
+                        prev.get("scene_model") is not None)
             if prev_cfg == cur_cfg:
                 prev_by_path = {r["path"]: r for r in prev.get("images", [])}
             else:
@@ -782,6 +932,7 @@ def main():
         if use_clip_iqa and "clip_iqa"       not in prev: return None
         if args.caption and "caption"        not in prev: return None
         if args.faces   and "faces"          not in prev: return None
+        if use_scenes   and "scene_group"    not in prev: return None
         return prev
 
     cached: dict[Path, dict] = {}
@@ -827,7 +978,7 @@ def main():
 
     combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
 
-    # ── Duplicate detection (phash reused from cache; only new files hashed) ──
+    # ── Perceptual hashes (reused from cache; only new files hashed) ──
     print("\nComputing perceptual hashes for duplicate detection...")
     hashes: dict = {}
     for p in cached:
@@ -838,11 +989,47 @@ def main():
     new_hashes, new_sizes = compute_phashes(to_process) if to_process else ({}, {})
     hashes.update(new_hashes)
     img_sizes = new_sizes
-    dup_groups = group_duplicates(hashes, threshold=args.dup_threshold)
-    path_to_group: dict[Path, int] = {}
-    for gid, group in enumerate(dup_groups):
-        for p in group:
-            path_to_group[p] = gid
+
+    # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
+    capture_time: dict[Path, float] = {}
+    for p in paths:
+        prev = cached.get(p)
+        if prev is not None and prev.get("capture_time") is not None:
+            capture_time[p] = prev["capture_time"]
+            continue
+        ct = read_capture_time(p)
+        capture_time[p] = ct if ct is not None else (sigs[p][0] or 0.0)
+
+    # ── Rough scene grouping ──
+    # Global like face clustering: recomputed whenever any file changed, otherwise
+    # the cached scene_group is reused verbatim. CLIP embeddings (re-derived for
+    # the whole set, never persisted) drive "same scene"; phash is the fallback.
+    scenes_global = use_scenes and bool(to_process)
+    embeddings: dict | None = None
+    if scenes_global and not args.no_clip:
+        print()
+        embeddings = compute_clip_embeddings(paths, device_for())
+
+    if not use_scenes:
+        scene_assign: dict = {p: None for p in paths}
+    elif scenes_global:
+        scene_assign, _ = group_scenes(
+            paths, capture_time,
+            embeddings=embeddings, hashes=hashes,
+            big_gap=args.scene_time_gap * 60.0,
+            small_gap=args.scene_small_gap * 60.0,
+            sim=args.scene_sim,
+        )
+    else:
+        scene_assign = {p: (cached[p].get("scene_group") if p in cached else None)
+                        for p in paths}
+    scene_count = len({s for s in scene_assign.values() if s is not None})
+
+    # ── Fine near-duplicate groups (nested within scenes when enabled) ──
+    path_to_group, dup_groups = assign_dup_groups(
+        paths, hashes, args.dup_threshold,
+        scene_of=scene_assign if use_scenes else None,
+    )
 
     # ── BLIP captions + CLIP keyword tags (new files only) ──
     captions: dict[Path, dict] = {}
@@ -876,6 +1063,7 @@ def main():
         mt, sz = sigs[p]
         rec["mtime"] = mt
         rec["fsize"] = sz
+        rec["capture_time"] = capture_time.get(p)
         if p in hashes:
             rec["phash"] = str(hashes[p])
         return rec
@@ -888,6 +1076,7 @@ def main():
             rec["sharpness"] = round(sharpness[p], 4)
             rec["combined"]  = round(combined[p], 4)
             rec["dup_group"] = path_to_group.get(p)
+            rec["scene_group"] = scene_assign.get(p)
             if use_para and use_clip_iqa:
                 rec["combined_clip_iqa"] = round(
                     0.4 * sharpness[p] + 0.6 * rec.get("clip_iqa", 0.5), 4)
@@ -904,6 +1093,7 @@ def main():
             "sharpness":     round(sharpness[p], 4),
             "combined":      round(combined[p], 4),
             "dup_group":     path_to_group.get(p),
+            "scene_group":   scene_assign.get(p),
             "raw_laplacian": round(raw_sharp[p], 2),
         }
         # Dimensions for every image (not just faces) so the grid can lay out
@@ -951,8 +1141,12 @@ def main():
             "caption_model":    "blip-base+clip-b32" if args.caption else None,
             "face_model":       "mtcnn+vggface2" if args.faces else None,
             "face_expr_model":  "clip-b32-expr" if (args.faces and args.face_expr) else None,
+            "scene_model":      (None if not use_scenes
+                                 else "exif+clip-b32" if not args.no_clip
+                                 else "exif+phash"),
             "total_images":     len(records),
             "duplicate_groups": len(dup_groups),
+            "scene_groups":     scene_count,
             "faces_images":     n_faces_images if args.faces else None,
             "face_clusters":    n_clusters     if args.faces else None,
             "images":           records,
