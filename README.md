@@ -53,7 +53,10 @@ Useful flags (full list in the script's `--help`):
 - `--backend {para,clip-iqa,both}` — aesthetic model (default `para`)
 - `--no-clip` — sharpness + duplicates only (fast, no models)
 - `--caption` — add BLIP captions + CLIP keyword tags
-- `--faces` — detect and cluster faces (needs `facenet-pytorch`)
+- `--faces` — detect and cluster faces (needs `facenet-pytorch`). Also scores
+  each face's **region sharpness** (blur), normalized across all faces.
+- `--face-expr` — also score **portrait expression** quality per face via
+  zero-shot CLIP (coarse pleasant-vs-grimace; requires `--faces`)
 - `--face-ref "Alice=alice.jpg"` — auto-name the cluster matching a reference
 
 Output: `audit_report.json` in the folder (or `--out <path>`).
@@ -92,10 +95,17 @@ python webapp/server.py --db "E:\Photos\photos.db"
 cd webapp/frontend && npm run dev
 ```
 
-In the UI you can filter by score/sharpness/aesthetic, people, tags and
+In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
 captions; review duplicate groups; auto-cull (keep the best of each group);
 and finally **Apply** to move every `del`-marked file into `<library>/_rejected/`.
 Apply is logged and **undoable**.
+
+**Face editing** (sidebar "manage" + clicking a face box on a tile): rename or
+merge people, reassign a face to another/new person, or delete a false-positive
+box. These edits are **persisted as overrides** and re-applied on the next
+`build_db` ingest, so they survive a fresh audit (matched by image content hash
++ face bbox). Manually created people get ids ≥ 100000 to avoid colliding with
+the detector's clusters.
 
 ## Decisions survive moves
 
@@ -109,11 +119,12 @@ content rather than being orphaned.
 - `clip_iqa` — CLIP-IQA bipolar prompt score
 - `para_aesthetic`, `para_*` — PARA model heads (aesthetic/quality/composition/light/color/dof/content)
 - `combined` — `0.4 * sharpness + 0.6 * primary_aesthetic`
+- per-face `sharp` / `expr` (with `--faces` / `--face-expr`); `build_db`
+  aggregates the largest face per image into `face_sharp`, `face_expr` and a
+  combined `portrait` (`0.6 * face_sharp + 0.4 * face_expr`)
 
 ## Other scripts
 
-- `generate_viewer.py` — build a standalone, self-contained `audit_viewer.html`
-  (older review UI; cluster names live in `localStorage`)
 - `reface.py` — re-run only face detection on an existing report
 - `classify_inspiration.py` — one-off CLIP folder classifier (paths hardcoded)
 
@@ -126,4 +137,9 @@ content rather than being orphaned.
   for very large libraries.
 - Orphaned thumbnails are pruned automatically on each `build_db` run; pass
   `--no-prune` to keep them.
-- No tests yet.
+- Portrait expression scoring is **coarse** (zero-shot CLIP on face crops);
+  it's useful for ranking/flagging, not a forensic judgement. Closed-eye
+  detection is intentionally not implemented (it needs eyelid landmarks, not
+  CLIP).
+- Tests live in `tests/` (run `pytest -q`); they cover the ingest aggregation
+  and the face/cluster mutation + override-persistence endpoints.

@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import ApplyPanel from './ApplyPanel.jsx'
 import RangeSlider from './RangeSlider.jsx'
+import { renameCluster, mergeClusters } from '../api.js'
 
 // Left filter panel: sort, score/sharpness/aesthetic ranges, dup mode,
 // decision, people clusters, tags, plus a reset and export link.
@@ -18,14 +20,31 @@ function Seg({ value, options, onChange }) {
   )
 }
 
-export default function Sidebar({ meta, filters, updateFilter, toggleInList, resetFilters, total }) {
+export default function Sidebar({ meta, filters, updateFilter, toggleInList, resetFilters, total, onPeopleChange }) {
   const clusters = meta?.clusters ?? []
   const tags = meta?.tags ?? []
   const counts = meta?.counts ?? {}
   const hist = meta?.histograms ?? {}
+  const [managePeople, setManagePeople] = useState(false)
 
   const personLabel = (c) =>
     c.name && c.name.trim() ? c.name : `Person ${c.cluster_id}`
+
+  const saveName = async (cid, name, prev) => {
+    if ((name || '').trim() === (prev || '').trim()) return
+    await renameCluster(cid, name.trim())
+    onPeopleChange?.()
+  }
+
+  const doMerge = async (from, into) => {
+    if (into === '' || Number(into) === from) return
+    const target = clusters.find((c) => c.cluster_id === Number(into))
+    const src = clusters.find((c) => c.cluster_id === from)
+    if (!window.confirm(
+      `Merge "${personLabel(src)}" (${src?.count}) into "${personLabel(target)}"?`)) return
+    await mergeClusters(from, Number(into))
+    onPeopleChange?.()
+  }
 
   return (
     <aside className="sidebar">
@@ -40,6 +59,7 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
           <option value="combined">Quality (combined)</option>
           <option value="sharpness">Sharpness</option>
           <option value="aesthetic">Aesthetic</option>
+          {meta?.has_portrait && <option value="portrait">Portrait quality</option>}
           <option value="filename">Filename</option>
         </select>
         <Seg
@@ -52,6 +72,9 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
       <RangeSlider label="Quality range" minKey="scoreMin" maxKey="scoreMax" filters={filters} updateFilter={updateFilter} histogram={hist.combined} />
       <RangeSlider label="Sharpness range" minKey="sharpMin" maxKey="sharpMax" filters={filters} updateFilter={updateFilter} histogram={hist.sharpness} />
       <RangeSlider label="Aesthetic range" minKey="aesMin" maxKey="aesMax" filters={filters} updateFilter={updateFilter} histogram={hist.aesthetic} />
+      {meta?.has_portrait && (
+        <RangeSlider label="Portrait quality" minKey="portraitMin" maxKey="portraitMax" filters={filters} updateFilter={updateFilter} histogram={hist.portrait} />
+      )}
 
       <div className="filter-group">
         <label className="group-label">Duplicates</label>
@@ -79,18 +102,53 @@ export default function Sidebar({ meta, filters, updateFilter, toggleInList, res
 
       {clusters.length > 0 && (
         <div className="filter-group">
-          <label className="group-label">People</label>
-          <div className="chip-list">
-            {clusters.map((c) => (
-              <span
-                key={c.cluster_id}
-                className={'chip' + (filters.people.includes(String(c.cluster_id)) ? ' active' : '')}
-                onClick={() => toggleInList('people', String(c.cluster_id))}
-              >
-                {personLabel(c)}<span className="count">{c.count}</span>
-              </span>
-            ))}
-          </div>
+          <label className="group-label">
+            People
+            <button className="link-btn" onClick={() => setManagePeople((v) => !v)}>
+              {managePeople ? 'done' : 'manage'}
+            </button>
+          </label>
+
+          {!managePeople ? (
+            <div className="chip-list">
+              {clusters.map((c) => (
+                <span
+                  key={c.cluster_id}
+                  className={'chip' + (filters.people.includes(String(c.cluster_id)) ? ' active' : '')}
+                  onClick={() => toggleInList('people', String(c.cluster_id))}
+                >
+                  {personLabel(c)}<span className="count">{c.count}</span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="people-manager">
+              {clusters.map((c) => (
+                <div className="person-row" key={c.cluster_id}>
+                  <input
+                    className="person-name"
+                    defaultValue={c.name || ''}
+                    placeholder={`Person ${c.cluster_id}`}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur() }}
+                    onBlur={(e) => saveName(c.cluster_id, e.target.value, c.name)}
+                  />
+                  <span className="person-count">{c.count}</span>
+                  <select
+                    className="person-merge"
+                    value=""
+                    onChange={(e) => { doMerge(c.cluster_id, e.target.value); e.target.value = '' }}
+                    title="Merge this person into another"
+                  >
+                    <option value="">merge →</option>
+                    {clusters.filter((o) => o.cluster_id !== c.cluster_id).map((o) => (
+                      <option key={o.cluster_id} value={o.cluster_id}>{personLabel(o)}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+              <div className="manager-note">Edits last until the next DB ingest.</div>
+            </div>
+          )}
         </div>
       )}
 

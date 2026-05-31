@@ -8,6 +8,7 @@ export const DEFAULT_FILTERS = {
   scoreMin: 0, scoreMax: 1,
   sharpMin: 0, sharpMax: 1,
   aesMin: 0, aesMax: 1,
+  portraitMin: 0, portraitMax: 1,
   dupMode: 'all',
   decision: 'all',
   tags: [],
@@ -15,7 +16,8 @@ export const DEFAULT_FILTERS = {
   q: '',
 }
 
-const NUM_KEYS = ['scoreMin', 'scoreMax', 'sharpMin', 'sharpMax', 'aesMin', 'aesMax']
+const NUM_KEYS = ['scoreMin', 'scoreMax', 'sharpMin', 'sharpMax', 'aesMin', 'aesMax',
+  'portraitMin', 'portraitMax']
 const LIST_KEYS = ['tags', 'people']
 const STR_KEYS = ['sort', 'dir', 'dupMode', 'decision', 'q']
 

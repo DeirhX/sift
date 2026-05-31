@@ -73,7 +73,10 @@ CREATE TABLE IF NOT EXISTS images (
     content_hash    TEXT,
     mtime           REAL,
     fsize           INTEGER,
-    n_faces         INTEGER DEFAULT 0
+    n_faces         INTEGER DEFAULT 0,
+    face_sharp      REAL,   -- largest face's normalised sharpness
+    face_expr       REAL,   -- largest face's expression quality (if scored)
+    portrait        REAL    -- combined portrait quality of the largest face
 );
 
 CREATE TABLE IF NOT EXISTS faces (
@@ -81,7 +84,20 @@ CREATE TABLE IF NOT EXISTS faces (
     image_id    INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
     x1 REAL, y1 REAL, x2 REAL, y2 REAL,
     prob        REAL,
-    cluster_id  INTEGER
+    cluster_id  INTEGER,
+    sharp       REAL,   -- face-region Laplacian variance, normalised 0-1
+    expr        REAL    -- portrait expression quality 0-1 (NULL if not scored)
+);
+
+-- Manual face edits that must survive a fresh build_db ingest. Keyed by the
+-- image's content hash + the face bbox, so they re-apply to the same face after
+-- the faces table is rebuilt from a regenerated report.
+CREATE TABLE IF NOT EXISTS face_overrides (
+    hash        TEXT NOT NULL,
+    bbox        TEXT NOT NULL,   -- "x1,y1,x2,y2" rounded to 1 decimal
+    action      TEXT NOT NULL,   -- 'assign' | 'delete'
+    cluster_id  INTEGER,         -- target cluster for 'assign'
+    PRIMARY KEY (hash, bbox)
 );
 
 CREATE TABLE IF NOT EXISTS image_tags (
@@ -171,6 +187,23 @@ def _columns(conn, table: str) -> list[str]:
     return [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
 
 
+def bbox_key(x1, y1, x2, y2) -> str:
+    """Canonical face-bbox key shared with the server, so manual face overrides
+    re-match the same face after a rebuild. Mirrors photo_audit's 1-decimal
+    rounding of bbox coordinates."""
+    return ",".join(f"{round(float(v), 1)}" for v in (x1, y1, x2, y2))
+
+
+def _portrait_score(face_sharp, face_expr):
+    """Combine a face's sharpness and expression into one portrait quality.
+    Sharpness dominates (a blurry face is unusable regardless of expression)."""
+    if face_sharp is None:
+        return None
+    if face_expr is None:
+        return round(face_sharp, 4)
+    return round(0.6 * face_sharp + 0.4 * face_expr, 4)
+
+
 def build(report_path: Path, db_path: Path, thumb_dir: Path,
           thumb_size: int, thumb_quality: int, workers: int,
           skip_thumbs: bool, force_thumbs: bool, prune: bool = True) -> None:
@@ -193,11 +226,17 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
     # ── Upgrade pre-incremental DBs: add columns CREATE IF NOT EXISTS can't ───
     img_cols = set(_columns(conn, "images"))
-    for col, decl in (("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER")):
+    for col, decl in (("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER"),
+                      ("face_sharp", "REAL"), ("face_expr", "REAL"), ("portrait", "REAL")):
         if col not in img_cols:
             conn.execute(f"ALTER TABLE images ADD COLUMN {col} {decl}")
+    face_cols = set(_columns(conn, "faces"))
+    for col in ("sharp", "expr"):
+        if col not in face_cols:
+            conn.execute(f"ALTER TABLE faces ADD COLUMN {col} REAL")
     # Index created after the ALTER so legacy tables don't reference a missing column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_images_portrait ON images(portrait)")
 
     # ── Snapshot prior state before wiping ───────────────────────────────────
     prev_names = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
@@ -280,13 +319,27 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         rw, rh = raw_sizes.get(idx, (None, None))
         imgw = im.get("imgw") if im.get("imgw") is not None else rw
         imgh = im.get("imgh") if im.get("imgh") is not None else rh
+
+        # Aggregate portrait quality from the largest detected face.
+        faces_list = im.get("faces", [])
+        face_sharp = face_expr = portrait = None
+        if faces_list:
+            def _area(f):
+                x1, y1, x2, y2 = f["bbox"]
+                return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            big = max(faces_list, key=_area)
+            face_sharp = big.get("sharp")
+            face_expr = big.get("expr")
+            portrait = _portrait_score(face_sharp, face_expr)
+
         conn.execute(
             """INSERT INTO images
                (id, path, filename, sharpness, combined, raw_laplacian, dup_group,
                 para_aesthetic, para_quality, para_composition, para_light,
                 para_color, para_dof, para_content, clip_iqa, caption,
-                imgw, imgh, thumb, content_hash, mtime, fsize, n_faces)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                imgw, imgh, thumb, content_hash, mtime, fsize, n_faces,
+                face_sharp, face_expr, portrait)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (idx, im["path"], im["filename"],
              im.get("sharpness"), im.get("combined"), im.get("raw_laplacian"),
              im.get("dup_group"),
@@ -295,18 +348,18 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
              im.get("para_color"), im.get("para_dof"), im.get("para_content"),
              im.get("clip_iqa"), im.get("caption"),
              imgw, imgh, thumb_name, chash, jobs[idx][8], jobs[idx][9],
-             len(im.get("faces", []))),
+             len(faces_list), face_sharp, face_expr, portrait),
         )
 
-        for f in im.get("faces", []):
+        for f in faces_list:
             x1, y1, x2, y2 = f["bbox"]
             cid = f.get("cluster_id", -1)
             if cid >= 0:
                 cluster_ids_seen.add(cid)
             conn.execute(
-                """INSERT INTO faces (image_id, x1, y1, x2, y2, prob, cluster_id)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (idx, x1, y1, x2, y2, f.get("prob"), cid),
+                """INSERT INTO faces (image_id, x1, y1, x2, y2, prob, cluster_id, sharp, expr)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (idx, x1, y1, x2, y2, f.get("prob"), cid, f.get("sharp"), f.get("expr")),
             )
 
         for tag in im.get("tags", []):
@@ -316,6 +369,56 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         if has_fts and im.get("caption"):
             conn.execute("INSERT INTO images_fts (rowid, caption) VALUES (?,?)",
                          (idx, im["caption"]))
+
+    # ── Re-apply persisted manual face edits (reassign / delete) ─────────────
+    # Faces were just rebuilt from the report, wiping any prior manual edits.
+    # Replay overrides, matched by (image content hash + bbox), so corrections
+    # survive a fresh ingest. Detection is deterministic, so the same image
+    # yields the same bbox and the override re-binds to the same face.
+    overrides = list(conn.execute(
+        "SELECT hash, bbox, action, cluster_id FROM face_overrides"))
+    if overrides:
+        hash_to_id = {h: i for i, h in hashes.items()}
+        affected: set[int] = set()
+        applied = dropped = 0
+        for h, bbox, action, cid in overrides:
+            img_id = hash_to_id.get(h)
+            if img_id is None:
+                continue
+            match = None
+            for fr in conn.execute(
+                "SELECT id, x1, y1, x2, y2 FROM faces WHERE image_id=?", (img_id,)):
+                if bbox_key(fr[1], fr[2], fr[3], fr[4]) == bbox:
+                    match = fr[0]
+                    break
+            if match is None:
+                continue
+            if action == "delete":
+                conn.execute("DELETE FROM faces WHERE id=?", (match,))
+                dropped += 1
+            else:  # assign
+                conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (cid, match))
+                if cid is not None and cid >= 0:
+                    cluster_ids_seen.add(cid)
+                applied += 1
+            affected.add(img_id)
+
+        # Recompute per-image face aggregates + counts for touched images.
+        for img_id in affected:
+            rows = conn.execute(
+                "SELECT x1, y1, x2, y2, sharp, expr FROM faces WHERE image_id=?",
+                (img_id,)).fetchall()
+            if rows:
+                big = max(rows, key=lambda r: max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1]))
+                fs, fe = big[4], big[5]
+                conn.execute(
+                    "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
+                    (len(rows), fs, fe, _portrait_score(fs, fe), img_id))
+            else:
+                conn.execute(
+                    "UPDATE images SET n_faces=0, face_sharp=NULL, face_expr=NULL, portrait=NULL WHERE id=?",
+                    (img_id,))
+        print(f"  Re-applied {applied} reassign + {dropped} delete face overrides")
 
     # ── Re-seed clusters: keep prior names, add any new cluster ids ──────────
     # Also pick up names embedded in the report (from --face-ref matching).

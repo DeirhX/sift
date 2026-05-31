@@ -12,7 +12,7 @@ const MAX_RATIO = 1.9    // tallest (portrait):  thumb height ≤ 1.9  * width
 // Aspect-preserving masonry: each tile keeps its photo's proportions and tiles
 // flow into the shortest column. Layout positions are precomputed from image
 // dimensions so we can window (virtualize) by absolute Y without a row grid.
-export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, onOpen, onDecision, people }) {
+export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, onOpen, onDecision, people, onFaceChange }) {
   const scrollRef = useRef(null)
   const [width, setWidth] = useState(0)
   const [viewport, setViewport] = useState(0)
@@ -107,6 +107,8 @@ export default function PhotoGrid({ items, hasNext, isFetchingNext, fetchNext, o
               onOpen={() => onOpen(l.index)}
               onDecision={onDecision}
               personName={personName}
+              people={people}
+              onFaceChange={onFaceChange}
             />
           </div>
         ))}

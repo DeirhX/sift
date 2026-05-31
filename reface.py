@@ -25,8 +25,9 @@ Typical iteration workflow:
   # Loosen if subject faces are missed
   python reface.py audit_report.json --face-min-rel 0.03 --face-eps 0.55
 
-  # After tuning, regenerate the viewer
-  python generate_viewer.py audit_report.json
+  # After tuning, rebuild the DB and review in the web app
+  python webapp/build_db.py audit_report.json
+  python webapp/server.py --db photos.db
 """
 
 import sys
@@ -164,10 +165,10 @@ def main() -> None:
 
     print("\nNew face detection state:")
     analyse(report)
-    print(f"\nNow regenerate the viewer:")
-    viewer_out = out_path.parent / "audit_viewer.html"
-    print(f"  python generate_viewer.py \"{out_path}\"")
-    print(f"  start \"{viewer_out}\"")
+    print(f"\nNow rebuild the DB and review in the web app:")
+    db_out = out_path.parent / "photos.db"
+    print(f"  python webapp/build_db.py \"{out_path}\"")
+    print(f"  python webapp/server.py --db \"{db_out}\"")
 
 
 if __name__ == "__main__":

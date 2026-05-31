@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar.jsx'
 import PhotoGrid from './components/PhotoGrid.jsx'
 import GroupView from './components/GroupView.jsx'
 import Lightbox from './components/Lightbox.jsx'
+import AnalyzePanel from './components/AnalyzePanel.jsx'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -17,6 +18,7 @@ export default function App() {
   const [filters, setFilters] = useState(INITIAL.filters)
   const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups'
   const [lightboxIdx, setLightboxIdx] = useState(null)
+  const [showAnalyze, setShowAnalyze] = useState(false)
   const qc = useQueryClient()
 
   // Mirror filter + view state into the URL (replace, so we don't spam history).
@@ -42,8 +44,8 @@ export default function App() {
   })
 
   const groups = useInfiniteQuery({
-    queryKey: ['groups'],
-    queryFn: ({ pageParam = 0 }) => fetchGroups(pageParam, GROUP_PAGE),
+    queryKey: ['groups', filters],
+    queryFn: ({ pageParam = 0 }) => fetchGroups(filters, pageParam, GROUP_PAGE),
     initialPageParam: 0,
     getNextPageParam: (last) => {
       const next = last.offset + last.limit
@@ -61,6 +63,13 @@ export default function App() {
   }, [])
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
+
+  // After a face/person edit, refetch everything that renders names or counts.
+  const refetchPeople = useCallback(() => {
+    qc.invalidateQueries({
+      predicate: (q) => ['images', 'groups', 'meta'].includes(q.queryKey[0]),
+    })
+  }, [qc])
 
   const toggleInList = useCallback((key, value) => {
     setFilters((f) => {
@@ -130,6 +139,7 @@ export default function App() {
         resetFilters={resetFilters}
         total={total}
         view={view}
+        onPeopleChange={refetchPeople}
       />
       <div className="main">
         <div className="topbar">
@@ -148,6 +158,9 @@ export default function App() {
             {headerCount.toLocaleString()} {headerLabel}
           </span>
           <div className="spacer" />
+          <button className="btn" onClick={() => setShowAnalyze(true)} title="Re-run analysis from the web">
+            Re-analyze
+          </button>
           <div className="seg view-toggle">
             <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>Grid</button>
             <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
@@ -168,6 +181,7 @@ export default function App() {
               onOpen={setLightboxIdx}
               onDecision={setDecision}
               people={meta.data?.clusters ?? []}
+              onFaceChange={refetchPeople}
             />
           )
         ) : (
@@ -186,6 +200,14 @@ export default function App() {
           index={lightboxIdx}
           setIndex={setLightboxIdx}
           onDecision={setDecision}
+        />
+      )}
+
+      {showAnalyze && (
+        <AnalyzePanel
+          defaultFolder={meta.data?.meta?.folder || ''}
+          onClose={() => setShowAnalyze(false)}
+          onDone={refetchPeople}
         />
       )}
     </div>

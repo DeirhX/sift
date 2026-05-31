@@ -7,12 +7,13 @@ Serves:
   GET  /api/images                faceted, sorted, paginated image query
   GET  /thumb/{id}                cached WebP thumbnail
   GET  /img/{id}                  full-resolution original (served on click)
-  GET  /api/decisions             { hash: 'keep'|'del' }
   POST /api/decisions             { hash, decision|null }   set one decision
                                   (decisions are keyed by content hash, so they
                                    survive the underlying files being moved)
-  GET  /api/clusters              [ {cluster_id, name} ]
   POST /api/clusters              { cluster_id, name|null }  rename a cluster
+  POST /api/clusters/merge        { from, into }   merge people
+  POST /api/faces/{id}/assign     { cluster_id | new_person } reassign a face
+  DELETE /api/faces/{id}          remove a false-positive face box
   GET  /api/export                full decisions export (kept/deleted/unmarked)
 
 In production it also serves the built React app from ./frontend/dist.
@@ -22,17 +23,22 @@ Usage:
   # open http://localhost:8000   (prod build)  or run Vite dev on :5173
 """
 
+import os
 import sys
 import json
+import time
 import shutil
+import asyncio
 import sqlite3
 import argparse
+import threading
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Body
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -60,6 +66,26 @@ def db():
         conn.close()
 
 
+def _ensure_schema():
+    """Add columns/tables introduced after a DB may have been built, so the
+    server runs against an older photos.db without a rebuild. New scores stay
+    NULL until the next build_db ingest populates them."""
+    with db() as conn:
+        icols = {c[1] for c in conn.execute("PRAGMA table_info(images)")}
+        for col in ("face_sharp", "face_expr", "portrait"):
+            if col not in icols:
+                conn.execute(f"ALTER TABLE images ADD COLUMN {col} REAL")
+        fcols = {c[1] for c in conn.execute("PRAGMA table_info(faces)")}
+        for col in ("sharp", "expr"):
+            if col not in fcols:
+                conn.execute(f"ALTER TABLE faces ADD COLUMN {col} REAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS face_overrides (
+                   hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
+                   cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
+        conn.commit()
+
+
 def _has_fts(conn) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images_fts'"
@@ -75,11 +101,15 @@ def get_meta():
         meta = {k: v for k, v in conn.execute("SELECT key, value FROM meta")}
 
         clusters = [
-            {"cluster_id": r["cluster_id"], "name": r["name"],
-             "count": conn.execute(
-                 "SELECT COUNT(*) FROM faces WHERE cluster_id=?",
-                 (r["cluster_id"],)).fetchone()[0]}
-            for r in conn.execute("SELECT cluster_id, name FROM clusters ORDER BY cluster_id")
+            c for c in (
+                {"cluster_id": r["cluster_id"], "name": r["name"],
+                 "count": conn.execute(
+                     "SELECT COUNT(*) FROM faces WHERE cluster_id=?",
+                     (r["cluster_id"],)).fetchone()[0]}
+                for r in conn.execute(
+                    "SELECT cluster_id, name FROM clusters ORDER BY cluster_id"))
+            # Hide clusters drained by manual reassignment/deletion.
+            if c["count"] > 0
         ]
 
         tags = [
@@ -88,15 +118,22 @@ def get_meta():
                 "SELECT tag, COUNT(*) c FROM image_tags GROUP BY tag ORDER BY c DESC")
         ]
 
+        has_portrait_col = "portrait" in {c[1] for c in conn.execute("PRAGMA table_info(images)")}
+
         rng = conn.execute(
             """SELECT MIN(combined) cmin, MAX(combined) cmax,
                       MIN(sharpness) smin, MAX(sharpness) smax,
                       MIN(para_aesthetic) amin, MAX(para_aesthetic) amax
                FROM images""").fetchone()
 
+        n_portrait = (conn.execute(
+            "SELECT COUNT(*) FROM images WHERE portrait IS NOT NULL").fetchone()[0]
+            if has_portrait_col else 0)
+
         counts = {
             "total":    conn.execute("SELECT COUNT(*) FROM images").fetchone()[0],
             "with_faces": conn.execute("SELECT COUNT(*) FROM images WHERE n_faces>0").fetchone()[0],
+            "with_portrait": n_portrait,
             "dup_groups": int(meta.get("duplicate_groups", 0)),
         }
 
@@ -107,6 +144,8 @@ def get_meta():
             "sharpness": _histogram(conn, "sharpness"),
             "aesthetic": _histogram(conn, "COALESCE(para_aesthetic, clip_iqa)"),
         }
+        if has_portrait_col:
+            histograms["portrait"] = _histogram(conn, "portrait")
 
     return {
         "meta": meta,
@@ -116,6 +155,7 @@ def get_meta():
         "counts": counts,
         "histograms": histograms,
         "has_para": rng["amin"] is not None,
+        "has_portrait": n_portrait > 0,
     }
 
 
@@ -144,43 +184,29 @@ SORT_COLUMNS = {
     "combined":  "i.combined",
     "sharpness": "i.sharpness",
     "aesthetic": "COALESCE(i.para_aesthetic, i.clip_iqa)",
+    "portrait":  "i.portrait",
     "filename":  "i.filename",
 }
 
 
-@app.get("/api/images")
-def get_images(
-    offset: int = 0,
-    limit:  int = Query(60, le=300),
-    sort:   str = "combined",
-    dir:    str = "asc",
-    score_min: float = 0.0, score_max: float = 1.0,
-    sharp_min: float = 0.0, sharp_max: float = 1.0,
-    aes_min:   float = 0.0, aes_max:   float = 1.0,
-    tags:    str | None = None,     # comma-separated, OR match
-    people:  str | None = None,     # comma-separated cluster ids, OR match
-    dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
-    decision: str = "all",          # all | keep | del | unmarked
-    q:       str | None = None,     # caption text search
-):
+def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
+                 aes_min, aes_max, tags, people, q, decision,
+                 portrait_min=0.0, portrait_max=1.0):
+    """Build the shared image-level WHERE clauses + params used by both
+    /api/images and /api/groups. Clauses reference alias `i` (images) and
+    `d` (decisions LEFT JOIN on content hash)."""
     where = ["i.combined BETWEEN ? AND ?",
              "i.sharpness BETWEEN ? AND ?"]
     params: list = [score_min, score_max, sharp_min, sharp_max]
 
-    # Aesthetic range only constrains rows that have a score
+    # Aesthetic range only constrains rows that have a score.
     where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
     params += [aes_min, aes_max]
 
-    if dup_mode == "groups-only":
-        where.append("i.dup_group IS NOT NULL")
-    elif dup_mode == "no-groups":
-        where.append("i.dup_group IS NULL")
-    elif dup_mode == "hide-dups":
-        # keep only the best-scoring representative of each duplicate group
-        where.append(
-            "(i.dup_group IS NULL OR i.id = ("
-            " SELECT id FROM images i2 WHERE i2.dup_group = i.dup_group"
-            " ORDER BY i2.combined DESC, i2.id ASC LIMIT 1))")
+    # Portrait range only constrains rows that have a portrait score (faces).
+    if portrait_min > 0.0 or portrait_max < 1.0:
+        where.append("(i.portrait IS NOT NULL AND i.portrait BETWEEN ? AND ?)")
+        params += [portrait_min, portrait_max]
 
     if tags:
         tag_list = [t for t in tags.split(",") if t]
@@ -203,14 +229,51 @@ def get_images(
     elif decision == "unmarked":
         where.append("d.decision IS NULL")
 
+    if q:
+        if _has_fts(conn):
+            where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
+            params.append(q)
+        else:
+            where.append("i.caption LIKE ?")
+            params.append(f"%{q}%")
+
+    return where, params
+
+
+@app.get("/api/images")
+def get_images(
+    offset: int = 0,
+    limit:  int = Query(60, le=300),
+    sort:   str = "combined",
+    dir:    str = "asc",
+    score_min: float = 0.0, score_max: float = 1.0,
+    sharp_min: float = 0.0, sharp_max: float = 1.0,
+    aes_min:   float = 0.0, aes_max:   float = 1.0,
+    portrait_min: float = 0.0, portrait_max: float = 1.0,
+    tags:    str | None = None,     # comma-separated, OR match
+    people:  str | None = None,     # comma-separated cluster ids, OR match
+    dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
+    decision: str = "all",          # all | keep | del | unmarked
+    q:       str | None = None,     # caption text search
+):
     with db() as conn:
-        if q:
-            if _has_fts(conn):
-                where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
-                params.append(q)
-            else:
-                where.append("i.caption LIKE ?")
-                params.append(f"%{q}%")
+        where, params = _image_where(
+            conn, score_min=score_min, score_max=score_max,
+            sharp_min=sharp_min, sharp_max=sharp_max,
+            aes_min=aes_min, aes_max=aes_max,
+            portrait_min=portrait_min, portrait_max=portrait_max,
+            tags=tags, people=people, q=q, decision=decision)
+
+        if dup_mode == "groups-only":
+            where.append("i.dup_group IS NOT NULL")
+        elif dup_mode == "no-groups":
+            where.append("i.dup_group IS NULL")
+        elif dup_mode == "hide-dups":
+            # keep only the best-scoring representative of each duplicate group
+            where.append(
+                "(i.dup_group IS NULL OR i.id = ("
+                " SELECT id FROM images i2 WHERE i2.dup_group = i.dup_group"
+                " ORDER BY i2.combined DESC, i2.id ASC LIMIT 1))")
 
         sort_col = SORT_COLUMNS.get(sort, "i.combined")
         sort_dir = "DESC" if dir.lower() == "desc" else "ASC"
@@ -245,11 +308,13 @@ def _rows_to_items(conn, rows) -> list[dict]:
     if ids:
         ph = ",".join("?" * len(ids))
         for fr in conn.execute(
-            f"""SELECT image_id, x1, y1, x2, y2, prob, cluster_id
+            f"""SELECT id, image_id, x1, y1, x2, y2, prob, cluster_id, sharp, expr
                 FROM faces WHERE image_id IN ({ph})""", ids):
             faces_by_img[fr["image_id"]].append({
+                "id": fr["id"],
                 "bbox": [fr["x1"], fr["y1"], fr["x2"], fr["y2"]],
                 "prob": fr["prob"], "cluster_id": fr["cluster_id"],
+                "sharp": fr["sharp"], "expr": fr["expr"],
             })
         for tr in conn.execute(
             f"SELECT image_id, tag FROM image_tags WHERE image_id IN ({ph})", ids):
@@ -269,6 +334,8 @@ def _rows_to_items(conn, rows) -> list[dict]:
             "dup_group": d["dup_group"],
             "caption": d["caption"],
             "imgw": d["imgw"], "imgh": d["imgh"],
+            "face_sharp": d.get("face_sharp"), "face_expr": d.get("face_expr"),
+            "portrait": d.get("portrait"),
             "decision": d.get("decision"),
             "faces": faces_by_img.get(d["id"], []),
             "tags": tags_by_img.get(d["id"], []),
@@ -283,23 +350,57 @@ def get_groups(
     offset: int = 0,
     limit:  int = Query(40, le=200),
     order:  str = "size",          # size | id
+    score_min: float = 0.0, score_max: float = 1.0,
+    sharp_min: float = 0.0, sharp_max: float = 1.0,
+    aes_min:   float = 0.0, aes_max:   float = 1.0,
+    portrait_min: float = 0.0, portrait_max: float = 1.0,
+    tags:    str | None = None,
+    people:  str | None = None,
+    decision: str = "all",
+    q:       str | None = None,
 ):
     """Return duplicate groups (paginated by group), each with all of its
-    member photos ordered best-first. Powers the stacked 'Groups' view."""
+    member photos ordered best-first. The same filters as /api/images apply:
+    a group is included when at least one of its members matches, but every
+    member is returned so the full duplicate set stays reviewable."""
     order_sql = "c DESC, dup_group ASC" if order == "size" else "dup_group ASC"
     with db() as conn:
-        total = conn.execute(
-            "SELECT COUNT(DISTINCT dup_group) FROM images WHERE dup_group IS NOT NULL"
-        ).fetchone()[0]
+        where, params = _image_where(
+            conn, score_min=score_min, score_max=score_max,
+            sharp_min=sharp_min, sharp_max=sharp_max,
+            aes_min=aes_min, aes_max=aes_max,
+            portrait_min=portrait_min, portrait_max=portrait_max,
+            tags=tags, people=people, q=q, decision=decision)
+        where.append("i.dup_group IS NOT NULL")
+        where_sql = " AND ".join(where)
+
+        # dup_groups with at least one member passing the filters
+        qual = (f"SELECT DISTINCT i.dup_group FROM images i "
+                f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                f"WHERE {where_sql}")
+
+        total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
 
         grp_rows = conn.execute(
             f"""SELECT dup_group, COUNT(*) c
-                FROM images WHERE dup_group IS NOT NULL
+                FROM images WHERE dup_group IN ({qual})
                 GROUP BY dup_group
                 ORDER BY {order_sql}
                 LIMIT ? OFFSET ?""",
-            (limit, offset),
+            params + [limit, offset],
         ).fetchall()
+
+        page_gids = [gr["dup_group"] for gr in grp_rows]
+
+        # Which member ids on this page actually pass the filters — so the UI
+        # can show the full group but flag the members outside the filter.
+        match_ids: set[int] = set()
+        if page_gids:
+            gph = ",".join("?" * len(page_gids))
+            match_sql = (f"SELECT i.id FROM images i "
+                         f"LEFT JOIN decisions d ON d.hash = i.content_hash "
+                         f"WHERE {where_sql} AND i.dup_group IN ({gph})")
+            match_ids = {r[0] for r in conn.execute(match_sql, params + page_gids)}
 
         groups = []
         for gr in grp_rows:
@@ -313,7 +414,12 @@ def get_groups(
                 (gid,),
             ).fetchall()
             items = _rows_to_items(conn, members)
-            groups.append({"dup_group": gid, "count": len(items), "items": items})
+            n_match = 0
+            for it in items:
+                it["matches"] = it["id"] in match_ids
+                n_match += it["matches"]
+            groups.append({"dup_group": gid, "count": len(items),
+                           "match_count": n_match, "items": items})
 
     return {"total": total, "offset": offset, "limit": limit, "groups": groups}
 
@@ -345,14 +451,29 @@ def serve_full(image_id: int):
     return FileResponse(path)
 
 
-# ── Decisions (keep / delete) ─────────────────────────────────────────────────
-
-@app.get("/api/decisions")
-def get_decisions():
+@app.get("/api/images/{image_id}/locations")
+def image_locations(image_id: int):
+    """Every path holding the exact same file bytes (matched on content_hash) as
+    this image. Lets the UI surface 'this file also lives at N other locations'
+    to aid organizing/consolidation. Read-only; decisions stay hash-keyed so all
+    copies share one verdict."""
     with db() as conn:
-        return {r["hash"]: r["decision"]
-                for r in conn.execute("SELECT hash, decision FROM decisions")}
+        row = conn.execute(
+            "SELECT content_hash FROM images WHERE id=?", (image_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "image not found")
+        chash = row["content_hash"]
+        if not chash:
+            return {"hash": None, "count": 1, "locations": []}
+        rows = conn.execute(
+            "SELECT id, path FROM images WHERE content_hash=? ORDER BY path", (chash,)
+        ).fetchall()
+        locations = [{"id": r["id"], "path": r["path"],
+                      "exists": Path(r["path"]).exists()} for r in rows]
+    return {"hash": chash, "count": len(locations), "locations": locations}
 
+
+# ── Decisions (keep / delete) ─────────────────────────────────────────────────
 
 @app.post("/api/decisions")
 def set_decision(payload: dict = Body(...)):
@@ -379,13 +500,6 @@ def set_decision(payload: dict = Body(...)):
 
 # ── Cluster names ─────────────────────────────────────────────────────────────
 
-@app.get("/api/clusters")
-def get_clusters():
-    with db() as conn:
-        return [dict(r) for r in
-                conn.execute("SELECT cluster_id, name FROM clusters ORDER BY cluster_id")]
-
-
 @app.post("/api/clusters")
 def rename_cluster(payload: dict = Body(...)):
     cid = payload.get("cluster_id")
@@ -395,6 +509,126 @@ def rename_cluster(payload: dict = Body(...)):
     with db() as conn:
         conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
                      (int(cid), name or None))
+        conn.commit()
+    return {"ok": True}
+
+
+# Manually-created people get ids in a high range so they never collide with
+# the detector's cluster ids (0..N) when build_db re-ingests a fresh report.
+MANUAL_CLUSTER_BASE = 100_000
+
+
+def _ensure_overrides(conn):
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS face_overrides (
+               hash TEXT NOT NULL, bbox TEXT NOT NULL, action TEXT NOT NULL,
+               cluster_id INTEGER, PRIMARY KEY (hash, bbox))""")
+
+
+def _bbox_key(x1, y1, x2, y2) -> str:
+    """Canonical face-bbox key, identical to build_db.bbox_key, so a recorded
+    override re-binds to the same face after a rebuild."""
+    return ",".join(f"{round(float(v), 1)}" for v in (x1, y1, x2, y2))
+
+
+def _next_manual_cluster_id(conn) -> int:
+    m = conn.execute("SELECT MAX(cluster_id) FROM clusters WHERE cluster_id >= ?",
+                     (MANUAL_CLUSTER_BASE,)).fetchone()[0]
+    return (m + 1) if m is not None else MANUAL_CLUSTER_BASE
+
+
+def _record_override(conn, hash_, bbox, action, cluster_id=None):
+    if not hash_:
+        return
+    _ensure_overrides(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO face_overrides (hash, bbox, action, cluster_id) "
+        "VALUES (?,?,?,?)", (hash_, bbox, action, cluster_id))
+
+
+@app.post("/api/clusters/merge")
+def merge_clusters(payload: dict = Body(...)):
+    """Reassign every face of the `from` cluster(s) into `into`, then drop the
+    now-empty source cluster name rows. Pure DB edit — no re-embedding. Each
+    moved face is also recorded as a persistent override."""
+    into = payload.get("into")
+    frm = payload.get("from")
+    if into is None or frm is None:
+        raise HTTPException(400, "from and into required")
+    into = int(into)
+    if isinstance(frm, (int, str)):
+        frm = [frm]
+    frm = [int(c) for c in frm if int(c) != into]
+    if not frm:
+        return {"ok": True, "moved": 0}
+    with db() as conn:
+        ph = ",".join("?" * len(frm))
+        # Record an override per moved face before the cluster_id changes.
+        moving = conn.execute(
+            f"""SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2
+                FROM faces f JOIN images i ON i.id = f.image_id
+                WHERE f.cluster_id IN ({ph})""", frm).fetchall()
+        for r in moving:
+            _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                             "assign", into)
+        cur = conn.execute(
+            f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
+        moved = cur.rowcount
+        conn.execute(f"DELETE FROM clusters WHERE cluster_id IN ({ph})", frm)
+        conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
+                     (into,))
+        conn.commit()
+    return {"ok": True, "moved": moved}
+
+
+def _face_key(conn, face_id):
+    r = conn.execute(
+        """SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2, f.image_id AS img
+           FROM faces f JOIN images i ON i.id = f.image_id WHERE f.id=?""",
+        (face_id,)).fetchone()
+    return r
+
+
+@app.post("/api/faces/{face_id}/assign")
+def assign_face(face_id: int, payload: dict = Body(...)):
+    """Move one face box to a different person. Either pass an existing
+    `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
+    fresh identity. Recorded as a persistent override so it survives re-ingest."""
+    with db() as conn:
+        r = _face_key(conn, face_id)
+        if not r:
+            raise HTTPException(404, "face not found")
+        if payload.get("new_person"):
+            target = _next_manual_cluster_id(conn)
+            conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
+                         (target, payload.get("name") or None))
+        else:
+            cid = payload.get("cluster_id")
+            if cid is None:
+                raise HTTPException(400, "cluster_id or new_person required")
+            target = int(cid)
+            conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
+                         (target,))
+        conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
+        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                         "assign", target)
+        conn.commit()
+    return {"ok": True, "cluster_id": target}
+
+
+@app.delete("/api/faces/{face_id}")
+def delete_face(face_id: int):
+    """Drop a false-positive face box, decrement the image's face count, and
+    record a persistent override so it stays deleted across re-ingest."""
+    with db() as conn:
+        r = _face_key(conn, face_id)
+        if not r:
+            raise HTTPException(404, "face not found")
+        conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
+        conn.execute("UPDATE images SET n_faces = MAX(0, n_faces - 1) WHERE id=?",
+                     (r["img"],))
+        _record_override(conn, r["h"], _bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
+                         "delete")
         conn.commit()
     return {"ok": True}
 
@@ -561,6 +795,260 @@ def undo_apply():
     return {"restored": restored, "skipped": skipped}
 
 
+# ── Web-driven re-analysis (run photo_audit.py + build_db.py, stream output) ──
+# A single job at a time shells out to the existing scripts and streams their
+# stdout/stderr live (including tqdm carriage-return progress) to the browser
+# via Server-Sent Events. The launcher is *constrained*: the server builds the
+# argv from a fixed set of known flags — only the target folder is free text,
+# and it's validated to be an existing directory. No raw commands.
+
+AUDIT_SCRIPT = Path(__file__).resolve().parent.parent / "photo_audit.py"
+BUILD_SCRIPT = Path(__file__).resolve().parent / "build_db.py"
+REPO_ROOT    = AUDIT_SCRIPT.parent
+
+_BACKENDS = {"para", "clip-iqa", "both"}
+
+
+class AnalysisJob:
+    """Runs an ordered list of (label, argv) steps in a background thread,
+    capturing output as committed lines (split on \\n) plus a single live
+    'partial' line that tqdm's \\r progress updates overwrite in place."""
+
+    def __init__(self, steps: list[tuple[str, list[str]]], cwd: Path):
+        self.steps = steps
+        self.cwd = str(cwd)
+        self.lines: list[str] = []      # committed (newline-terminated) lines
+        self.partial: str = ""          # current in-progress line (\r updates)
+        self.state = "running"          # running | done | failed | cancelled
+        self.exit_code: int | None = None
+        self.started = time.time()
+        self.ended: float | None = None
+        self._proc: subprocess.Popen | None = None
+        self._cancel = False
+        self._cond = threading.Condition()
+
+    # ── output buffer (thread-safe) ──
+    def _commit(self, text: str):
+        with self._cond:
+            self.lines.append(text)
+            self.partial = ""
+            self._cond.notify_all()
+
+    def _set_partial(self, text: str):
+        with self._cond:
+            self.partial = text
+            self._cond.notify_all()
+
+    def _finish(self, state: str, code: int | None):
+        with self._cond:
+            self.state = state
+            self.exit_code = code
+            self.ended = time.time()
+            self._cond.notify_all()
+
+    def snapshot(self):
+        with self._cond:
+            return {
+                "state": self.state, "exit_code": self.exit_code,
+                "started": self.started, "ended": self.ended,
+                "commands": [" ".join(_shell_quote(a) for a in argv)
+                             for _, argv in self.steps],
+            }
+
+    def cancel(self):
+        self._cancel = True
+        p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        for label, argv in self.steps:
+            if self._cancel:
+                self._finish("cancelled", None)
+                return
+            self._commit(f"$ {' '.join(_shell_quote(a) for a in argv)}")
+            try:
+                self._proc = subprocess.Popen(
+                    argv, cwd=self.cwd, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            except Exception as e:
+                self._commit(f"[error] failed to launch {label}: {e}")
+                self._finish("failed", -1)
+                return
+            self._pump(self._proc.stdout)
+            code = self._proc.wait()
+            self._commit(f"[{label} exited with code {code}]")
+            if self._cancel:
+                self._finish("cancelled", code)
+                return
+            if code != 0:
+                self._finish("failed", code)
+                return
+        self._finish("done", 0)
+
+    def _pump(self, stream):
+        """Read raw bytes, splitting into lines. A lone \\r is a tqdm progress
+        update (overwrites the live 'partial' line); \\r\\n and \\n commit a line.
+        Distinguishing the two matters on Windows, where child stdout turns every
+        '\\n' print into '\\r\\n' — naive \\r handling would blank every line."""
+        buf = bytearray()
+        pending_cr = False
+        while True:
+            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+            if not chunk:
+                break
+            for b in chunk:
+                if pending_cr:
+                    pending_cr = False
+                    if b == 0x0A:            # \r\n → one committed line
+                        self._commit(buf.decode("utf-8", "replace"))
+                        buf = bytearray()
+                        continue
+                    # lone \r → progress update; show buf, then handle b below
+                    self._set_partial(buf.decode("utf-8", "replace"))
+                    buf = bytearray()
+                if b == 0x0D:                # \r → defer (could be \r\n)
+                    pending_cr = True
+                elif b == 0x0A:              # bare \n → commit
+                    self._commit(buf.decode("utf-8", "replace"))
+                    buf = bytearray()
+                else:
+                    buf.append(b)
+        if pending_cr or buf:
+            self._commit(buf.decode("utf-8", "replace"))
+
+
+def _shell_quote(s: str) -> str:
+    s = str(s)
+    return f'"{s}"' if (" " in s or "!" in s) else s
+
+
+CURRENT_JOB: AnalysisJob | None = None
+
+
+def _build_analyze_steps(payload: dict) -> list[tuple[str, list[str]]]:
+    """Translate the UI payload into argv for photo_audit + build_db. Only
+    known flags are emitted; the folder is validated. Raises HTTPException."""
+    folder = (payload.get("folder") or "").strip()
+    if not folder:
+        with db() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+            folder = row["value"] if row else ""
+    fpath = Path(folder)
+    if not folder or not fpath.is_dir():
+        raise HTTPException(400, f"folder not found: {folder!r}")
+
+    report_path = DB_PATH.parent / "audit_report.json"
+    py = sys.executable
+
+    audit = [py, str(AUDIT_SCRIPT), str(fpath), "--out", str(report_path)]
+    if payload.get("recurse"):
+        audit.append("--recurse")
+    if payload.get("no_clip"):
+        audit.append("--no-clip")
+    else:
+        backend = payload.get("backend", "para")
+        if backend not in _BACKENDS:
+            raise HTTPException(400, f"bad backend: {backend!r}")
+        audit += ["--backend", backend]
+    if payload.get("caption"):
+        audit.append("--caption")
+    if payload.get("faces"):
+        audit.append("--faces")
+        if payload.get("face_expr"):
+            audit.append("--face-expr")
+    if payload.get("no_cache"):
+        audit.append("--no-cache")
+
+    # Numeric knobs — parsed/clamped, never passed through verbatim.
+    def _num(key, flag, lo, hi, cast):
+        v = payload.get(key)
+        if v is None or v == "":
+            return
+        try:
+            v = cast(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"bad {key}: {v!r}")
+        audit.extend([flag, str(max(lo, min(hi, v)))])
+
+    _num("dup_threshold", "--dup-threshold", 0, 64, int)
+    _num("face_min_rel", "--face-min-rel", 0.0, 1.0, float)
+    _num("face_eps", "--face-eps", 0.05, 1.5, float)
+
+    build = [py, str(BUILD_SCRIPT), str(report_path),
+             "--db", str(DB_PATH), "--thumbs", str(THUMB_DIR)]
+
+    # scope=both (confirmed): audit then rebuild the DB the server is serving.
+    return [("photo_audit", audit), ("build_db", build)]
+
+
+@app.post("/api/analyze")
+def start_analyze(payload: dict = Body(...)):
+    global CURRENT_JOB
+    if CURRENT_JOB and CURRENT_JOB.state == "running":
+        raise HTTPException(409, "an analysis is already running")
+    steps = _build_analyze_steps(payload)
+    CURRENT_JOB = AnalysisJob(steps, cwd=REPO_ROOT)
+    threading.Thread(target=CURRENT_JOB.run, daemon=True).start()
+    return {"ok": True, **CURRENT_JOB.snapshot()}
+
+
+@app.get("/api/analyze/status")
+def analyze_status():
+    if not CURRENT_JOB:
+        return {"state": "idle", "commands": []}
+    return CURRENT_JOB.snapshot()
+
+
+@app.post("/api/analyze/cancel")
+def analyze_cancel():
+    if not CURRENT_JOB or CURRENT_JOB.state != "running":
+        raise HTTPException(409, "no analysis running")
+    CURRENT_JOB.cancel()
+    return {"ok": True}
+
+
+@app.get("/api/analyze/stream")
+async def analyze_stream():
+    """SSE stream of the current job's output. Replays from the start so a
+    reconnect/late join gets the full log, then tails live."""
+    job = CURRENT_JOB
+
+    def _sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    async def gen():
+        if not job:
+            yield _sse("end", {"state": "idle"})
+            return
+        cursor = 0
+        last_partial = None
+        while True:
+            with job._cond:
+                new = job.lines[cursor:]
+                cursor = len(job.lines)
+                partial = job.partial
+                state = job.state
+                code = job.exit_code
+            for ln in new:
+                yield _sse("line", ln)
+            if partial != last_partial:
+                last_partial = partial
+                yield _sse("partial", partial)
+            if state != "running" and cursor >= len(job.lines):
+                yield _sse("end", {"state": state, "exit_code": code})
+                return
+            await asyncio.sleep(0.15)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
 # ── Serve built frontend (production) ─────────────────────────────────────────
 # Mounted last so it doesn't shadow /api routes. Only if a build exists.
 
@@ -589,6 +1077,7 @@ def main() -> None:
 
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")
+    _ensure_schema()
     _mount_frontend()
 
     import uvicorn
