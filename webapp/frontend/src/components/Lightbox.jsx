@@ -119,7 +119,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
       {index < items.length - 1 && (
         <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
       )}
-      <img src={fullUrl(item.id)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
+      <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
       <div className="lb-info" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <span className="q-pill big" style={{ background: qColor(item.combined) }} title="Composite quality">
@@ -184,7 +184,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
               onClick={() => setIndex(i)}
               title={describe(it)}
             >
-              <img src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
+              <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
             </button>
           ))}
         </div>

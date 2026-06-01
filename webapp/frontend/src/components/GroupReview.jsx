@@ -116,7 +116,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
               onClick={() => setSel(i)}
               title={describe(it)}
             >
-              <img src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
+              <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
               {it.id === best.id && <span className="strip-best">★</span>}
               {it.matches === false && <span className="strip-filtered">⊘</span>}
               {it.decision && <span className={'strip-flag ' + it.decision} />}
@@ -138,7 +138,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
                   onClick={() => { setSel(i); setShowList(false) }}
                   title="Show in preview"
                 >
-                  <img className="rl-thumb" src={thumbUrl(it.id)} alt={it.filename} loading="lazy" />
+                  <img className="rl-thumb" src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
                   <div className="rl-main">
                     <div className="rl-top">
                       <span className="rl-name">{it.filename}</span>
@@ -160,7 +160,7 @@ export default function GroupReview({ group, onClose, onDecision, onDecisionsBul
           </div>
         ) : (
           <div className="review-hero" onClick={() => setFull(true)} title="Click to zoom">
-            <img key={cur.id} src={fullUrl(cur.id)} alt={cur.filename} />
+            <img key={cur.id} src={fullUrl(cur.id, cur.hash)} alt={cur.filename} />
             {cur.id === best.id && <span className="badge-best">★ best</span>}
             {cur.matches === false && <span className="badge-filtered">outside filter</span>}
             <DecisionBadge decision={cur.decision} />

@@ -186,5 +186,9 @@ export async function fsComplete(q) {
   return r.json()
 }
 
-export const thumbUrl = (id) => `/thumb/${id}`
-export const fullUrl = (id) => `/img/${id}`
+// Thumbnails/originals are cached aggressively and keyed by image id, but a
+// rebuild can renumber ids so an id may point at a different photo. Append the
+// content hash as a cache-buster so the URL changes exactly when the underlying
+// image does (and stays stable — cacheable — when it doesn't).
+export const thumbUrl = (id, v) => `/thumb/${id}${v ? `?v=${v}` : ''}`
+export const fullUrl = (id, v) => `/img/${id}${v ? `?v=${v}` : ''}`
