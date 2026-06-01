@@ -3,7 +3,7 @@ import { fmt } from '../format.js'
 
 // A duplicate group shown as a stack: the best photo on top, up to two
 // others fanned behind it, with a count badge and decision summary.
-export default function GroupPile({ group, onOpen }) {
+export default function GroupPile({ group, onOpen, focused = false }) {
   const items = group.items
   const top = items[0]
   // Up to two backing cards peeking out behind the top photo.
@@ -21,7 +21,7 @@ export default function GroupPile({ group, onOpen }) {
     v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
 
   return (
-    <div className="pile" onClick={onOpen} title={`${items.length} near-duplicates`}>
+    <div className={'pile' + (focused ? ' focused' : '')} onClick={onOpen} title={`${items.length} near-duplicates`}>
       <div className="pile-stack">
         {behind.map((it, i) => (
           <div key={it.id} className={`pile-card back back-${i + 1}`}>
