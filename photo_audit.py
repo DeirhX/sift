@@ -18,8 +18,10 @@ Options:
   --no-clip             Skip all aesthetic scoring (sharpness + duplicates only)
   --caption             Add natural-language captions + keyword tags
                         Caption: Salesforce/blip-image-captioning-base (~990 MB)
-                        Tags:    CLIP ViT-B/32 zero-shot against a curated 60-word vocab
-  --top-tags <n>        Number of keyword tags to emit per image (default: 8)
+                        Tags:    CLIP ViT-B/32 zero-shot vs a curated vocab,
+                                 softmax-calibrated with a confidence floor
+  --top-tags <n>        Max keyword tags per image (default: 8)
+  --tag-min-prob <f>    Min tag confidence 0-1 (default: 0.04); raise to cut noise
   --faces               Detect + cluster faces (requires facenet-pytorch)
                         Uses MTCNN detection + VGGFace2/InceptionResnetV1 embeddings
                         + DBSCAN identity clustering.  Stores bbox, cluster_id, name.
@@ -368,13 +370,18 @@ CLIP_TAG_VOCAB = [
 
 def run_caption_and_tags(paths: list[Path], device: str,
                          top_k: int = 8,
+                         tag_min_prob: float = 0.04,
                          batch_size_blip: int = 16,
                          batch_size_clip: int = 32) -> dict:
     """
     Returns {path: {"caption": str, "tags": list[str]}} for every path.
 
     Caption : Salesforce/blip-image-captioning-base  (~990 MB, natively in transformers)
-    Tags    : open_clip ViT-B/32  zero-shot against CLIP_TAG_VOCAB (top-k by cosine sim)
+    Tags    : open_clip ViT-B/32 zero-shot against CLIP_TAG_VOCAB. Cosine sims are
+              softmax-calibrated (CLIP logit scale) and only tags scoring at least
+              `tag_min_prob` are kept, capped at top_k. A bare top-k always emits k
+              tags even when the image matches far fewer, which is how unrelated
+              terms leak in; the probability floor trims that noise tail.
     """
     import torch
     import open_clip
@@ -436,6 +443,9 @@ def run_caption_and_tags(paths: list[Path], device: str,
             vocab_feats = clip_model.encode_text(vocab_tokens)
             vocab_feats = vocab_feats / vocab_feats.norm(dim=-1, keepdim=True)
         vocab_feats = vocab_feats.cpu().float()   # (V, D)
+        # CLIP's trained temperature (~100); turns raw cosine sims into a usable
+        # probability distribution over the vocabulary for thresholding.
+        logit_scale = float(clip_model.logit_scale.exp().item())
 
         for i in tqdm(range(0, len(paths), batch_size_clip), desc="CLIP tags"):
             batch_paths = paths[i:i + batch_size_clip]
@@ -456,9 +466,16 @@ def run_caption_and_tags(paths: list[Path], device: str,
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
             sims = img_feats @ vocab_feats.T   # (B, V)
-            topk_idx = torch.topk(sims, k=min(top_k, len(CLIP_TAG_VOCAB)), dim=1).indices
-            for p, idx in zip(bpaths, topk_idx.tolist()):
-                results[p]["tags"] = [CLIP_TAG_VOCAB[i] for i in idx]
+            # Calibrate to probabilities, then keep only confident tags (capped at
+            # top_k). This separates the few real matches from the long noise tail
+            # instead of always returning k terms regardless of fit.
+            probs = torch.softmax(sims * logit_scale, dim=1)   # (B, V)
+            k = min(top_k, len(CLIP_TAG_VOCAB))
+            top_probs, top_idx = probs.topk(k, dim=1)
+            for p, prow, irow in zip(bpaths, top_probs.tolist(), top_idx.tolist()):
+                results[p]["tags"] = [
+                    CLIP_TAG_VOCAB[i] for prob, i in zip(prow, irow) if prob >= tag_min_prob
+                ]
 
         del clip_model
     except Exception as e:
@@ -700,7 +717,10 @@ def main():
     ap.add_argument("--caption",        action="store_true",
                     help="Add BLIP captions + CLIP keyword tags (slower)")
     ap.add_argument("--top-tags",       type=int, default=8,
-                    help="Number of keyword tags per image (default: 8)")
+                    help="Max keyword tags per image (default: 8)")
+    ap.add_argument("--tag-min-prob",   type=float, default=0.04,
+                    help="Min softmax confidence to keep a tag (default: 0.04); "
+                         "raise to cut noise, lower for more (looser) tags")
     ap.add_argument("--faces",          action="store_true",
                     help="Detect + cluster faces (requires facenet-pytorch)")
     ap.add_argument("--face-ref",       action="append", default=[], metavar="NAME=PATH",
@@ -847,7 +867,9 @@ def main():
     # ── BLIP captions + CLIP keyword tags (new files only) ──
     captions: dict[Path, dict] = {}
     if args.caption and to_process:
-        captions = run_caption_and_tags(to_process, device_for(), top_k=args.top_tags)
+        captions = run_caption_and_tags(to_process, device_for(),
+                                         top_k=args.top_tags,
+                                         tag_min_prob=args.tag_min_prob)
 
     # ── Face detection + identity clustering ──
     # Clustering is global, so any change forces a whole-folder re-detection;
