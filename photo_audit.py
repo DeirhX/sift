@@ -18,10 +18,13 @@ Options:
   --no-clip             Skip all aesthetic scoring (sharpness + duplicates only)
   --caption             Add natural-language captions + keyword tags
                         Caption: Salesforce/blip-image-captioning-base (~990 MB)
-                        Tags:    CLIP ViT-B/32 zero-shot vs a curated vocab,
-                                 softmax-calibrated with a confidence floor
+                        Tags:    CLIP ViT-B/32 vs a curated vocab, softmax-
+                                 calibrated; subject tags are grounded against
+                                 the caption, style/lighting tags stay visual
   --top-tags <n>        Max keyword tags per image (default: 8)
   --tag-min-prob <f>    Min tag confidence 0-1 (default: 0.04); raise to cut noise
+  --tag-cap-z <f>       Caption-agreement floor for subject tags (default: 0.5)
+  --no-caption-ground   Tag purely on the image (skip caption grounding)
   --faces               Detect + cluster faces (requires facenet-pytorch)
                         Uses MTCNN detection + VGGFace2/InceptionResnetV1 embeddings
                         + DBSCAN identity clustering.  Stores bbox, cluster_id, name.
@@ -370,23 +373,147 @@ CLIP_TAG_VOCAB = [
     "indoor", "outdoor",
 ]
 
+# Style / lighting / technique / environment terms that a natural-language
+# caption almost never verbalises ("golden hour", "bokeh") but CLIP detects
+# well from pixels. These stay image-only. Everything else is a subject/content
+# term where CLIP hallucinates (e.g. "dog" on a portrait) and the caption is the
+# reliable signal — those are gated on caption agreement. Splitting this way is a
+# judgement call; move a term between the two to change how it's validated.
+STYLE_TAGS = frozenset({
+    "landscape", "cityscape",
+    "sunset or sunrise", "golden hour", "blue hour", "night scene",
+    "foggy or misty", "rainy weather", "overcast sky", "bright sunny day",
+    "bokeh background blur", "silhouette", "reflection in water",
+    "black and white", "aerial or birds eye view", "long exposure",
+    "abstract pattern", "indoor", "outdoor",
+})
+
+
+# Words/phrases in a caption that imply a subject tag. CLIP's global caption
+# embedding can't separate a present secondary subject ("person") from an absent
+# one ("dog") — they sit at near-identical cosine — but the caption text names
+# them explicitly, so a lexical match is the precise signal. Terms absent here
+# (or with no caption hit) fall back to the semantic z-score in select_tags.
+SUBJECT_KEYWORDS = {
+    "street scene": ["street", "road", "alley", "sidewalk", "avenue", "crosswalk"],
+    "interior room": ["room", "indoor", "living room", "bedroom", "kitchen",
+                       "interior", "inside", "office", "hallway"],
+    "portrait": ["portrait", "headshot", "selfie"],
+    "face close-up": ["face", "close-up", "closeup", "close up"],
+    "forest": ["forest", "woods", "woodland", "jungle", "trees", "tree"],
+    "mountains": ["mountain", "mountains", "peak", "hill", "hills", "alps", "summit"],
+    "ocean": ["ocean", "sea", "waves", "surf"],
+    "beach": ["beach", "sand", "shore", "seaside", "coast"],
+    "lake": ["lake", "pond", "lagoon"],
+    "river": ["river", "stream", "creek", "brook"],
+    "desert": ["desert", "dune", "dunes"],
+    "field": ["field", "meadow", "grass", "grassland", "prairie", "pasture", "lawn"],
+    "garden": ["garden", "flower", "flowers", "blossom", "bloom", "botanical", "park"],
+    "snow and ice": ["snow", "ice", "snowy", "frozen", "glacier", "icy"],
+    "waterfall": ["waterfall", "falls", "cascade"],
+    "rocks and cliffs": ["rock", "rocks", "cliff", "cliffs", "boulder", "canyon", "gorge"],
+    "sky and clouds": ["sky", "cloud", "clouds", "overcast"],
+    "building and architecture": ["building", "buildings", "architecture", "tower",
+                                  "skyscraper", "house", "structure", "facade"],
+    "bridge": ["bridge"],
+    "market or shop": ["market", "shop", "store", "stall", "bazaar", "mall"],
+    "historical site": ["castle", "temple", "ruins", "monument", "historic", "historical",
+                         "cathedral", "palace", "church", "fortress", "shrine"],
+    "single person": ["person", "man", "woman", "boy", "girl", "guy", "lady",
+                       "someone", "gentleman", "individual"],
+    "group of people": ["people", "group", "couple", "men", "women", "family",
+                        "friends", "two ", "three ", "several"],
+    "crowd": ["crowd", "audience", "masses"],
+    "child or children": ["child", "children", "kid", "kids", "baby", "toddler", "infant"],
+    "dog": ["dog", "puppy", "dogs", "canine"],
+    "cat": ["cat", "kitten", "cats", "feline"],
+    "bird": ["bird", "birds", "seagull", "pigeon", "eagle", "owl", "duck", "swan"],
+    "wildlife animal": ["animal", "animals", "wildlife", "deer", "fox", "bear",
+                        "horse", "cow", "sheep", "elephant", "lion", "tiger", "monkey"],
+    "food or drink": ["food", "meal", "drink", "coffee", "dish", "plate", "cake",
+                      "fruit", "breakfast", "lunch", "dinner", "wine", "beer", "pizza"],
+    "vehicle or transportation": ["car", "truck", "bus", "train", "motorcycle",
+                                  "bicycle", "bike", "vehicle", "traffic", "scooter"],
+    "boat or ship": ["boat", "ship", "sailboat", "yacht", "canoe", "kayak", "ferry"],
+    "sports or action": ["playing", "running", "jumping", "sport", "game", "skiing",
+                         "surfing", "soccer", "basketball", "skateboard", "race"],
+    "festival or event": ["festival", "concert", "party", "wedding", "celebration",
+                         "parade", "event"],
+}
+
+
+def select_tags(img_probs, cap_sims, caption=None, *, top_k=8,
+                img_floor=0.04, cap_z_floor=1.5):
+    """Pick keyword tags for one image, fusing visual and caption evidence.
+
+    img_probs : per-vocab softmax probabilities from the image↔vocab CLIP sims.
+    cap_sims  : per-vocab cosine sims between the caption text and the vocab
+                (same CLIP text encoder), or None when there's no caption.
+    caption   : the caption string, for lexical grounding.
+
+    Style/technique terms (STYLE_TAGS) are kept on visual confidence alone
+    (img_floor) — captions don't describe them. Subject/content terms must also
+    agree with the caption: kept when the caption *names* the concept (a
+    SUBJECT_KEYWORDS hit) or is strongly semantically similar (z-score ≥
+    cap_z_floor). The lexical test is what cleanly drops a visually-plausible but
+    absent subject (the "dog" on a portrait) while keeping a genuinely-present
+    one ("person"). Returns up to top_k terms, ordered by visual confidence."""
+    import re
+    import numpy as np
+    cap_l = (caption or "").lower()
+    if cap_sims is not None:
+        mu = float(np.mean(cap_sims))
+        sd = float(np.std(cap_sims)) or 1e-6
+
+    def named(term):
+        for kw in SUBJECT_KEYWORDS.get(term, ()):
+            if " " in kw:                     # phrase: plain substring
+                if kw in cap_l:
+                    return True
+            elif re.search(rf"\b{re.escape(kw)}\b", cap_l):
+                return True
+        return False
+
+    kept = []
+    for j, term in enumerate(CLIP_TAG_VOCAB):
+        p = float(img_probs[j])
+        if term in STYLE_TAGS:
+            if p >= img_floor:                # style: visual confidence only
+                kept.append((p, term))
+        elif named(term):
+            # The caption explicitly names this subject — authoritative, so keep
+            # it even on weak visual support (it just sorts lower).
+            kept.append((p, term))
+        elif p < img_floor:
+            continue                          # subject needs visual support to compete
+        elif cap_sims is None and not cap_l:
+            kept.append((p, term))            # nothing to ground on → image-only
+        elif cap_sims is not None and (float(cap_sims[j]) - mu) / sd >= cap_z_floor:
+            kept.append((p, term))            # strong semantic agreement w/ caption
+    kept.sort(reverse=True)
+    return [t for _, t in kept[:top_k]]
+
 
 # ── Captions (BLIP) + keyword tags (CLIP ViT-B/32) ───────────────────────────
 
 def run_caption_and_tags(paths: list[Path], device: str,
                          top_k: int = 8,
                          tag_min_prob: float = 0.04,
+                         cap_z_floor: float = 1.5,
+                         caption_ground: bool = True,
                          batch_size_blip: int = 16,
                          batch_size_clip: int = 32) -> dict:
     """
     Returns {path: {"caption": str, "tags": list[str]}} for every path.
 
     Caption : Salesforce/blip-image-captioning-base  (~990 MB, natively in transformers)
-    Tags    : open_clip ViT-B/32 zero-shot against CLIP_TAG_VOCAB. Cosine sims are
-              softmax-calibrated (CLIP logit scale) and only tags scoring at least
-              `tag_min_prob` are kept, capped at top_k. A bare top-k always emits k
-              tags even when the image matches far fewer, which is how unrelated
-              terms leak in; the probability floor trims that noise tail.
+    Tags    : open_clip ViT-B/32 against CLIP_TAG_VOCAB. Image↔vocab cosine sims are
+              softmax-calibrated; tags below `tag_min_prob` are dropped. When
+              `caption_ground` is set, subject/content tags must also agree with the
+              caption (the caption is encoded with the same text encoder and the
+              term's caption similarity must clear `cap_z_floor` std above the
+              caption's mean) — this stops CLIP from hallucinating absent subjects.
+              Style/lighting tags (STYLE_TAGS) stay image-only. See select_tags().
     """
     import torch
     import open_clip
@@ -471,16 +598,29 @@ def run_caption_and_tags(paths: list[Path], device: str,
                 img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
 
             sims = img_feats @ vocab_feats.T   # (B, V)
-            # Calibrate to probabilities, then keep only confident tags (capped at
-            # top_k). This separates the few real matches from the long noise tail
-            # instead of always returning k terms regardless of fit.
-            probs = torch.softmax(sims * logit_scale, dim=1)   # (B, V)
-            k = min(top_k, len(CLIP_TAG_VOCAB))
-            top_probs, top_idx = probs.topk(k, dim=1)
-            for p, prow, irow in zip(bpaths, top_probs.tolist(), top_idx.tolist()):
-                results[p]["tags"] = [
-                    CLIP_TAG_VOCAB[i] for prob, i in zip(prow, irow) if prob >= tag_min_prob
-                ]
+            img_probs = torch.softmax(sims * logit_scale, dim=1).numpy()   # (B, V)
+
+            # Caption grounding: encode each image's caption with the same text
+            # encoder and score it against the vocab, so subject tags can be
+            # validated against the (more reliable) description. Style tags ignore
+            # this. Paths with no caption fall back to image-only selection.
+            cap_sims = [None] * len(bpaths)
+            if caption_ground:
+                caps = [results[p].get("caption", "") for p in bpaths]
+                grounded = [j for j, c in enumerate(caps) if c.strip()]
+                if grounded:
+                    ctok = clip_tok([f"a photo of {caps[j]}" for j in grounded]).to(device)
+                    with torch.no_grad():
+                        cfeat = clip_model.encode_text(ctok).cpu().float()
+                        cfeat = cfeat / cfeat.norm(dim=-1, keepdim=True)
+                    csim = (cfeat @ vocab_feats.T).numpy()   # (len(grounded), V)
+                    for row, j in enumerate(grounded):
+                        cap_sims[j] = csim[row]
+
+            for j, p in enumerate(bpaths):
+                results[p]["tags"] = select_tags(
+                    img_probs[j], cap_sims[j], results[p].get("caption", ""),
+                    top_k=top_k, img_floor=tag_min_prob, cap_z_floor=cap_z_floor)
 
         del clip_model
     except Exception as e:
@@ -1055,6 +1195,12 @@ def main():
     ap.add_argument("--tag-min-prob",   type=float, default=0.04,
                     help="Min softmax confidence to keep a tag (default: 0.04); "
                          "raise to cut noise, lower for more (looser) tags")
+    ap.add_argument("--tag-cap-z",      type=float, default=1.5,
+                    help="Semantic-fallback floor for subject tags not named in "
+                         "the caption, in std above the caption's mean vocab "
+                         "similarity (default: 1.5); lower to keep looser matches")
+    ap.add_argument("--no-caption-ground", action="store_true",
+                    help="Disable caption grounding (tag purely on the image)")
     ap.add_argument("--faces",          action="store_true",
                     help="Detect + cluster faces (requires facenet-pytorch)")
     ap.add_argument("--face-ref",       action="append", default=[], metavar="NAME=PATH",
@@ -1251,7 +1397,9 @@ def main():
     if args.caption and to_process:
         captions = run_caption_and_tags(to_process, device_for(),
                                          top_k=args.top_tags,
-                                         tag_min_prob=args.tag_min_prob)
+                                         tag_min_prob=args.tag_min_prob,
+                                         cap_z_floor=args.tag_cap_z,
+                                         caption_ground=not args.no_caption_ground)
 
     # ── Face detection + identity clustering ──
     # Clustering is global, so any change forces a whole-folder re-detection;
