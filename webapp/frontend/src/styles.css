@@ -27,6 +27,28 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Slim, theme-matched scrollbars everywhere. Without this the OS default
+   (chunky, light) bleeds through the dark UI — most jarring on the lightbox
+   filmstrip. Transparent track + an inset translucent thumb keeps it subtle on
+   both the dark chrome and the photo-backed overlays. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(139, 149, 163, 0.4) transparent;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(139, 149, 163, 0.35);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 149, 163, 0.6);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
 .app {
   display: flex;
   height: 100vh;
@@ -1067,7 +1089,9 @@ select:focus, input:focus {
   padding: 6px 8px;
   background: rgba(0,0,0,0.55);
   border-radius: 8px;
-  max-width: 86vw;
+  /* Stage-relative (not viewport): the 320px info panel narrows the stage, so
+     86vw used to overflow under the panel and sit off-centre from the photo. */
+  max-width: calc(100% - 32px);
   overflow-x: auto;
 }
 .lb-strip-thumb {
