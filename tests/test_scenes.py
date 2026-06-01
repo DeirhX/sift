@@ -103,28 +103,167 @@ def test_read_capture_time_none_without_exif(tmp_path):
     assert photo_audit.read_capture_time(fp) is None
 
 
-# ── assign_dup_groups: nesting within scenes ─────────────────────────────────
+# ── assign_dup_groups: phash + CLIP, time-windowed ───────────────────────────
 
-def test_dups_nest_within_scenes():
-    imagehash = pytest.importorskip("imagehash")
-    p = _paths("a.jpg", "b.jpg", "c.jpg", "d.jpg")
-    # a,b identical and in scene 0; c,d identical but in *different* scenes.
-    same = imagehash.hex_to_hash("f" * 16)
-    hashes = {p[0]: same, p[1]: same, p[2]: same, p[3]: same}
-    scene_of = {p[0]: 0, p[1]: 0, p[2]: 1, p[3]: 2}
-    path_to_group, groups = photo_audit.assign_dup_groups(
-        p, hashes, threshold=6, scene_of=scene_of)
-    # Only a,b group (same scene). c and d are alone in their scenes.
-    assert len(groups) == 1
-    assert {x.name for x in groups[0]} == {"a.jpg", "b.jpg"}
-    assert p[2] not in path_to_group and p[3] not in path_to_group
-
-
-def test_dups_global_when_no_scenes():
+def test_phash_dups_group_regardless_of_time():
     imagehash = pytest.importorskip("imagehash")
     p = _paths("a.jpg", "b.jpg")
     same = imagehash.hex_to_hash("f" * 16)
+    # Identical hashes but taken a day apart: a literal duplicate is a duplicate
+    # regardless of time, so the (time-independent) phash edge still groups them.
     path_to_group, groups = photo_audit.assign_dup_groups(
-        p, {p[0]: same, p[1]: same}, threshold=6, scene_of=None)
+        p, {p[0]: same, p[1]: same}, threshold=6,
+        times={p[0]: 0.0, p[1]: 86400.0}, dup_window=600.0)
     assert len(groups) == 1
     assert path_to_group[p[0]] == path_to_group[p[1]] == 0
+
+
+def test_clip_groups_what_phash_misses_within_window():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg")
+    # Maximally different hashes (distance 64) -> phash says "unrelated"...
+    hashes = {p[0]: imagehash.hex_to_hash("f" * 16),
+              p[1]: imagehash.hex_to_hash("0" * 16)}
+    # ...but near-identical CLIP embeddings, 100 s apart -> grouped via cosine.
+    embs = {p[0]: np.array([1.0, 0.0]), p[1]: np.array([0.999, 0.01])}
+    path_to_group, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times={p[0]: 0.0, p[1]: 100.0}, dup_window=600.0)
+    assert len(groups) == 1
+    assert path_to_group[p[0]] == path_to_group[p[1]] == 0
+
+
+def test_clip_dups_respect_time_window():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg")
+    hashes = {p[0]: imagehash.hex_to_hash("f" * 16),
+              p[1]: imagehash.hex_to_hash("0" * 16)}
+    embs = {p[0]: np.array([1.0, 0.0]), p[1]: np.array([0.999, 0.01])}
+    # Same look-alikes, but hours apart and beyond the window -> NOT grouped.
+    path_to_group, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times={p[0]: 0.0, p[1]: 10000.0}, dup_window=600.0)
+    assert groups == []
+    assert path_to_group == {}
+
+
+def test_low_cosine_does_not_group():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg")
+    hashes = {p[0]: imagehash.hex_to_hash("f" * 16),
+              p[1]: imagehash.hex_to_hash("0" * 16)}
+    # Orthogonal embeddings (cosine 0) and distant hashes -> nothing groups.
+    embs = {p[0]: np.array([1.0, 0.0]), p[1]: np.array([0.0, 1.0])}
+    _, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times={p[0]: 0.0, p[1]: 10.0}, dup_window=600.0)
+    assert groups == []
+
+
+# ── cohesion split: single-linkage chains must not merge a whole shoot ────────
+
+def _ang(deg):
+    r = np.deg2rad(deg)
+    return np.array([np.cos(r), np.sin(r)])
+
+
+def test_cohesion_splits_a_chain_into_tight_pairs():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg", "c.jpg", "d.jpg")
+    # Four frames fanned 0/20/40/60 deg: each neighbour pair is cos20=0.94 (>=
+    # dup_sim, so single-linkage chains all four), but the ends are cos60=0.50.
+    embs = {p[0]: _ang(0), p[1]: _ang(20), p[2]: _ang(40), p[3]: _ang(60)}
+    # Mutually distant hashes (>6) so phash neither unions nor pins anything.
+    hashes = {p[0]: imagehash.hex_to_hash("0000000000000000"),
+              p[1]: imagehash.hex_to_hash("ffff000000000000"),
+              p[2]: imagehash.hex_to_hash("0000ffff00000000"),
+              p[3]: imagehash.hex_to_hash("00000000ffff0000")}
+    times = {x: 0.0 for x in p}
+    path_to_group, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, dup_window=600.0, dup_cohesion=0.90)
+    # The chain shatters into two cohesive pairs; the dissimilar ends never share.
+    assert len(groups) == 2
+    assert path_to_group[p[0]] == path_to_group[p[1]]
+    assert path_to_group[p[2]] == path_to_group[p[3]]
+    assert path_to_group[p[0]] != path_to_group[p[3]]
+
+
+def test_cohesion_keeps_a_tight_burst_whole():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg", "c.jpg")
+    # Three frames within 6 deg — every pair well above the cohesion floor.
+    embs = {p[0]: _ang(0), p[1]: _ang(3), p[2]: _ang(6)}
+    hashes = {p[0]: imagehash.hex_to_hash("0000000000000000"),
+              p[1]: imagehash.hex_to_hash("ffff000000000000"),
+              p[2]: imagehash.hex_to_hash("0000ffff00000000")}
+    times = {x: 0.0 for x in p}
+    _, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, dup_window=600.0, dup_cohesion=0.90)
+    assert len(groups) == 1
+    assert len(groups[0]) == 3
+
+
+def test_standalone_weak_pair_survives_cohesion():
+    imagehash = pytest.importorskip("imagehash")
+    p = _paths("a.jpg", "b.jpg")
+    # A lone pair linked at cos ~0.93 (like the DSCF2005_1/2007_1 case): below
+    # dup_sim's stricter cousins but above the 0.90 floor -> must stay grouped.
+    embs = {p[0]: _ang(0), p[1]: _ang(21)}   # cos21 ~ 0.934
+    hashes = {p[0]: imagehash.hex_to_hash("0000000000000000"),
+              p[1]: imagehash.hex_to_hash("ffff000000000000")}
+    path_to_group, groups = photo_audit.assign_dup_groups(
+        p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times={x: 0.0 for x in p}, dup_window=600.0, dup_cohesion=0.90)
+    assert len(groups) == 1
+    assert path_to_group[p[0]] == path_to_group[p[1]] == 0
+
+
+def test_dup_centrality_marks_the_medoid():
+    p = _paths("a.jpg", "b.jpg", "c.jpg")
+    # b sits between a and c -> it's the most central frame.
+    embs = {p[0]: _ang(0), p[1]: _ang(8), p[2]: _ang(16)}
+    central = photo_audit.dup_centrality([[p[0], p[1], p[2]]], embs)
+    assert set(central) == set(p)
+    assert central[p[1]] > central[p[0]]
+    assert central[p[1]] > central[p[2]]
+
+
+def test_dup_centrality_empty_without_embeddings():
+    p = _paths("a.jpg", "b.jpg")
+    assert photo_audit.dup_centrality([[p[0], p[1]]], None) == {}
+
+
+# ── coarsen_scenes_for_dups: scenes must contain dup groups ───────────────────
+
+def test_coarsen_merges_scenes_spanned_by_a_dup():
+    p = _paths("a.jpg", "b.jpg", "c.jpg", "d.jpg")
+    scene_of = {p[0]: 0, p[1]: 0, p[2]: 1, p[3]: 1}
+    # A near-dup group spans scenes 0 and 1 -> both must collapse into one scene.
+    scene_assign, n = photo_audit.coarsen_scenes_for_dups(
+        p, scene_of, dup_groups=[[p[1], p[2]]])
+    assert n == 1
+    assert len({scene_assign[x] for x in p}) == 1
+    assert all(scene_assign[x] is not None for x in p)
+
+
+def test_coarsen_pulls_singleton_into_scene():
+    p = _paths("a.jpg", "b.jpg", "c.jpg")
+    # c started as a lone (None) scene but is a near-dup of b -> joins b's scene.
+    scene_of = {p[0]: 0, p[1]: 0, p[2]: None}
+    scene_assign, n = photo_audit.coarsen_scenes_for_dups(
+        p, scene_of, dup_groups=[[p[1], p[2]]])
+    assert n == 1
+    assert scene_assign[p[0]] == scene_assign[p[1]] == scene_assign[p[2]] == 0
+
+
+def test_coarsen_leaves_unrelated_scenes_separate():
+    p = _paths("a.jpg", "b.jpg", "c.jpg", "d.jpg")
+    scene_of = {p[0]: 0, p[1]: 0, p[2]: 1, p[3]: 1}
+    # No dup bridges them -> two distinct scenes survive.
+    scene_assign, n = photo_audit.coarsen_scenes_for_dups(p, scene_of, dup_groups=[])
+    assert n == 2
+    assert scene_assign[p[0]] == scene_assign[p[1]]
+    assert scene_assign[p[2]] == scene_assign[p[3]]
+    assert scene_assign[p[0]] != scene_assign[p[2]]

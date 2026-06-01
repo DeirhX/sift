@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fmt, aestheticScore, groupByDup, fmtTimeRange } from './format.js'
+import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst } from './format.js'
 
 describe('fmt', () => {
   it('formats numbers to two decimals', () => {
@@ -62,6 +62,47 @@ describe('groupByDup', () => {
     const { sets, loose } = groupByDup([{ id: 1, dup_group: null }])
     expect(sets).toEqual([])
     expect(loose).toHaveLength(1)
+  })
+})
+
+describe('representative / repFirst', () => {
+  it('picks the most central member (highest dup_central)', () => {
+    const list = [
+      { id: 1, dup_central: 0.80, combined: 0.9 },
+      { id: 2, dup_central: 0.95, combined: 0.5 },
+      { id: 3, dup_central: 0.88, combined: 0.7 },
+    ]
+    expect(representative(list).id).toBe(2)
+  })
+
+  it('breaks centrality ties on quality', () => {
+    const list = [
+      { id: 1, dup_central: 0.9, combined: 0.6 },
+      { id: 2, dup_central: 0.9, combined: 0.8 },
+    ]
+    expect(representative(list).id).toBe(2)
+  })
+
+  it('falls back to quality when centrality is absent', () => {
+    const list = [
+      { id: 1, combined: 0.6 },
+      { id: 2, combined: 0.8 },
+    ]
+    expect(representative(list).id).toBe(2)
+  })
+
+  it('repFirst leads with the representative, keeps the rest in order', () => {
+    const list = [
+      { id: 1, dup_central: 0.80, combined: 0.9 },
+      { id: 2, dup_central: 0.95, combined: 0.5 },
+      { id: 3, dup_central: 0.88, combined: 0.7 },
+    ]
+    expect(repFirst(list).map((i) => i.id)).toEqual([2, 1, 3])
+  })
+
+  it('handles empty input', () => {
+    expect(representative([])).toBeUndefined()
+    expect(repFirst([])).toEqual([])
   })
 })
 

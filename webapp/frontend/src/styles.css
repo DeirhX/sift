@@ -481,25 +481,80 @@ select:focus, input:focus {
 .lightbox {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.9);
+  background: rgba(0,0,0,0.92);
+  display: flex;
+  align-items: stretch;
+  z-index: 100;
+}
+/* Left: image fills the space the panel leaves; works for any aspect ratio. */
+.lb-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
 }
 .lightbox img {
-  max-width: 92vw;
-  max-height: 88vh;
+  max-width: 96%;
+  max-height: 96vh;
   object-fit: contain;
 }
-.lightbox .lb-info {
-  position: absolute;
-  bottom: 0; left: 0; right: 0;
-  padding: 14px 20px;
-  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+/* Right: scrollable info rail, so stats never overlay the photo. */
+.lb-panel {
+  flex: 0 0 320px;
+  width: 320px;
+  height: 100vh;
+  overflow-y: auto;
+  padding: 18px 18px 24px;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
   color: var(--text);
   font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
+.lb-panel-head { display: flex; align-items: center; gap: 10px; }
+.lb-name {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lb-actions { display: flex; gap: 8px; }
+.lb-act { flex: 1; justify-content: center; }
+.lb-caption { color: var(--text-dim); line-height: 1.4; }
+
+/* Indicative stat bars */
+.lb-stats { display: flex; flex-direction: column; gap: 7px; }
+.lb-stat {
+  display: grid;
+  grid-template-columns: 96px 1fr 32px;
+  align-items: center;
+  gap: 8px;
+}
+.lb-stat-label { color: var(--text-dim); font-size: 11.5px; }
+.lb-stat-track {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.10);
+  overflow: hidden;
+}
+.lb-stat-fill { display: block; height: 100%; border-radius: 999px; }
+.lb-stat-val { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Compact facts (dimensions, scene, dup, time, tags) */
+.lb-facts { display: flex; flex-direction: column; gap: 4px; }
+.lb-fact {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.lb-fact > span:first-child { color: var(--text-dim); }
+.lb-fact.tags > span:last-child { text-align: right; word-break: break-word; }
+
 .lightbox .lb-close {
   position: absolute;
   top: 16px; right: 20px;
@@ -508,6 +563,7 @@ select:focus, input:focus {
   cursor: pointer;
   background: none;
   border: none;
+  z-index: 2;
 }
 .lightbox .lb-nav {
   position: absolute;
@@ -769,6 +825,16 @@ select:focus, input:focus {
   color: #f5c518;
   font-size: 13px;
   text-shadow: 0 0 3px #000;
+}
+/* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
+   structure reads at a glance. Lone-set / no-set scenes don't render this. */
+.strip-cluster {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.045);
 }
 .strip-flag {
   position: absolute;

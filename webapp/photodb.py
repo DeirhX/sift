@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS images (
     face_expr       REAL,   -- largest face's expression quality (if scored)
     portrait        REAL,   -- combined portrait quality of the largest face
     scene_group     INTEGER,-- rough scene id (near-dup dup_group nests inside)
-    capture_time    REAL    -- EXIF capture time (epoch), mtime fallback
+    capture_time    REAL,   -- EXIF capture time (epoch), mtime fallback
+    dup_central     REAL    -- mean CLIP cosine to dup-group peers (medoid hero)
 );
 
 CREATE TABLE IF NOT EXISTS faces (
@@ -155,6 +156,7 @@ _IMAGE_LATE_COLUMNS = (
     ("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER"),
     ("face_sharp", "REAL"), ("face_expr", "REAL"), ("portrait", "REAL"),
     ("scene_group", "INTEGER"), ("capture_time", "REAL"),
+    ("dup_central", "REAL"),
 )
 _FACE_LATE_COLUMNS = (("sharp", "REAL"), ("expr", "REAL"))
 
