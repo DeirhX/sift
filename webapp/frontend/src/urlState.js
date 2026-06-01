@@ -1,6 +1,16 @@
-// Serialize filter + view state to/from the URL query string so views are
-// shareable and survive reloads. Only non-default values are written, keeping
-// URLs short. Unknown/legacy params are ignored.
+// Serialize filter + view + overlay-nav state to/from the URL query string so
+// views are shareable and survive reloads. Only non-default values are written,
+// keeping URLs short. Unknown/legacy params are ignored.
+//
+// The "nav" object captures whatever overlay is open on top of the list so the
+// browser Back button and shared links treat it as real navigation:
+//   null                                       — no overlay (plain list)
+//   { kind:'lightbox', imgId }                 — grid full-detail viewer
+//   { kind:'group', refId, imgId, zoom }       — a duplicate-group review
+//   { kind:'scene', refId, imgId, zoom }       — a whole-scene review
+// `imgId` is the focused photo (added once you select/arrow; absent means the
+// review's default hero). `zoom` flags the full-size viewer open inside a
+// review. URL params: grp=, scn=, img=, zoom=1.
 
 export const DEFAULT_FILTERS = {
   sort: 'combined',
@@ -51,11 +61,31 @@ export function parseState(search) {
 
   const rawView = p.get('view')
   const view = rawView === 'groups' || rawView === 'scenes' ? rawView : 'grid'
-  return { filters, view }
+
+  return { filters, view, nav: parseNav(p) }
 }
 
-// Build a query string holding only values that differ from the defaults.
-export function buildSearch(filters, view) {
+// Pull the overlay-nav object out of the parsed params (see header comment).
+function parseNav(p) {
+  const num = (v) => {
+    if (v == null || v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  const imgId = num(p.get('img'))
+  const zoom = p.get('zoom') === '1'
+  const grp = num(p.get('grp'))
+  if (grp != null) return { kind: 'group', refId: grp, imgId, zoom }
+  const scn = num(p.get('scn'))
+  if (scn != null) return { kind: 'scene', refId: scn, imgId, zoom }
+  if (imgId != null) return { kind: 'lightbox', imgId }
+  return null
+}
+
+// Build a query string holding only values that differ from the defaults,
+// plus any open overlay (nav). Param order is fixed so equal states stringify
+// identically (callers compare URLs to avoid redundant history writes).
+export function buildSearch(filters, view, nav = null) {
   const p = new URLSearchParams()
 
   for (const k of [...STR_KEYS, ...NUM_KEYS]) {
@@ -68,6 +98,13 @@ export function buildSearch(filters, view) {
     if (filters[k] !== DEFAULT_FILTERS[k]) p.set(k, String(filters[k]))
   }
   if (view !== 'grid') p.set('view', view)
+
+  if (nav) {
+    if (nav.kind === 'group') p.set('grp', String(nav.refId))
+    else if (nav.kind === 'scene') p.set('scn', String(nav.refId))
+    if (nav.imgId != null) p.set('img', String(nav.imgId))
+    if (nav.zoom) p.set('zoom', '1')
+  }
 
   const s = p.toString()
   return s ? `?${s}` : ''

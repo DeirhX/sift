@@ -217,6 +217,79 @@ test.describe('scenes (rough hierarchy)', () => {
   })
 })
 
+test.describe('browser history + deep links', () => {
+  test('lightbox: each photo is a Back step, then Back closes', async ({ page }) => {
+    await page.goto('/')
+    await cards(page).first().locator('.thumb-wrap').click()
+    const lb = page.locator('.lightbox')
+    await expect(lb).toBeVisible()
+    await expect(page).toHaveURL(/[?&]img=\d+/)
+    await expect(lb.locator('.lb-name')).toContainText('beach.jpg')
+
+    // Arrowing to the next photo is its own history entry.
+    await page.keyboard.press('ArrowRight')
+    await expect(lb.locator('.lb-name')).toContainText('portrait.jpg')
+
+    // Back steps to the previously viewed photo (lightbox still open)…
+    await page.goBack()
+    await expect(lb).toBeVisible()
+    await expect(lb.locator('.lb-name')).toContainText('beach.jpg')
+
+    // …and one more Back closes the lightbox entirely.
+    await page.goBack()
+    await expect(lb).toHaveCount(0)
+    await expect(page).not.toHaveURL(/[?&]img=/)
+  })
+
+  test('lightbox: close button unwinds the whole viewer in one go', async ({ page }) => {
+    await page.goto('/')
+    await cards(page).first().locator('.thumb-wrap').click()
+    const lb = page.locator('.lightbox')
+    await expect(lb).toBeVisible()
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('ArrowRight')
+    // The × button exits, regardless of how many photos were stepped through.
+    await lb.locator('.lb-close').click()
+    await expect(lb).toHaveCount(0)
+    await expect(page).not.toHaveURL(/[?&]img=/)
+  })
+
+  test('a shared lightbox link restores the open photo on load', async ({ page }) => {
+    await page.goto('/')
+    await cards(page).first().locator('.thumb-wrap').click()
+    await expect(page.locator('.lightbox')).toBeVisible()
+    const shared = page.url()
+    expect(shared).toMatch(/[?&]img=\d+/)
+
+    // Fresh load of the deep link reopens the same image.
+    await page.goto(shared)
+    const lb = page.locator('.lightbox')
+    await expect(lb).toBeVisible()
+    await expect(lb.locator('.lb-name')).toContainText('beach.jpg')
+  })
+
+  test('group review: open + focused image live in the URL', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Groups' }).click()
+    await page.locator('.pile').first().click()
+    const panel = page.locator('.review-panel')
+    await expect(panel).toBeVisible()
+    await expect(page).toHaveURL(/[?&]grp=\d+/)
+
+    // Picking a different strip thumb records the focused image in the URL.
+    await panel.locator('.strip-thumb').nth(1).click()
+    await expect(page).toHaveURL(/[?&]img=\d+/)
+
+    // Back drops the focused image (panel stays), then closes the panel.
+    await page.goBack()
+    await expect(panel).toBeVisible()
+    await expect(page).not.toHaveURL(/[?&]img=/)
+    await page.goBack()
+    await expect(panel).toHaveCount(0)
+    await expect(page).not.toHaveURL(/[?&]grp=/)
+  })
+})
+
 test.describe('people management', () => {
   test('rename a person and see it reflected', async ({ page }) => {
     await page.goto('/')

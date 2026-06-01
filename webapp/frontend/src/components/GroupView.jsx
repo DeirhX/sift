@@ -2,12 +2,13 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { autocullGroups } from '../api.js'
 import GroupPile from './GroupPile.jsx'
-import GroupReview from './GroupReview.jsx'
 
-// Overview of duplicate groups as stacked photo piles. Clicking a pile
-// opens a review panel to compare members and pick which to delete.
-export default function GroupView({ query, onDecision, onDecisionsBulk, people }) {
-  const [openId, setOpenId] = useState(null)
+// Overview of duplicate groups as stacked photo piles. Arrow keys move a
+// keyboard focus across piles; Enter / click asks the app to open the review
+// overlay (`onOpen(dup_group)`). The overlay itself lives at the app root so
+// it is URL-driven / Back-navigable. `reviewOpen` lets the app pause grid keys
+// while that overlay is up (the overlay handles its own keyboard).
+export default function GroupView({ query, onOpen, reviewOpen = false }) {
   const [culling, setCulling] = useState(false)
   const [focusIdx, setFocusIdx] = useState(null)   // keyboard-focused pile
   const sentinelRef = useRef(null)
@@ -47,11 +48,6 @@ export default function GroupView({ query, onDecision, onDecisionsBulk, people }
     return () => io.disconnect()
   }, [hasNextPage, isFetchingNextPage, fetchNextPage])
 
-  const personName = useCallback((cid) => {
-    const c = people.find((p) => p.cluster_id === cid)
-    return c?.name?.trim() ? c.name : null
-  }, [people])
-
   // Number of piles per row, read from the rendered grid (the CSS grid is
   // responsive, so we can't assume a fixed column count).
   const colsOf = useCallback(() => {
@@ -68,14 +64,9 @@ export default function GroupView({ query, onDecision, onDecisionsBulk, people }
 
   const openReview = useCallback((idx) => {
     setFocusIdx(idx)
-    setOpenId(groups[idx]?.dup_group ?? null)
-  }, [groups])
-
-  // Close the review and hand focus back to the grid so arrow nav resumes.
-  const closeReview = useCallback(() => {
-    setOpenId(null)
-    setTimeout(() => scrollRef.current?.focus(), 0)
-  }, [])
+    const g = groups[idx]
+    if (g) onOpen(g.dup_group)
+  }, [groups, onOpen])
 
   // Focus the grid once it first has content, so arrow keys work immediately
   // after switching to the Groups view (no extra Tab needed).
@@ -99,7 +90,7 @@ export default function GroupView({ query, onDecision, onDecisionsBulk, people }
   }, [groups.length, focusIdx])
 
   const onKeyDown = useCallback((e) => {
-    if (openId != null) return   // the review modal handles its own keys
+    if (reviewOpen) return   // the review modal handles its own keys
     if (/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName)) return
     const last = groups.length - 1
     if (last < 0) return
@@ -125,9 +116,7 @@ export default function GroupView({ query, onDecision, onDecisionsBulk, people }
         return
       default: return
     }
-  }, [openId, groups.length, focusIdx, colsOf, hasNextPage, isFetchingNextPage, fetchNextPage, openReview])
-
-  const openGroup = groups.find((g) => g.dup_group === openId) || null
+  }, [reviewOpen, groups.length, focusIdx, colsOf, hasNextPage, isFetchingNextPage, fetchNextPage, openReview])
 
   if (query.isLoading) return <div className="spinner">Loading groups…</div>
   if (groups.length === 0) return <div className="empty">No duplicate groups found.</div>
@@ -159,16 +148,6 @@ export default function GroupView({ query, onDecision, onDecisionsBulk, people }
       </div>
       <div ref={sentinelRef} />
       {isFetchingNextPage && <div className="spinner">Loading more…</div>}
-
-      {openGroup && (
-        <GroupReview
-          group={openGroup}
-          onClose={closeReview}
-          onDecision={onDecision}
-          onDecisionsBulk={onDecisionsBulk}
-          personName={personName}
-        />
-      )}
     </div>
   )
 }
