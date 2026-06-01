@@ -6,6 +6,8 @@ import Sidebar from './components/Sidebar.jsx'
 import PhotoGrid from './components/PhotoGrid.jsx'
 import GroupView from './components/GroupView.jsx'
 import SceneView from './components/SceneView.jsx'
+import GroupReview from './components/GroupReview.jsx'
+import ScenePanel from './components/ScenePanel.jsx'
 import Lightbox from './components/Lightbox.jsx'
 import AnalyzePanel from './components/AnalyzePanel.jsx'
 import SettingsPanel from './components/SettingsPanel.jsx'
@@ -20,7 +22,10 @@ const INITIAL = parseState(window.location.search)
 export default function App() {
   const [filters, setFilters] = useState(INITIAL.filters)
   const [view, setView] = useState(INITIAL.view)   // 'grid' | 'groups' | 'scenes'
-  const [lightboxIdx, setLightboxIdx] = useState(null)
+  // The single source of truth for "what overlay is open" (lightbox / group /
+  // scene review, the focused photo, and zoom). Mirrored to the URL so Back,
+  // shared links and reloads all behave (see urlState.js).
+  const [nav, setNav] = useState(INITIAL.nav)
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
@@ -36,33 +41,86 @@ export default function App() {
     const onKey = (e) => {
       if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return
-      if (lightboxIdx != null || showAnalyze || showSettings) return
+      if (nav != null || showAnalyze || showSettings) return
       e.preventDefault()
       searchRef.current?.focus()
       searchRef.current?.select()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [lightboxIdx, showAnalyze, showSettings])
+  }, [nav, showAnalyze, showSettings])
 
-  // Close the lightbox and hand keyboard focus back to the grid so arrow
-  // navigation resumes where it left off.
-  const closeLightbox = useCallback((v) => {
-    setLightboxIdx((i) => {
-      const n = typeof v === 'function' ? v(i) : v
-      if (n == null) setTimeout(focusGrid, 0)
-      return n
-    })
-  }, [focusGrid])
-
-  // Mirror filter + view state into the URL (replace, so we don't spam history).
-  useEffect(() => {
-    const search = buildSearch(filters, view)
-    const next = window.location.pathname + search
-    if (next !== window.location.pathname + window.location.search) {
-      window.history.replaceState(null, '', next)
+  // --- Overlay navigation -------------------------------------------------
+  // Every overlay transition (open, focus a different photo, zoom, close) is a
+  // real history entry, so Back walks back through exactly what you did. Each
+  // entry stores `navDepth`: 0 when an overlay first opens, +1 per in-overlay
+  // step. The Close button uses that depth to unwind the whole overlay in one
+  // go (history.go), while plain Back peels one step at a time.
+  const writeUrl = useCallback((nextNav, push) => {
+    const url = window.location.pathname + buildSearch(filters, view, nextNav)
+    let depth = null
+    if (nextNav) {
+      const prev = window.history.state?.navDepth
+      const sameOverlay = nav && nav.kind === nextNav.kind && nav.refId === nextNav.refId
+      depth = sameOverlay && typeof prev === 'number' ? prev + 1 : 0
     }
-  }, [filters, view])
+    const state = { navDepth: depth }
+    if (push) window.history.pushState(state, '', url)
+    else window.history.replaceState(state, '', url)
+  }, [filters, view, nav])
+
+  const navigate = useCallback((nextNav, push = true) => {
+    setNav(nextNav)
+    writeUrl(nextNav, push)
+  }, [writeUrl])
+
+  // Unwind the entire open overlay back to the pre-overlay entry (so Back from
+  // there returns to wherever you were, not back into the overlay).
+  const closeOverlay = useCallback(() => {
+    const d = window.history.state?.navDepth
+    if (typeof d === 'number' && d >= 0) window.history.go(-(d + 1))
+    else navigate(null, true)
+  }, [navigate])
+
+  const openImage = useCallback((id) => navigate({ kind: 'lightbox', imgId: id }), [navigate])
+  const openGroup = useCallback((refId) => navigate({ kind: 'group', refId, imgId: null, zoom: false }), [navigate])
+  const openScene = useCallback((refId) => navigate({ kind: 'scene', refId, imgId: null, zoom: false }), [navigate])
+  // Focus a different photo / toggle zoom inside the current review overlay,
+  // preserving its kind + refId so only the relevant URL bits change.
+  const selectImage = useCallback((id) => navigate({ ...nav, imgId: id }), [navigate, nav])
+  const setZoom = useCallback((z) => navigate({ ...nav, zoom: z }), [navigate, nav])
+
+  // Browser Back/Forward: re-derive everything from the URL.
+  useEffect(() => {
+    const onPop = () => {
+      const s = parseState(window.location.search)
+      setFilters(s.filters)
+      setView(s.view)
+      setNav(s.nav)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  // Hand keyboard focus back to the list when an overlay closes, so arrow
+  // navigation resumes (works for grid, groups and scenes — all use
+  // `.grid-scroll`).
+  const prevNavRef = useRef(nav)
+  useEffect(() => {
+    if (prevNavRef.current && !nav) setTimeout(focusGrid, 0)
+    prevNavRef.current = nav
+  }, [nav, focusGrid])
+
+  // Mirror filter + view + nav into the URL. Filter/view edits replace (no
+  // history spam); overlay transitions already pushed their own entry above,
+  // so here we only canonicalise the string when it drifted, preserving the
+  // current entry's navDepth.
+  useEffect(() => {
+    const next = window.location.pathname + buildSearch(filters, view, nav)
+    if (next !== window.location.pathname + window.location.search) {
+      window.history.replaceState(window.history.state, '', next)
+    }
+  }, [filters, view, nav])
 
   const meta = useQuery({ queryKey: ['meta'], queryFn: fetchMeta })
 
@@ -103,6 +161,33 @@ export default function App() {
   const total = images.data?.pages[0]?.total ?? 0
   const groupTotal = groups.data?.pages[0]?.total ?? 0
   const sceneTotal = scenes.data?.pages[0]?.total ?? 0
+
+  const people = meta.data?.clusters ?? []
+  const personName = useCallback((cid) => {
+    const c = people.find((p) => p.cluster_id === cid)
+    return c?.name?.trim() ? c.name : null
+  }, [people])
+
+  // Resolve the open overlay's backing record from the loaded query pages. May
+  // be null right after a deep-link/reload until the relevant page arrives;
+  // the overlay simply waits rather than rendering against missing data.
+  const openGroupObj = nav?.kind === 'group'
+    ? (groups.data?.pages.flatMap((p) => p.groups) ?? []).find((g) => g.dup_group === nav.refId) || null
+    : null
+  const openSceneObj = nav?.kind === 'scene'
+    ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) || null
+    : null
+
+  // Adapt the index-based Lightbox (grid) to id-based nav: each move pushes a
+  // history step; closing unwinds the overlay.
+  const gridLbIndex = nav?.kind === 'lightbox' ? items.findIndex((it) => it.id === nav.imgId) : -1
+  const gridLbSetIndex = useCallback((v) => {
+    const cur = items.findIndex((it) => it.id === nav?.imgId)
+    const n = typeof v === 'function' ? v(cur) : v
+    if (n == null) { closeOverlay(); return }
+    if (n < 0 || n >= items.length || n === cur) return
+    openImage(items[n].id)
+  }, [items, nav, closeOverlay, openImage])
 
   const updateFilter = useCallback((patch) => {
     setFilters((f) => ({ ...f, ...patch }))
@@ -237,35 +322,60 @@ export default function App() {
               hasNext={images.hasNextPage}
               isFetchingNext={images.isFetchingNextPage}
               fetchNext={images.fetchNextPage}
-              onOpen={setLightboxIdx}
+              onOpen={(i) => openImage(items[i].id)}
               onDecision={setDecision}
-              people={meta.data?.clusters ?? []}
+              people={people}
               onFaceChange={refetchPeople}
             />
           )
         ) : view === 'scenes' ? (
           <SceneView
             query={scenes}
-            onDecision={setDecision}
-            onDecisionsBulk={setDecisionsBulk}
-            people={meta.data?.clusters ?? []}
+            onOpen={openScene}
           />
         ) : (
           <GroupView
             query={groups}
-            onDecision={setDecision}
-            onDecisionsBulk={setDecisionsBulk}
-            people={meta.data?.clusters ?? []}
+            onOpen={openGroup}
+            reviewOpen={nav?.kind === 'group'}
           />
         )}
       </div>
 
-      {lightboxIdx != null && items[lightboxIdx] && (
+      {nav?.kind === 'lightbox' && gridLbIndex >= 0 && (
         <Lightbox
           items={items}
-          index={lightboxIdx}
-          setIndex={closeLightbox}
+          index={gridLbIndex}
+          setIndex={gridLbSetIndex}
           onDecision={setDecision}
+        />
+      )}
+
+      {nav?.kind === 'group' && openGroupObj && (
+        <GroupReview
+          group={openGroupObj}
+          selId={nav.imgId}
+          zoom={!!nav.zoom}
+          onSelect={selectImage}
+          onZoom={setZoom}
+          onClose={closeOverlay}
+          onDecision={setDecision}
+          onDecisionsBulk={setDecisionsBulk}
+          personName={personName}
+        />
+      )}
+
+      {nav?.kind === 'scene' && openSceneObj && (
+        <ScenePanel
+          scene={openSceneObj}
+          selId={nav.imgId}
+          zoom={!!nav.zoom}
+          onSelect={selectImage}
+          onZoom={setZoom}
+          onClose={closeOverlay}
+          onDecision={setDecision}
+          onDecisionsBulk={setDecisionsBulk}
+          personName={personName}
         />
       )}
 

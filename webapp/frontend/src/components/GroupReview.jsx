@@ -25,6 +25,7 @@ import DecideButtons from './DecideButtons.jsx'
 export default function GroupReview({
   group, onClose, onDecision, onDecisionsBulk, personName,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
+  selId = null, zoom = false, onSelect, onZoom,
 }) {
   const items = group.items
 
@@ -57,8 +58,19 @@ export default function GroupReview({
   )
   const idIndex = useMemo(() => new Map(view.map((it, i) => [it.id, i])), [view])
 
-  const [sel, setSel] = useState(0)
-  const [full, setFull] = useState(false)
+  // Selection + zoom are controlled by the app (so they live in the URL and
+  // browser history). `selId` null → show the default hero (view[0], the
+  // medoid). `full` mirrors the `zoom` prop. Helpers translate the existing
+  // index-based call sites back to id-based callbacks.
+  const sel = (() => {
+    const i = selId != null ? idIndex.get(selId) : undefined
+    return i == null ? 0 : i
+  })()
+  const full = !!zoom
+  const selectIdx = (i) => {
+    if (i == null || i < 0 || i >= view.length) return
+    onSelect(view[i].id)
+  }
   const [showList, setShowList] = useState(false)
   // Scene "group on demand" view + which collapsed sets are expanded inline.
   const [grouped, setGrouped] = useState(false)
@@ -85,17 +97,14 @@ export default function GroupReview({
   const matchCount = items.filter((it) => it.matches !== false).length
   const someFiltered = matchCount < items.length
 
-  // Keep selection valid if the contents change underneath us.
-  useEffect(() => { if (sel >= view.length) setSel(0) }, [view.length, sel])
-
   // Keyboard: arrows switch members, k/d decide, Esc closes — but only when
   // the full-size viewer isn't open (it handles its own keys).
   useEffect(() => {
     if (full) return
     const onKey = (e) => {
       if (e.key === 'Escape') onClose()
-      else if (e.key === 'ArrowRight') setSel((s) => Math.min(s + 1, view.length - 1))
-      else if (e.key === 'ArrowLeft') setSel((s) => Math.max(s - 1, 0))
+      else if (e.key === 'ArrowRight') selectIdx(Math.min(sel + 1, view.length - 1))
+      else if (e.key === 'ArrowLeft') selectIdx(Math.max(sel - 1, 0))
       else if (e.key === 'k') onDecision(view[sel], 'keep')
       else if (e.key === 'd') onDecision(view[sel], 'del')
     }
@@ -141,11 +150,11 @@ export default function GroupReview({
     })))
   }
 
-  // Adapt Lightbox's setIndex (number to navigate, null to close).
+  // Adapt Lightbox's setIndex (number to navigate, null to close the zoom).
   const lbSetIndex = (v) => {
     const n = typeof v === 'function' ? v(sel) : v
-    if (n == null) setFull(false)
-    else setSel(n)
+    if (n == null) onZoom(false)
+    else if (n !== sel) selectIdx(n)
   }
 
   const renderThumb = (it) => {
@@ -158,7 +167,7 @@ export default function GroupReview({
           + (it.matches === false ? ' filtered' : '')
           + (it.decision === 'del' ? ' is-del' : '')
           + (it.decision === 'keep' ? ' is-keep' : '')}
-        onClick={() => setSel(i)}
+        onClick={() => selectIdx(i)}
         title={describe(it)}
       >
         <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
@@ -180,7 +189,7 @@ export default function GroupReview({
       <button
         key={'tile-' + s.dup_group}
         className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
-        onClick={() => { setSel(repIdx); toggleExpand(s.dup_group) }}
+        onClick={() => { selectIdx(repIdx); toggleExpand(s.dup_group) }}
         title={`near-duplicate set · ${s.items.length} photos · click to expand`}
       >
         <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
@@ -282,7 +291,7 @@ export default function GroupReview({
                   className={'review-list-row'
                     + (i === sel ? ' active' : '')
                     + (it.matches === false ? ' filtered' : '')}
-                  onClick={() => { setSel(i); setShowList(false) }}
+                  onClick={() => { selectIdx(i); setShowList(false) }}
                   title="Show in preview"
                 >
                   <img className="rl-thumb" src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
@@ -306,7 +315,7 @@ export default function GroupReview({
             })}
           </div>
         ) : (
-          <div className="review-hero" onClick={() => setFull(true)} title="Click to zoom">
+          <div className="review-hero" onClick={() => onZoom(true)} title="Click to zoom">
             <img key={cur.id} src={fullUrl(cur.id, cur.hash)} alt={cur.filename} />
             {bestIds.has(cur.id) && <span className="badge-best">★ best</span>}
             {cur.matches === false && <span className="badge-filtered">outside filter</span>}
