@@ -12,14 +12,14 @@ import DecideButtons from './DecideButtons.jsx'
 // `mode` toggles between two callers that share this exact UI so the experience
 // is uniform:
 //   'group' — a near-duplicate group; offers "keep best · delete rest".
-//   'scene' — a whole rough scene; the strip is laid out as a one-level TREE:
-//             near-duplicate sets become bracketed clusters, loose photos sit
-//             on their own. A scene that is a single set (or has no sets) has
-//             nothing to branch, so it collapses to a plain strip and reads
-//             exactly like a no-group scene — no clicks needed to reach images.
-//             The group-wide "keep best · delete rest" is hidden (a scene's
-//             members aren't all duplicates), but the selected photo's own
-//             near-dup twins can still be deduped in one click.
+//   'scene' — a whole rough scene; the strip is FLAT by default (every photo,
+//             medoid-led, no clicking through groups) with each near-duplicate
+//             set bound by a subtle "group rail" so membership reads at a
+//             glance. A "Group dups" toggle collapses each set into one stacked
+//             ×N tile on demand; clicking a tile expands that set inline as a
+//             bracketed cluster. The group-wide "keep best · delete rest" is hidden (a
+//             scene's members aren't all duplicates), but the selected photo's
+//             own near-dup twins can still be deduped in one click.
 // `title`/`subExtra` let the caller label the header; `showGroupBulk` gates the
 // group-wide actions.
 export default function GroupReview({
@@ -43,7 +43,10 @@ export default function GroupReview({
     () => (mode === 'scene' ? [...sets.flatMap((s) => s.items), ...loose] : repFirst(items)),
     [mode, sets, loose, items],
   )
-  const showClusters = mode === 'scene' && sets.length > 0 && (sets.length + loose.length > 1)
+  // A scene with near-dup sets can be browsed flat (every photo, the default —
+  // no clicking through groups) or "grouped on demand": each set collapses to a
+  // single stacked representative tile you can click to expand inline.
+  const canGroup = mode === 'scene' && sets.length > 0
   // ★ marks each group's representative (the medoid hero), which is now the
   // first member of every reordered set / of `view` in group mode.
   const bestIds = useMemo(
@@ -57,6 +60,14 @@ export default function GroupReview({
   const [sel, setSel] = useState(0)
   const [full, setFull] = useState(false)
   const [showList, setShowList] = useState(false)
+  // Scene "group on demand" view + which collapsed sets are expanded inline.
+  const [grouped, setGrouped] = useState(false)
+  const [expanded, setExpanded] = useState(() => new Set())
+  const toggleExpand = (gid) => setExpanded((prev) => {
+    const next = new Set(prev)
+    if (next.has(gid)) next.delete(gid); else next.add(gid)
+    return next
+  })
 
   // Tooltip / list text for a member: name, key scores, then the caption.
   // \n works in title tooltips; the list renders the same parts as elements.
@@ -158,6 +169,27 @@ export default function GroupReview({
     )
   }
 
+  // A collapsed near-dup set: a stacked card showing its medoid and a ×N count.
+  // Clicking it selects the medoid and expands the set inline so its members
+  // appear — drilling into one group without leaving the scene.
+  const renderGroupTile = (s) => {
+    const rep = s.items[0]
+    const repIdx = idIndex.get(rep.id)
+    const anyDecided = s.items.some((it) => it.decision)
+    return (
+      <button
+        key={'tile-' + s.dup_group}
+        className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
+        onClick={() => { setSel(repIdx); toggleExpand(s.dup_group) }}
+        title={`near-duplicate set · ${s.items.length} photos · click to expand`}
+      >
+        <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
+        <span className="strip-count">×{s.items.length}</span>
+        {anyDecided && <span className="strip-grouptile-decided" />}
+      </button>
+    )
+  }
+
   return (
     <div className="review-overlay" onClick={onClose}>
       <div className="review-panel" onClick={(e) => e.stopPropagation()}>
@@ -177,6 +209,15 @@ export default function GroupReview({
                 <button className="btn" onClick={clearGroup}>Clear</button>
               </>
             )}
+            {canGroup && !showList && (
+              <button
+                className={'btn' + (grouped ? ' active' : '')}
+                onClick={() => setGrouped((v) => !v)}
+                title="Collapse near-duplicate sets into representative tiles"
+              >
+                {grouped ? `Ungroup (${view.length})` : `Group dups (${sets.length})`}
+              </button>
+            )}
             <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
               {showList ? 'Preview' : 'List'}
             </button>
@@ -184,14 +225,39 @@ export default function GroupReview({
           </div>
         </div>
 
-        {/* Filmstrip — a one-level tree in scene mode (clusters + loose). */}
+        {/* Filmstrip — flat by default; "Group dups" collapses each near-dup
+            set into a stacked tile that expands inline on click. */}
         <div className="review-strip">
-          {showClusters ? (
+          {canGroup && grouped ? (
+            <>
+              {sets.map((s) => (
+                expanded.has(s.dup_group) ? (
+                  <div
+                    className="strip-cluster"
+                    key={'set-' + s.dup_group}
+                    title={`near-duplicate set · ${s.items.length} photos · click ×N to collapse`}
+                    onClick={(e) => { if (e.target === e.currentTarget) toggleExpand(s.dup_group) }}
+                  >
+                    {s.items.map(renderThumb)}
+                    <button
+                      className="strip-collapse"
+                      onClick={(e) => { e.stopPropagation(); toggleExpand(s.dup_group) }}
+                      title="Collapse set"
+                    >–</button>
+                  </div>
+                ) : renderGroupTile(s)
+              ))}
+              {loose.map(renderThumb)}
+            </>
+          ) : canGroup ? (
+            // Flat, but each near-dup set is wrapped in a subtle "group rail"
+            // (shared backing + accent underline) so membership reads at a
+            // glance without collapsing or click-through.
             <>
               {sets.map((s) => (
                 <div
-                  className="strip-cluster"
-                  key={'set-' + s.dup_group}
+                  className="strip-flatgroup"
+                  key={'fg-' + s.dup_group}
                   title={`near-duplicate set · ${s.items.length} photos`}
                 >
                   {s.items.map(renderThumb)}
