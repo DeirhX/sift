@@ -25,11 +25,11 @@ export default function GroupPile({ group, onOpen }) {
       <div className="pile-stack">
         {behind.map((it, i) => (
           <div key={it.id} className={`pile-card back back-${i + 1}`}>
-            <img src={thumbUrl(it.id)} loading="lazy" alt="" />
+            <img src={thumbUrl(it.id, it.hash)} loading="lazy" alt="" />
           </div>
         ))}
         <div className="pile-card top">
-          <img src={thumbUrl(top.id)} loading="lazy" alt={top.filename} />
+          <img src={thumbUrl(top.id, top.hash)} loading="lazy" alt={top.filename} />
           <span className="pile-count">×{items.length}</span>
           {del > 0 && <span className="pile-flag del">{del} del</span>}
         </div>

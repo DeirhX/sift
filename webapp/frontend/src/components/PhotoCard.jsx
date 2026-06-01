@@ -59,7 +59,7 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
   return (
     <div className="card">
       <div className="thumb-wrap" style={{ height: thumbH }} onClick={onOpen}>
-        <img className="thumb" src={thumbUrl(item.id)} loading="lazy" alt={item.filename} />
+        <img className="thumb" src={thumbUrl(item.id, item.hash)} loading="lazy" alt={item.filename} />
         {item.faces?.map((f, i) => {
           const [x1, y1, x2, y2] = f.bbox
           const left = x1 * scale - offX
