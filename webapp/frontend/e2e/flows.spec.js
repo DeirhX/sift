@@ -88,12 +88,12 @@ test.describe('lightbox', () => {
     await cards(page).first().locator('.thumb-wrap').click()
     const lb = page.locator('.lightbox')
     await expect(lb).toBeVisible()
-    await expect(lb.locator('.lb-info b')).toContainText('beach.jpg')
+    await expect(lb.locator('.lb-name')).toContainText('beach.jpg')
 
     await page.keyboard.press('ArrowRight')
-    await expect(lb.locator('.lb-info b')).toContainText('portrait.jpg')
+    await expect(lb.locator('.lb-name')).toContainText('portrait.jpg')
     await lb.locator('.lb-nav.prev').click()
-    await expect(lb.locator('.lb-info b')).toContainText('beach.jpg')
+    await expect(lb.locator('.lb-name')).toContainText('beach.jpg')
 
     // Unique image -> a single filesystem location is listed.
     await expect(lb.locator('.lb-locations')).toContainText('beach.jpg')
@@ -141,6 +141,79 @@ test.describe('group review', () => {
     await expect(page.locator('.lightbox .lb-strip')).toBeVisible()
     await page.keyboard.press('Escape')
     await expect(page.locator('.lightbox')).toHaveCount(0)
+  })
+})
+
+test.describe('scenes (rough hierarchy)', () => {
+  test('opening a scene shows the same hero+filmstrip review as a group', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Scenes' }).click()
+
+    // Two multi-photo scenes; the lone blurry shot is a singleton (no scene).
+    const piles = page.locator('.scene-pile')
+    await expect(piles).toHaveCount(2)
+
+    // Scenes are time-ordered: scene 0 (the beach burst) comes first and
+    // advertises its single near-duplicate set.
+    const first = piles.first()
+    await expect(first).toContainText('1 near-dup set')
+    await first.click()
+
+    // The scene opens straight into the unified review — an open image up top
+    // and a FLAT filmstrip of EVERY scene member (beach + beach2 + loose city =
+    // 3) by default, so there's no clicking through groups.
+    const review = page.locator('.review-panel')
+    await expect(review).toBeVisible()
+    await expect(review).toContainText('Scene #')
+    await expect(review.locator('.review-hero img')).toBeVisible()
+    await expect(review.locator('.strip-thumb')).toHaveCount(3)
+    // Flat by default: no collapsed tiles/clusters, but the near-dup pair is
+    // bound by a subtle "group rail" so membership still reads (beach pair).
+    await expect(review.locator('.strip-cluster')).toHaveCount(0)
+    await expect(review.locator('.strip-grouptile')).toHaveCount(0)
+    await expect(review.locator('.strip-flatgroup')).toHaveCount(1)
+    await expect(review.locator('.strip-flatgroup .strip-thumb')).toHaveCount(2)
+    // The whole-scene "keep best · delete rest" must NOT be offered.
+    await expect(review.getByRole('button', { name: 'Keep best · delete rest' }))
+      .toHaveCount(0)
+
+    // "Group dups" collapses each near-dup set into one stacked tile (×N), on
+    // demand: the beach pair becomes a single ×2 tile and the loose city shot
+    // stays a plain thumb.
+    await review.getByRole('button', { name: /Group dups/ }).click()
+    await expect(review.locator('.strip-grouptile')).toHaveCount(1)
+    await expect(review.locator('.strip-count')).toHaveText('×2')
+    await expect(review.locator('.strip-thumb')).toHaveCount(1)
+    // Clicking the tile expands that set inline into a bracketed cluster.
+    await review.locator('.strip-grouptile').click()
+    await expect(review.locator('.strip-cluster')).toHaveCount(1)
+    await expect(review.locator('.strip-cluster .strip-thumb')).toHaveCount(2)
+
+    await review.getByRole('button', { name: 'Close' }).click()
+    await expect(review).toHaveCount(0)
+  })
+
+  test('a scene with no near-dup sets still opens into an open image', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Scenes' }).click()
+
+    // The second scene (portrait + cat) has no near-duplicate set — it must
+    // still open into the same hero+filmstrip, not a bare thumbnail grid.
+    await page.locator('.scene-pile').nth(1).click()
+    const review = page.locator('.review-panel')
+    await expect(review).toBeVisible()
+    await expect(review.locator('.review-hero img')).toBeVisible()
+    await expect(review.locator('.strip-thumb').first()).toBeVisible()
+    // No near-dup sets -> no cluster chrome and no "Group dups" affordance.
+    await expect(review.locator('.strip-cluster')).toHaveCount(0)
+    await expect(review.getByRole('button', { name: /Group dups/ })).toHaveCount(0)
+
+    // Clicking the hero zooms into the full-size lightbox.
+    await review.locator('.review-hero').click()
+    await expect(page.locator('.lightbox')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.locator('.lightbox')).toHaveCount(0)
+    await review.getByRole('button', { name: 'Close' }).click()
   })
 })
 

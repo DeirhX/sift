@@ -36,34 +36,44 @@ def _img(name, color, size=(80, 60)):
 
 def seed():
     # Distinct combined scores -> stable sort order in the grid.
+    # Scenes (rough hierarchy): scene 0 = beach burst + a loose city shot
+    # (one near-dup set nested + one loose member); scene 1 = portrait + cat
+    # (two loose members, no near-dups); blurry is a lone singleton (scene None).
     images = [
         {"path": _img("beach.jpg", (40, 120, 200)), "filename": "beach.jpg",
          "combined": 0.95, "sharpness": 0.9, "para_aesthetic": 0.92, "dup_group": 0,
+         "scene_group": 0, "capture_time": 1000.0,
          "imgw": 80, "imgh": 60, "caption": "a sunny beach", "tags": ["beach", "summer"],
          "faces": []},
         {"path": _img("portrait.jpg", (200, 160, 140)), "filename": "portrait.jpg",
          "combined": 0.80, "sharpness": 0.8, "para_aesthetic": 0.78, "dup_group": None,
+         "scene_group": 1, "capture_time": 5000.0,
          "imgw": 80, "imgh": 60, "caption": "a portrait of a person", "tags": ["people"],
          "faces": [{"bbox": [10.0, 8.0, 40.0, 45.0], "prob": 0.99, "cluster_id": 0,
                     "name": "Alice", "sharp": 0.9, "expr": 0.8}]},
         {"path": _img("city.jpg", (90, 90, 90)), "filename": "city.jpg",
          "combined": 0.70, "sharpness": 0.7, "para_aesthetic": 0.66, "dup_group": None,
+         "scene_group": 0, "capture_time": 1010.0,
          "imgw": 80, "imgh": 60, "caption": "a city street at night", "tags": ["city"],
          "faces": []},
         {"path": _img("beach2.jpg", (45, 125, 205)), "filename": "beach2.jpg",
          "combined": 0.60, "sharpness": 0.55, "para_aesthetic": 0.58, "dup_group": 0,
+         "scene_group": 0, "capture_time": 1005.0,
          "imgw": 80, "imgh": 60, "caption": "a sunny beach again", "tags": ["beach"],
          "faces": []},
         {"path": _img("cat.jpg", (180, 150, 60)), "filename": "cat.jpg",
          "combined": 0.50, "sharpness": 0.5, "para_aesthetic": 0.48, "dup_group": None,
+         "scene_group": 1, "capture_time": 5030.0,
          "imgw": 80, "imgh": 60, "caption": "a cat on a sofa", "tags": ["animals"],
          "faces": []},
         {"path": _img("blurry.jpg", (30, 30, 30)), "filename": "blurry.jpg",
          "combined": 0.20, "sharpness": 0.15, "para_aesthetic": 0.22, "dup_group": None,
+         "scene_group": None, "capture_time": 99999.0,
          "imgw": 80, "imgh": 60, "caption": "a blurry shot", "tags": [], "faces": []},
     ]
     report = {"folder": str(LIB), "backend": "para", "caption_model": "blip",
-              "face_model": "mtcnn+vggface2", "duplicate_groups": 1, "images": images}
+              "face_model": "mtcnn+vggface2", "scene_model": "exif+clip-b32",
+              "duplicate_groups": 1, "scene_groups": 2, "images": images}
     FIXROOT.mkdir(parents=True, exist_ok=True)
     # Start from a clean DB every run: build_db deliberately *preserves*
     # decisions across rebuilds, so a stale photos.db would leak verdicts from

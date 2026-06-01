@@ -49,7 +49,8 @@ export function parseState(search) {
     if (v != null) filters[k] = v !== 'false' && v !== '0'
   }
 
-  const view = p.get('view') === 'groups' ? 'groups' : 'grid'
+  const rawView = p.get('view')
+  const view = rawView === 'groups' || rawView === 'scenes' ? rawView : 'grid'
   return { filters, view }
 }
 

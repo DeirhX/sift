@@ -64,6 +64,15 @@ export function fetchGroups(filters, offset, limit, order = 'size') {
   return jsonFetch(`/api/groups?${p.toString()}`)
 }
 
+export function fetchScenes(filters, offset, limit, order = 'time') {
+  const p = new URLSearchParams()
+  p.set('offset', offset)
+  p.set('limit', limit)
+  p.set('order', order)
+  appendFilters(p, filters)
+  return jsonFetch(`/api/scenes?${p.toString()}`)
+}
+
 // Fire-and-forget: optimistic UI owns rollback, so these don't await a result.
 export async function setDecision(hash, decision) {
   await fetch('/api/decisions', jsonBody({ hash, decision }))

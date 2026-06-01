@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fullUrl, thumbUrl, fetchLocations, revealPath, fetchMeta } from '../api.js'
-import { fmt, aestheticScore } from '../format.js'
+import { fmt, aestheticScore, fmtTime } from '../format.js'
 
 const qColor = (v) =>
   v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
@@ -110,40 +110,100 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
   if (!item) return null
   const aes = aestheticScore(item)
 
+  // Per-axis stats shown as indicative bars. Each entry is only rendered when
+  // the value is present, so libraries scored without PARA/faces degrade
+  // gracefully (e.g. CLIP-IQA-only runs show Quality/Sharpness/Aesthetic).
+  const stats = [
+    ['Quality', item.combined, 'Composite score (0.4·sharpness + 0.6·aesthetic)'],
+    ['Sharpness', item.sharpness, 'Laplacian-variance sharpness, normalised'],
+    ['Aesthetic', aes, 'PARA aesthetic (or CLIP-IQA fallback)'],
+    ['Quality (PARA)', item.para_quality, 'PARA technical quality'],
+    ['Composition', item.para_composition, 'PARA composition'],
+    ['Lighting', item.para_light, 'PARA lighting'],
+    ['Color', item.para_color, 'PARA color'],
+    ['Depth of field', item.para_dof, 'PARA depth-of-field'],
+    ['Content', item.para_content, 'PARA subject/content'],
+    ['Portrait', item.portrait, 'Face sharpness × expression of the largest face'],
+  ]
+
   return (
     <div className="lightbox" onClick={() => setIndex(null)}>
-      <button className="lb-close" onClick={() => setIndex(null)}>×</button>
-      {index > 0 && (
-        <button className="lb-nav prev" onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>
-      )}
-      {index < items.length - 1 && (
-        <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
-      )}
-      <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
-      <div className="lb-info" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+      <div className="lb-stage" onClick={() => setIndex(null)}>
+        <button className="lb-close" onClick={(e) => { e.stopPropagation(); setIndex(null) }}>×</button>
+        {index > 0 && (
+          <button className="lb-nav prev" onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>
+        )}
+        {index < items.length - 1 && (
+          <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
+        )}
+        <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
+
+        {showStrip && items.length > 1 && (
+          <div className="lb-strip" onClick={(e) => e.stopPropagation()}>
+            {items.map((it, i) => (
+              <button
+                key={it.id}
+                className={'lb-strip-thumb'
+                  + (i === index ? ' active' : '')
+                  + (it.decision === 'del' ? ' is-del' : '')
+                  + (it.decision === 'keep' ? ' is-keep' : '')}
+                onClick={() => setIndex(i)}
+                title={describe(it)}
+              >
+                <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <aside className="lb-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="lb-panel-head">
           <span className="q-pill big" style={{ background: qColor(item.combined) }} title="Composite quality">
             Q {fmt(item.combined)}
           </span>
-          <b>{item.filename}</b>
-          <span className="lb-sub">
-            Sh {fmt(item.sharpness)} · Ae {fmt(aes)}
-            {item.portrait != null && ` · Portrait ${fmt(item.portrait)}`}
-          </span>
-          {item.dup_group != null && <span className="lb-sub">dup #{item.dup_group}</span>}
-          <div style={{ flex: 1 }} />
+          <b className="lb-name" title={item.filename}>{item.filename}</b>
+        </div>
+
+        <div className="lb-actions">
           <button
-            className={'btn ' + (item.decision === 'keep' ? '' : '')}
+            className="btn lb-act"
             style={{ background: item.decision === 'keep' ? 'var(--keep)' : undefined, color: item.decision === 'keep' ? '#06231a' : undefined }}
             onClick={() => onDecision(item, 'keep')}
           >Keep (k)</button>
           <button
-            className="btn"
+            className="btn lb-act"
             style={{ background: item.decision === 'del' ? 'var(--del)' : undefined, color: item.decision === 'del' ? '#2a0a06' : undefined }}
             onClick={() => onDecision(item, 'del')}
           >Delete (d)</button>
         </div>
-        {item.caption && <div style={{ marginTop: 6, color: 'var(--text-dim)' }}>{item.caption}</div>}
+
+        {item.caption && <div className="lb-caption">{item.caption}</div>}
+
+        <div className="lb-stats">
+          {stats.map(([label, value, hint]) => (
+            <StatBar key={label} label={label} value={value} hint={hint} />
+          ))}
+        </div>
+
+        <div className="lb-facts">
+          {(item.imgw && item.imgh) && (
+            <div className="lb-fact"><span>Dimensions</span><span>{item.imgw} × {item.imgh}</span></div>
+          )}
+          {item.scene_group != null && (
+            <div className="lb-fact"><span>Scene</span><span>#{item.scene_group}</span></div>
+          )}
+          {item.dup_group != null && (
+            <div className="lb-fact"><span>Near-dup set</span><span>#{item.dup_group}</span></div>
+          )}
+          {fmtTime(item.capture_time) && (
+            <div className="lb-fact"><span>Captured</span><span>{fmtTime(item.capture_time)}</span></div>
+          )}
+          {item.tags?.length > 0 && (
+            <div className="lb-fact tags"><span>Tags</span><span>{item.tags.join(', ')}</span></div>
+          )}
+        </div>
+
         {locs && (
           <div className="lb-locations">
             {locs.count > 1 ? (
@@ -170,25 +230,22 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
             )}
           </div>
         )}
-      </div>
+      </aside>
+    </div>
+  )
+}
 
-      {showStrip && items.length > 1 && (
-        <div className="lb-strip" onClick={(e) => e.stopPropagation()}>
-          {items.map((it, i) => (
-            <button
-              key={it.id}
-              className={'lb-strip-thumb'
-                + (i === index ? ' active' : '')
-                + (it.decision === 'del' ? ' is-del' : '')
-                + (it.decision === 'keep' ? ' is-keep' : '')}
-              onClick={() => setIndex(i)}
-              title={describe(it)}
-            >
-              <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
-            </button>
-          ))}
-        </div>
-      )}
+// One labelled stat with an indicative fill bar (red → green by value).
+function StatBar({ label, value, hint }) {
+  if (value == null) return null
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100)
+  return (
+    <div className="lb-stat" title={hint}>
+      <span className="lb-stat-label">{label}</span>
+      <span className="lb-stat-track">
+        <span className="lb-stat-fill" style={{ width: pct + '%', background: qColor(value) }} />
+      </span>
+      <span className="lb-stat-val">{fmt(value)}</span>
     </div>
   )
 }

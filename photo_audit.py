@@ -66,6 +66,7 @@ import sys
 import json
 import argparse
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 # Make sure aesthetic_scorer.py is importable regardless of working directory
@@ -175,8 +176,8 @@ def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
 
     print(f"\nScoring portrait expression on {len(crops)} faces (CLIP ViT-B/32)...")
     model, _, prep = open_clip.create_model_and_transforms(
-        "ViT-B-32", pretrained="openai", device=device)
-    tok = open_clip.get_tokenizer("ViT-B-32")
+        "ViT-B-32-quickgelu", pretrained="openai", device=device)
+    tok = open_clip.get_tokenizer("ViT-B-32-quickgelu")
     model.eval()
 
     pos = tok([f"a photo of {p}" for p, _ in EXPRESSION_PAIRS]).to(device)
@@ -295,8 +296,12 @@ def load_para_scorer(device: str):
 
     payload = torch.load(model_path, map_location=device, weights_only=False)
     if isinstance(payload, dict):
-        # State dict uses CLIPVisionTransformer (inner backbone, no vision_model. prefix)
-        backbone = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32").vision_model
+        # The saved state dict's backbone.* keys are the CLIPVisionTransformer's
+        # (embeddings/encoder/...). transformers <5 nested that under
+        # CLIPVisionModel.vision_model; 5.x flattened it onto the model itself.
+        # Use whichever exists so the keys line up across versions.
+        vision = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
+        backbone = getattr(vision, "vision_model", vision)
         scorer = AestheticScorer(backbone)
         scorer.load_state_dict(payload)
     else:
@@ -430,9 +435,9 @@ def run_caption_and_tags(paths: list[Path], device: str,
     print(f"\nLoading CLIP ViT-B/32 for keyword tagging on {device}...")
     try:
         clip_model, _, clip_prep = open_clip.create_model_and_transforms(
-            "ViT-B-32", pretrained="openai", device=device
+            "ViT-B-32-quickgelu", pretrained="openai", device=device
         )
-        clip_tok = open_clip.get_tokenizer("ViT-B-32")
+        clip_tok = open_clip.get_tokenizer("ViT-B-32-quickgelu")
         clip_model.eval()
 
         # Encode the full vocabulary once
@@ -520,6 +525,317 @@ def group_duplicates(hashes: dict, threshold: int = 6) -> list[list[Path]]:
         if len(group) > 1:
             groups.append(group)
     return groups
+
+
+def _cohesion_split(members: list, embeddings: dict, hashes: dict,
+                    threshold: int, floor: float) -> list:
+    """Split one single-linkage candidate component into cohesive sub-groups.
+
+    Single linkage chains: A~B, B~C, ... collapse into one blob even when the
+    endpoints are nothing alike, which is how a whole shoot ends up in one
+    "near-duplicate" group. We re-cluster the component with average-linkage
+    agglomeration and stop merging once the best inter-cluster average cosine
+    drops below `floor`, so loosely-connected chains break apart while tight
+    bursts stay whole. phash-matched pairs (exact re-saves) are pinned at
+    similarity 1.0 — a literal duplicate must never be split off.
+
+    Returns the list of resulting sub-groups with >= 2 members; singletons drop
+    out (they weren't really near-duplicates of anything)."""
+    n = len(members)
+
+    def sim(i: int, j: int) -> float:
+        a, b = members[i], members[j]
+        if (hashes[a] - hashes[b]) <= threshold:
+            return 1.0
+        if a in embeddings and b in embeddings:
+            return float(np.dot(embeddings[a], embeddings[b]))
+        return 0.0
+
+    S = [[1.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            S[i][j] = S[j][i] = sim(i, j)
+
+    clusters = [[i] for i in range(n)]
+    while len(clusters) > 1:
+        best, bi, bj = -2.0, -1, -1
+        for a in range(len(clusters)):
+            for b in range(a + 1, len(clusters)):
+                tot = sum(S[x][y] for x in clusters[a] for y in clusters[b])
+                avg = tot / (len(clusters[a]) * len(clusters[b]))
+                if avg > best:
+                    best, bi, bj = avg, a, b
+        if best < floor:
+            break
+        clusters[bi].extend(clusters[bj])
+        del clusters[bj]
+
+    return [[members[i] for i in c] for c in clusters if len(c) >= 2]
+
+
+def assign_dup_groups(paths: list[Path], hashes: dict, threshold: int,
+                      embeddings: dict | None = None, dup_sim: float = 0.92,
+                      times: dict | None = None, dup_window: float = 600.0,
+                      dup_cohesion: float = 0.90
+                      ) -> tuple[dict, list]:
+    """Assign fine near-duplicate group ids. First a similarity graph joins two
+    images when EITHER their perceptual hashes are within `threshold` Hamming
+    distance (literal re-saves / crops — matched regardless of time), OR — when
+    CLIP `embeddings` are supplied — their cosine similarity is >= `dup_sim` AND
+    they were taken within `dup_window` seconds of each other. CLIP catches
+    "same shot, slight motion" pairs that phash misses (phash can read ~32/64
+    for those); the time window keeps look-alikes from different moments out of
+    the same group. phash remains the time-independent exact-dup signal so
+    legacy behaviour is preserved when `embeddings` is None.
+
+    The graph's connected components are only *candidates*: single linkage
+    chains unrelated frames together, so each multi-frame candidate is then
+    re-clustered by `_cohesion_split` and any group whose members aren't
+    mutually cohesive (average cosine below `dup_cohesion`) is broken up. This
+    keeps the loose-but-genuine pair (linked at, say, cos 0.93) together while
+    shattering the 50-frame chains the segmenter used to emit.
+
+    Returns ({path: group_id}, [groups]); only multi-member groups are kept and
+    ids/members are ordered by earliest capture time for determinism."""
+    items = [p for p in paths if p in hashes]
+    parent = {p: p for p in items}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def t(p):
+        return (times or {}).get(p, 0.0)
+
+    has_emb = embeddings is not None
+    n = len(items)
+    for i in range(n):
+        a = items[i]
+        for j in range(i + 1, n):
+            b = items[j]
+            near = (hashes[a] - hashes[b]) <= threshold
+            if (not near and has_emb and a in embeddings and b in embeddings
+                    and (times is None or abs(t(a) - t(b)) <= dup_window)):
+                near = float(np.dot(embeddings[a], embeddings[b])) >= dup_sim
+            if near:
+                union(a, b)
+
+    from collections import defaultdict
+    comps: dict = defaultdict(list)
+    for p in items:
+        comps[find(p)].append(p)
+
+    # Candidate components -> cohesion-split blobs; tight bursts pass through.
+    groups: list = []
+    for comp in comps.values():
+        if len(comp) <= 1:
+            continue
+        if has_emb and len(comp) > 2:
+            groups.extend(
+                _cohesion_split(comp, embeddings, hashes, threshold, dup_cohesion))
+        else:
+            groups.append(comp)
+    groups = [m for m in groups if len(m) > 1]
+    groups.sort(key=lambda m: (min(t(p) for p in m), str(min(m, key=str))))
+
+    path_to_group: dict = {}
+    for gid, group in enumerate(groups):
+        group.sort(key=lambda p: (t(p), str(p)))
+        for p in group:
+            path_to_group[p] = gid
+    return path_to_group, groups
+
+
+def dup_centrality(groups: list, embeddings: dict | None) -> dict:
+    """Per-image centrality within its near-duplicate group: the mean CLIP
+    cosine to the group's other members. High = the representative frame the
+    rest cluster around; low = an edge frame. The UI leads each group with its
+    most-central photo so the hero is never a visual outlier. Returns {} (and
+    callers fall back to quality) when embeddings aren't available."""
+    if not embeddings:
+        return {}
+    out: dict = {}
+    for g in groups:
+        members = [p for p in g if p in embeddings]
+        if len(members) < 2:
+            continue
+        for p in members:
+            sims = [float(np.dot(embeddings[p], embeddings[q]))
+                    for q in members if q is not p]
+            out[p] = round(sum(sims) / len(sims), 4)
+    return out
+
+
+def coarsen_scenes_for_dups(paths: list[Path], scene_of: dict,
+                            dup_groups: list, times: dict | None = None
+                            ) -> tuple[dict, int]:
+    """Coarsen a scene assignment so every near-duplicate group nests inside a
+    single scene. Near-dups are the finest grain, so scenes must contain them:
+    images sharing an initial (multi-member) scene stay together, and any scenes
+    a dup group spans are merged via union-find. A singleton-scene image is
+    pulled into a scene only when a dup group ties it there. This fixes the case
+    where the sequential segmenter splits a continuous shoot between two genuine
+    near-duplicates (which, being scene-bounded, could otherwise never merge).
+
+    Returns ({path: scene_id|None}, n_scenes); lone images keep None."""
+    from collections import defaultdict
+    parent = {p: p for p in paths}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_scene: dict = defaultdict(list)
+    for p in paths:
+        s = scene_of.get(p)
+        if s is not None:
+            by_scene[s].append(p)
+    for members in by_scene.values():
+        for q in members[1:]:
+            union(members[0], q)
+
+    for group in dup_groups:
+        g = [p for p in group if p in parent]
+        for q in g[1:]:
+            union(g[0], q)
+
+    def t(p):
+        return (times or {}).get(p, 0.0)
+
+    comps: dict = defaultdict(list)
+    for p in paths:
+        comps[find(p)].append(p)
+    multi = [m for m in comps.values() if len(m) > 1]
+    multi.sort(key=lambda m: (min(t(p) for p in m), str(min(m, key=str))))
+
+    scene_assign: dict = {p: None for p in paths}
+    for sid, members in enumerate(multi):
+        for p in members:
+            scene_assign[p] = sid
+    return scene_assign, len(multi)
+
+
+# ── Capture time (EXIF) + scene grouping ──────────────────────────────────────
+
+def read_capture_time(path: Path) -> float | None:
+    """Best-effort capture timestamp (epoch seconds) from EXIF: DateTimeOriginal,
+    then DateTimeDigitized, then the IFD0 DateTime. Returns None when absent or
+    unparseable, so callers can fall back to filesystem mtime."""
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            if not exif:
+                return None
+            dt = None
+            try:
+                sub = exif.get_ifd(0x8769)          # ExifIFD pointer
+                dt = sub.get(0x9003) or sub.get(0x9004)  # DateTimeOriginal/Digitized
+            except Exception:
+                pass
+            dt = dt or exif.get(0x0132)             # IFD0 DateTime
+            if not dt:
+                return None
+            return datetime.strptime(str(dt).strip(), "%Y:%m:%d %H:%M:%S").timestamp()
+    except Exception:
+        return None
+
+
+def compute_clip_embeddings(paths: list[Path], device: str,
+                            batch_size: int = 64) -> dict:
+    """L2-normalised CLIP ViT-B/32 image embeddings per path, for semantic scene
+    similarity. Standardised on ViT-B/32 regardless of the aesthetic backend so
+    scene grouping is consistent. Returns {path: 1-D float32 ndarray}."""
+    import torch
+    import open_clip
+
+    model, _, prep = open_clip.create_model_and_transforms(
+        "ViT-B-32-quickgelu", pretrained="openai", device=device)
+    model.eval()
+
+    embs: dict = {}
+    for i in tqdm(range(0, len(paths), batch_size), desc="Scene embeddings (CLIP)"):
+        batch = paths[i:i + batch_size]
+        tensors, bpaths = [], []
+        for p in batch:
+            try:
+                tensors.append(prep(Image.open(p).convert("RGB")))
+                bpaths.append(p)
+            except Exception as e:
+                print(f"  skip {p.name}: {e}")
+        if not tensors:
+            continue
+        t = torch.stack(tensors).to(device)
+        with torch.no_grad(), torch.amp.autocast(device):
+            f = model.encode_image(t)
+            f = f / f.norm(dim=-1, keepdim=True)
+        for p, v in zip(bpaths, f.cpu().float().numpy()):
+            embs[p] = v
+
+    del model
+    return embs
+
+
+def _visually_similar(a: Path, b: Path, embeddings: dict | None, hashes: dict | None,
+                      sim: float, phash_dist: int) -> bool:
+    """Whether two images look like the same scene. Prefers CLIP cosine when
+    embeddings are present, else falls back to perceptual-hash distance."""
+    if embeddings is not None and a in embeddings and b in embeddings:
+        return float(np.dot(embeddings[a], embeddings[b])) >= sim
+    if hashes is not None and a in hashes and b in hashes:
+        return (hashes[a] - hashes[b]) <= phash_dist
+    return False
+
+
+def group_scenes(paths: list[Path], times: dict,
+                 embeddings: dict | None = None, hashes: dict | None = None,
+                 big_gap: float = 3600.0, small_gap: float = 120.0,
+                 sim: float = 0.85, phash_dist: int = 18) -> tuple[dict, int]:
+    """Segment images into rough "scenes" in capture-time order. EXIF time is the
+    primary signal; visual similarity (CLIP cosine, or phash fallback) refines it.
+
+    Boundary between two time-adjacent images when:
+      - the gap exceeds `big_gap` (always a new scene), or
+      - the gap exceeds `small_gap` AND they are not visually similar.
+    Tight bursts (gap <= small_gap) always stay together.
+
+    Returns ({path: scene_id|None}, n_scenes). Like dup groups, only multi-member
+    scenes get an id; lone images get None."""
+    if not paths:
+        return {}, 0
+    ordered = sorted(paths, key=lambda p: (times.get(p, 0.0), str(p)))
+    segments: list = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        dt = times.get(cur, 0.0) - times.get(prev, 0.0)
+        similar = _visually_similar(prev, cur, embeddings, hashes, sim, phash_dist)
+        if dt > big_gap or (dt > small_gap and not similar):
+            segments.append([cur])
+        else:
+            segments[-1].append(cur)
+
+    scene_of: dict = {}
+    sid = 0
+    for seg in segments:
+        if len(seg) > 1:
+            for p in seg:
+                scene_of[p] = sid
+            sid += 1
+        else:
+            scene_of[seg[0]] = None
+    return scene_of, sid
 
 
 # ── Face detection / clustering (facenet-pytorch + DBSCAN) ───────────────────
@@ -709,6 +1025,24 @@ def main():
     ap.add_argument("--recurse",        action="store_true")
     ap.add_argument("--out",            default=None)
     ap.add_argument("--dup-threshold",  type=int,   default=6)
+    ap.add_argument("--dup-sim",        type=float, default=0.92, metavar="F",
+                    help="CLIP cosine to treat two shots as near-duplicates "
+                         "(default: 0.92; catches what phash misses)")
+    ap.add_argument("--dup-window",     type=float, default=10.0, metavar="MIN",
+                    help="Max minutes apart for a CLIP-based near-duplicate "
+                         "match (default: 10)")
+    ap.add_argument("--dup-cohesion",   type=float, default=0.90, metavar="F",
+                    help="Min average CLIP cosine to keep a near-duplicate "
+                         "group whole; looser components are split so single-"
+                         "linkage chains can't merge a whole shoot (default: 0.90)")
+    ap.add_argument("--no-scenes",      action="store_true",
+                    help="Skip rough scene grouping (only fine near-dup groups)")
+    ap.add_argument("--scene-time-gap", type=float, default=60.0, metavar="MIN",
+                    help="Minutes between shots that always starts a new scene (default: 60)")
+    ap.add_argument("--scene-small-gap", type=float, default=2.0, metavar="MIN",
+                    help="Below this gap (minutes) shots always stay in one scene (default: 2)")
+    ap.add_argument("--scene-sim",      type=float, default=0.85, metavar="F",
+                    help="CLIP cosine similarity for 'same scene' (default: 0.85)")
     ap.add_argument("--backend",        choices=["clip-iqa", "para", "both"],
                     default="para",
                     help="Aesthetic scoring backend (default: para)")
@@ -754,6 +1088,7 @@ def main():
 
     use_clip_iqa = not args.no_clip and args.backend in ("clip-iqa", "both")
     use_para     = not args.no_clip and args.backend in ("para",     "both")
+    use_scenes   = not args.no_scenes
 
     out_path = Path(args.out) if args.out else folder / "audit_report.json"
 
@@ -771,15 +1106,17 @@ def main():
             # Only trust the cache when it was produced with the same scoring
             # configuration, so reused records have exactly the expected shape.
             cur_cfg = ("none" if args.no_clip else args.backend,
-                       bool(args.caption), bool(args.faces), bool(args.face_expr))
+                       bool(args.caption), bool(args.faces), bool(args.face_expr),
+                       bool(use_scenes))
             prev_cfg = (prev.get("backend"),
                         prev.get("caption_model") is not None,
                         prev.get("face_model") is not None,
-                        prev.get("face_expr_model") is not None)
+                        prev.get("face_expr_model") is not None,
+                        prev.get("scene_model") is not None)
             if prev_cfg == cur_cfg:
                 prev_by_path = {r["path"]: r for r in prev.get("images", [])}
             else:
-                print(f"  (config changed {prev_cfg} → {cur_cfg}; re-scoring all)")
+                print(f"  (config changed {prev_cfg} -> {cur_cfg}; re-scoring all)")
         except Exception as e:
             print(f"  (cache unreadable, re-scoring all: {e})")
 
@@ -802,6 +1139,7 @@ def main():
         if use_clip_iqa and "clip_iqa"       not in prev: return None
         if args.caption and "caption"        not in prev: return None
         if args.faces   and "faces"          not in prev: return None
+        if use_scenes   and "scene_group"    not in prev: return None
         return prev
 
     cached: dict[Path, dict] = {}
@@ -847,7 +1185,7 @@ def main():
 
     combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
 
-    # ── Duplicate detection (phash reused from cache; only new files hashed) ──
+    # ── Perceptual hashes (reused from cache; only new files hashed) ──
     print("\nComputing perceptual hashes for duplicate detection...")
     hashes: dict = {}
     for p in cached:
@@ -858,11 +1196,55 @@ def main():
     new_hashes, new_sizes = compute_phashes(to_process) if to_process else ({}, {})
     hashes.update(new_hashes)
     img_sizes = new_sizes
-    dup_groups = group_duplicates(hashes, threshold=args.dup_threshold)
-    path_to_group: dict[Path, int] = {}
-    for gid, group in enumerate(dup_groups):
-        for p in group:
-            path_to_group[p] = gid
+
+    # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
+    capture_time: dict[Path, float] = {}
+    for p in paths:
+        prev = cached.get(p)
+        if prev is not None and prev.get("capture_time") is not None:
+            capture_time[p] = prev["capture_time"]
+            continue
+        ct = read_capture_time(p)
+        capture_time[p] = ct if ct is not None else (sigs[p][0] or 0.0)
+
+    # ── Scene grouping + fine near-duplicate groups ──
+    # Grouping is global (like face clustering): recomputed every run over the
+    # whole set, even when all per-image scores came from cache, because near-dup
+    # membership and scene boundaries depend on the full set. CLIP embeddings are
+    # re-derived here (never persisted) and drive both "same scene" and the
+    # CLIP-aware near-dup test; phash is the fallback / exact-dup signal.
+    embeddings: dict | None = None
+    if use_scenes and not args.no_clip:
+        print()
+        embeddings = compute_clip_embeddings(paths, device_for())
+
+    # 1) Near-duplicates first — the finest grain. CLIP cosine catches the
+    #    "same shot, slight motion" pairs that phash (Hamming) reads as unrelated.
+    path_to_group, dup_groups = assign_dup_groups(
+        paths, hashes, args.dup_threshold,
+        embeddings=embeddings, dup_sim=args.dup_sim,
+        times=capture_time, dup_window=args.dup_window * 60.0,
+        dup_cohesion=args.dup_cohesion,
+    )
+    # Centrality per member -> the UI leads each group with its medoid frame.
+    dup_central = dup_centrality(dup_groups, embeddings)
+
+    # 2) Rough scenes, then coarsen so every dup group nests inside one scene
+    #    (a near-dup spanning the sequential segmenter's boundary merges them).
+    if not use_scenes:
+        scene_assign: dict = {p: None for p in paths}
+        scene_count = 0
+    else:
+        scene_assign, _ = group_scenes(
+            paths, capture_time,
+            embeddings=embeddings, hashes=hashes,
+            big_gap=args.scene_time_gap * 60.0,
+            small_gap=args.scene_small_gap * 60.0,
+            sim=args.scene_sim,
+        )
+        scene_assign, scene_count = coarsen_scenes_for_dups(
+            paths, scene_assign, dup_groups, times=capture_time,
+        )
 
     # ── BLIP captions + CLIP keyword tags (new files only) ──
     captions: dict[Path, dict] = {}
@@ -898,6 +1280,7 @@ def main():
         mt, sz = sigs[p]
         rec["mtime"] = mt
         rec["fsize"] = sz
+        rec["capture_time"] = capture_time.get(p)
         if p in hashes:
             rec["phash"] = str(hashes[p])
         return rec
@@ -910,6 +1293,8 @@ def main():
             rec["sharpness"] = round(sharpness[p], 4)
             rec["combined"]  = round(combined[p], 4)
             rec["dup_group"] = path_to_group.get(p)
+            rec["dup_central"] = dup_central.get(p)
+            rec["scene_group"] = scene_assign.get(p)
             if use_para and use_clip_iqa:
                 rec["combined_clip_iqa"] = round(
                     0.4 * sharpness[p] + 0.6 * rec.get("clip_iqa", 0.5), 4)
@@ -926,6 +1311,8 @@ def main():
             "sharpness":     round(sharpness[p], 4),
             "combined":      round(combined[p], 4),
             "dup_group":     path_to_group.get(p),
+            "dup_central":   dup_central.get(p),
+            "scene_group":   scene_assign.get(p),
             "raw_laplacian": round(raw_sharp[p], 2),
         }
         # Dimensions for every image (not just faces) so the grid can lay out
@@ -973,8 +1360,15 @@ def main():
             "caption_model":    "blip-base+clip-b32" if args.caption else None,
             "face_model":       "mtcnn+vggface2" if args.faces else None,
             "face_expr_model":  "clip-b32-expr" if (args.faces and args.face_expr) else None,
+            "scene_model":      (None if not use_scenes
+                                 else "exif+clip-b32" if not args.no_clip
+                                 else "exif+phash"),
             "total_images":     len(records),
             "duplicate_groups": len(dup_groups),
+            "dup_sim":          args.dup_sim,
+            "dup_window_min":   args.dup_window,
+            "dup_cohesion":     args.dup_cohesion,
+            "scene_groups":     scene_count,
             "faces_images":     n_faces_images if args.faces else None,
             "face_clusters":    n_clusters     if args.faces else None,
             "images":           records,
