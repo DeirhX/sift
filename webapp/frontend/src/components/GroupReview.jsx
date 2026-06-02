@@ -12,14 +12,14 @@ import DecideButtons from './DecideButtons.jsx'
 // `mode` toggles between two callers that share this exact UI so the experience
 // is uniform:
 //   'group' — a near-duplicate group; offers "keep best · delete rest".
-//   'scene' — a whole rough scene; the strip is FLAT by default (every photo,
-//             medoid-led, no clicking through groups) with each near-duplicate
-//             set bound by a subtle "group rail" so membership reads at a
-//             glance. A "Group dups" toggle collapses each set into one stacked
-//             ×N tile on demand; clicking a tile expands that set inline as a
-//             bracketed cluster. The group-wide "keep best · delete rest" is hidden (a
-//             scene's members aren't all duplicates), but the selected photo's
-//             own near-dup twins can still be deduped in one click.
+//   'scene' — a whole rough scene; the strip is GROUPED by default (each
+//             near-duplicate set collapses to one stacked ×N tile, medoid-led,
+//             so the scene reads as its distinct shots at a glance). Clicking a
+//             tile expands that set inline as a bracketed cluster; an "Ungroup"
+//             toggle flattens to every photo (with each set bound by a subtle
+//             "group rail"). The group-wide "keep best · delete rest" is hidden
+//             (a scene's members aren't all duplicates), but the selected
+//             photo's own near-dup twins can still be deduped in one click.
 // `title`/`subExtra` let the caller label the header; `showGroupBulk` gates the
 // group-wide actions.
 export default function GroupReview({
@@ -44,9 +44,9 @@ export default function GroupReview({
     () => (mode === 'scene' ? [...sets.flatMap((s) => s.items), ...loose] : repFirst(items)),
     [mode, sets, loose, items],
   )
-  // A scene with near-dup sets can be browsed flat (every photo, the default —
-  // no clicking through groups) or "grouped on demand": each set collapses to a
-  // single stacked representative tile you can click to expand inline.
+  // A scene with near-dup sets opens grouped by default — each set collapses to
+  // a single stacked representative tile you can click to expand inline — and an
+  // "Ungroup" toggle flattens it to every photo (with group rails).
   const canGroup = mode === 'scene' && sets.length > 0
   // ★ marks each group's representative (the medoid hero), which is now the
   // first member of every reordered set / of `view` in group mode.
@@ -72,8 +72,10 @@ export default function GroupReview({
     onSelect(view[i].id)
   }
   const [showList, setShowList] = useState(false)
-  // Scene "group on demand" view + which collapsed sets are expanded inline.
-  const [grouped, setGrouped] = useState(false)
+  // Scene strip is grouped by default (near-dup sets collapsed to ×N tiles);
+  // `expanded` tracks which collapsed sets are opened inline. For non-scene
+  // callers canGroup is false, so this is inert.
+  const [grouped, setGrouped] = useState(canGroup)
   const [expanded, setExpanded] = useState(() => new Set())
   const toggleExpand = (gid) => setExpanded((prev) => {
     const next = new Set(prev)

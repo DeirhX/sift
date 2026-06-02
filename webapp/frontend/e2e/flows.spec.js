@@ -160,34 +160,35 @@ test.describe('scenes (rough hierarchy)', () => {
     await first.click()
 
     // The scene opens straight into the unified review — an open image up top
-    // and a FLAT filmstrip of EVERY scene member (beach + beach2 + loose city =
-    // 3) by default, so there's no clicking through groups.
+    // and a GROUPED filmstrip by default: each near-duplicate set is collapsed
+    // to one stacked ×N tile, so the scene reads as its distinct shots. The
+    // beach pair is a single ×2 tile; the loose city shot stays a plain thumb
+    // (3 members → 1 tile + 1 thumb).
     const review = page.locator('.review-panel')
     await expect(review).toBeVisible()
     await expect(review).toContainText('Scene #')
     await expect(review.locator('.review-hero img')).toBeVisible()
-    await expect(review.locator('.strip-thumb')).toHaveCount(3)
-    // Flat by default: no collapsed tiles/clusters, but the near-dup pair is
-    // bound by a subtle "group rail" so membership still reads (beach pair).
-    await expect(review.locator('.strip-cluster')).toHaveCount(0)
-    await expect(review.locator('.strip-grouptile')).toHaveCount(0)
-    await expect(review.locator('.strip-flatgroup')).toHaveCount(1)
-    await expect(review.locator('.strip-flatgroup .strip-thumb')).toHaveCount(2)
+    await expect(review.locator('.strip-grouptile')).toHaveCount(1)
+    await expect(review.locator('.strip-count')).toHaveText('×2')
+    await expect(review.locator('.strip-thumb')).toHaveCount(1)
+    await expect(review.locator('.strip-flatgroup')).toHaveCount(0)
     // The whole-scene "keep best · delete rest" must NOT be offered.
     await expect(review.getByRole('button', { name: 'Keep best · delete rest' }))
       .toHaveCount(0)
 
-    // "Group dups" collapses each near-dup set into one stacked tile (×N), on
-    // demand: the beach pair becomes a single ×2 tile and the loose city shot
-    // stays a plain thumb.
-    await review.getByRole('button', { name: /Group dups/ }).click()
-    await expect(review.locator('.strip-grouptile')).toHaveCount(1)
-    await expect(review.locator('.strip-count')).toHaveText('×2')
-    await expect(review.locator('.strip-thumb')).toHaveCount(1)
     // Clicking the tile expands that set inline into a bracketed cluster.
     await review.locator('.strip-grouptile').click()
     await expect(review.locator('.strip-cluster')).toHaveCount(1)
     await expect(review.locator('.strip-cluster .strip-thumb')).toHaveCount(2)
+
+    // "Ungroup" flattens to EVERY photo, the near-dup pair bound by a subtle
+    // "group rail" so membership still reads (beach + beach2 + city = 3).
+    await review.getByRole('button', { name: /Ungroup/ }).click()
+    await expect(review.locator('.strip-grouptile')).toHaveCount(0)
+    await expect(review.locator('.strip-cluster')).toHaveCount(0)
+    await expect(review.locator('.strip-thumb')).toHaveCount(3)
+    await expect(review.locator('.strip-flatgroup')).toHaveCount(1)
+    await expect(review.locator('.strip-flatgroup .strip-thumb')).toHaveCount(2)
 
     await review.getByRole('button', { name: 'Close' }).click()
     await expect(review).toHaveCount(0)
