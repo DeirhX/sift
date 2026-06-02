@@ -160,27 +160,30 @@ test.describe('scenes (rough hierarchy)', () => {
     await first.click()
 
     // The scene opens straight into the unified review — an open image up top
-    // and a GROUPED filmstrip by default: each near-duplicate set is collapsed
-    // to one stacked ×N tile, so the scene reads as its distinct shots. The
-    // beach pair is a single ×2 tile; the loose city shot stays a plain thumb
-    // (3 members → 1 tile + 1 thumb).
+    // and a GROUPED filmstrip. With exactly one near-duplicate set, that set
+    // auto-expands on open (a lone ×N tile would be pointless), so the beach
+    // pair shows as a 2-thumb cluster and the loose city shot is a plain thumb.
     const review = page.locator('.review-panel')
     await expect(review).toBeVisible()
     await expect(review).toContainText('Scene #')
     await expect(review.locator('.review-hero img')).toBeVisible()
-    await expect(review.locator('.strip-grouptile')).toHaveCount(1)
-    await expect(review.locator('.strip-count')).toHaveText('×2')
-    await expect(review.locator('.strip-thumb')).toHaveCount(1)
+    await expect(review.locator('.strip-cluster')).toHaveCount(1)
+    await expect(review.locator('.strip-cluster .strip-thumb')).toHaveCount(2)
+    await expect(review.locator('.strip-grouptile')).toHaveCount(0)
     await expect(review.locator('.strip-flatgroup')).toHaveCount(0)
     // The whole-scene "keep best · delete rest" must NOT be offered.
     await expect(review.getByRole('button', { name: 'Keep best · delete rest' }))
       .toHaveCount(0)
 
-    // Clicking the tile only previews its medoid — it must NOT expand the set
-    // (no surprise reflow). The `+` pill overlaid on the tile opens it inline.
+    // The "▾ N" badge on the cluster collapses it to the medoid tile, which
+    // carries the "▸ N" badge. Clicking the photo only previews its medoid —
+    // it must NOT expand (no surprise reflow); only the badge toggles.
+    await review.locator('.strip-toggle.collapse').click()
+    await expect(review.locator('.strip-grouptile')).toHaveCount(1)
+    await expect(review.locator('.strip-toggle.expand')).toHaveText(/2/)
     await review.locator('.strip-grouptile').click()
     await expect(review.locator('.strip-cluster')).toHaveCount(0)
-    await review.locator('.strip-expand').click()
+    await review.locator('.strip-toggle.expand').click()
     await expect(review.locator('.strip-cluster')).toHaveCount(1)
     await expect(review.locator('.strip-cluster .strip-thumb')).toHaveCount(2)
 

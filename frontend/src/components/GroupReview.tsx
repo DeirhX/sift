@@ -224,10 +224,11 @@ export default function GroupReview({
     )
   }
 
-  // A collapsed near-dup set: a stacked card showing its medoid and a ×N count.
-  // Clicking the card just previews the medoid (no surprise reflow); a `+` pill
-  // overlaid on the tile (revealed on hover) opens the set inline — mirroring the
-  // `–` pill on an expanded cluster, so expand/collapse are symmetric affordances.
+  // A collapsed near-dup set: the medoid thumb, with an always-visible "▸ N"
+  // toggle badge (the count IS the open/close control). Clicking the photo just
+  // previews the medoid (no surprise reflow); clicking the badge expands the set
+  // inline. The same badge rides the expanded cluster as "▾ N" to collapse, so
+  // open/close is one consistent control whose caret encodes the state.
   const renderGroupTile = (s: DupSet<GroupedImageItem>) => {
     const rep = s.items[0]
     const repIdx = idIndex.get(rep.id)
@@ -235,18 +236,20 @@ export default function GroupReview({
     return (
       <div className="strip-collapsed" key={'tile-' + s.dup_group}>
         <button
-          className="strip-expand"
-          onClick={() => toggleExpand(s.dup_group)}
-          title={`Expand near-duplicate set (${s.items.length} photos)`}
-        >+</button>
-        <button
           className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
           onClick={() => selectIdx(repIdx)}
-          title={`near-duplicate set · ${s.items.length} photos · click to preview, hover for + to expand`}
+          title={`near-duplicate set · ${s.items.length} photos · click to preview the lead frame`}
         >
           <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
-          <span className="strip-count">×{s.items.length}</span>
           {anyDecided && <span className="strip-grouptile-decided" />}
+        </button>
+        <button
+          className="strip-toggle expand"
+          aria-expanded={false}
+          onClick={() => toggleExpand(s.dup_group)}
+          title={`Show all ${s.items.length} photos in this near-duplicate set`}
+        >
+          <span className="strip-toggle-caret">▸</span>{s.items.length}
         </button>
       </div>
     )
@@ -297,15 +300,18 @@ export default function GroupReview({
                   <div
                     className="strip-cluster"
                     key={'set-' + s.dup_group}
-                    title={`near-duplicate set · ${s.items.length} photos · click ×N to collapse`}
+                    title={`near-duplicate set · ${s.items.length} photos`}
                     onClick={(e) => { if (e.target === e.currentTarget) toggleExpand(s.dup_group) }}
                   >
-                    {s.items.map(renderThumb)}
                     <button
-                      className="strip-collapse"
+                      className="strip-toggle collapse"
+                      aria-expanded={true}
                       onClick={(e) => { e.stopPropagation(); toggleExpand(s.dup_group) }}
-                      title="Collapse set"
-                    >–</button>
+                      title={`Collapse this near-duplicate set (${s.items.length} photos)`}
+                    >
+                      <span className="strip-toggle-caret">▾</span>{s.items.length}
+                    </button>
+                    {s.items.map(renderThumb)}
                   </div>
                 ) : renderGroupTile(s)
               ))}

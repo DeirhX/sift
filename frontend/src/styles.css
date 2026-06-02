@@ -981,10 +981,9 @@ select:focus, input:focus {
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
-/* Collapsed near-dup set: the medoid thumb plus a ×N count, sitting inside the
-   `.strip-collapsed` bracket (its `+` expander to the left). The bracket — not a
-   fake-pile shadow — is what reads as "this is one group", matching the bracket
-   of an expanded cluster. */
+/* Collapsed near-dup set: the medoid thumb itself. Its always-visible "▸ N"
+   toggle badge (see .strip-toggle) marks it as a set and opens it; clicking the
+   thumb just previews the medoid. */
 .strip-grouptile {
   position: relative;
   flex: 0 0 auto;
@@ -1005,17 +1004,6 @@ select:focus, input:focus {
   border-radius: 4px;
 }
 .strip-grouptile.active { border-color: var(--accent); }
-.strip-count {
-  position: absolute;
-  bottom: 3px; right: 3px;
-  padding: 0 5px;
-  font-size: 11px;
-  font-weight: 700;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.7);
-  border-radius: 8px;
-  pointer-events: none;
-}
 .strip-grouptile-decided {
   position: absolute;
   top: 3px; left: 3px;
@@ -1023,46 +1011,57 @@ select:focus, input:focus {
   border-radius: 50%;
   background: var(--accent);
 }
-/* A collapsed set is just its medoid tile (the `×N` badge marks it as a set).
-   The `+` expander rides ON TOP of the tile, revealed on hover, so the strip
-   stays uncluttered and the handle is unambiguously bound to its own group. */
+/* A collapsed set is its medoid tile plus the always-visible toggle badge.
+   Clicking the photo previews the medoid; clicking the badge opens/closes the
+   set. No hover-reveal — the control is always on screen, one click. */
 .strip-collapsed {
   position: relative;
   display: flex;
   flex: 0 0 auto;
 }
-/* Expand (`+`, on the medoid tile) / collapse (`–`, on the expanded cluster)
-   handles — small overlay pills that fade in only while the set is hovered. */
-.strip-collapse,
-.strip-expand {
-  position: absolute;
-  z-index: 2;
-  top: 3px;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  display: grid;
-  place-items: center;
+/* The expand/collapse control: the photo count IS the toggle. A pill showing a
+   caret + N — `▸ N` while collapsed (click to open), `▾ N` while expanded
+   (click to close). Always visible, comfortably sized, caret encodes state. */
+.strip-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 21px;
+  min-width: 30px;
+  padding: 0 6px;
   border: 1px solid var(--accent);
-  border-radius: 50%;
-  background: rgba(15, 18, 24, 0.82);
+  border-radius: 11px;
+  background: rgba(10, 13, 18, 0.84);
   color: var(--text);
-  font-size: 15px;
+  font-size: 12px;
+  font-weight: 800;
   line-height: 1;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease;
 }
-.strip-expand { left: 3px; }
-.strip-collapse { right: 3px; }
-.strip-collapsed:hover .strip-expand,
-.strip-cluster:hover .strip-collapse { opacity: 1; }
-.strip-expand:hover,
-.strip-collapse:hover { background: var(--accent); color: var(--on-accent); }
-/* Hovering a handle lights up the WHOLE set it controls, so the handle's target
-   is unambiguous — which group does this + / – belong to? */
-.strip-collapsed:has(.strip-expand:hover) .strip-grouptile { border-color: var(--accent); }
-.strip-cluster:has(.strip-collapse:hover) {
+.strip-toggle:hover { background: var(--accent); color: var(--on-accent); }
+.strip-toggle-caret { font-size: 10px; }
+/* Collapsed: the badge sits in the medoid tile's bottom-right corner — distinct
+   from the photo, which keeps its own preview-on-click. */
+.strip-toggle.expand {
+  position: absolute;
+  z-index: 2;
+  bottom: 4px;
+  right: 4px;
+}
+/* Expanded: the badge is the cluster's leading child, sticky-pinned to the left
+   so it stays reachable even when a wide set scrolls horizontally under it. */
+.strip-toggle.collapse {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  flex: 0 0 auto;
+  align-self: center;
+}
+/* Hovering the toggle lights up the WHOLE set it controls, so badge + photos
+   read as one unit and the target is unambiguous. */
+.strip-collapsed:has(.strip-toggle:hover) .strip-grouptile { border-color: var(--accent); }
+.strip-cluster:has(.strip-toggle:hover) {
   border-color: var(--accent);
   background: rgba(var(--accent-rgb), 0.14);
 }
