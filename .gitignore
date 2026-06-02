@@ -16,6 +16,9 @@ node_modules/
 frontend/dist/
 *.tsbuildinfo
 .vite/
+# Intermediate OpenAPI dump for type codegen; the committed artifact is
+# frontend/src/api/schema.d.ts (regenerate both via `npm run codegen`).
+frontend/openapi.json
 
 # ── Test artifacts (Playwright e2e) ────────────────────────────────────────
 frontend/test-results/
