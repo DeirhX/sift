@@ -37,7 +37,8 @@ cleanly: a web-only install (`pip install -e .`) skips the multi-GB `[ml]` stack
 | `sift/web/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. (`sift index`) |
 | `sift/web/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
 | `sift/web/server.py` | ~1040 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), `_rejected/` apply+undo, and the `/api/analyze/*` lifecycle. (`sift serve`) |
-| `sift/web/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→DTO helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. |
+| `sift/web/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→dict helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. Returns plain dicts; FastAPI validates them against the route's `response_model` (see `schemas.py`). |
+| `sift/web/schemas.py` | ~225 | **Response DTOs.** Pydantic models for every endpoint's JSON (`ImageItem`, `GroupedImageItem`, the paginated `*Response` wrappers, `MetaResponse`, `AnalyzeStatus`, …), attached as `response_model=` on the routes. This is what makes `/openapi.json` carry real response schemas, which the frontend codegens into `schema.d.ts` (the "can't drift" contract). Nullable fields are `X \| None` so `null`s are emitted where the UI expects them; `AnalyzeStatus` uses `response_model_exclude_unset=True` to keep its idle-vs-running shape. |
 | `sift/web/analysis.py` | ~210 | **Reanalysis subsystem.** `AnalysisJob` (background thread running `python -m sift` steps, parsing tqdm `\r` progress into a live line + committed lines) and `build_analyze_steps` (UI payload → validated/clamped argv). Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
 
 ### Layering inside `sift/audit/`
@@ -68,14 +69,16 @@ head as `sift.audit.aesthetic_scorer` — no `sys.path` manipulation anywhere.
 ```
 server.py  ── routing, config, mutations, file I/O, app wiring
    │  imports
-   ├──► queries.py    (read layer; takes a conn, returns DTOs)
+   ├──► queries.py    (read layer; takes a conn, returns dicts)
+   ├──► schemas.py    (Pydantic response_model DTOs ──► /openapi.json)
    ├──► analysis.py   (reanalysis job + argv builder; config injected)
    └──► photodb.py    (schema + domain rules)   ◄── also used by build_db.py
 ```
 
-Dependencies point one way: `server` → (`queries`, `analysis`, `photodb`). The
-two leaf layers (`queries`, `photodb`) know nothing about FastAPI or server
-globals, which is what keeps them testable and reusable.
+Dependencies point one way: `server` → (`queries`, `schemas`, `analysis`,
+`photodb`). The leaf layers (`queries`, `photodb`) know nothing about FastAPI or
+server globals, which is what keeps them testable and reusable; `schemas` is
+plain Pydantic and equally decoupled.
 
 ## Data model (SQLite, defined in `photodb.py`)
 
@@ -128,16 +131,21 @@ globals, which is what keeps them testable and reusable.
 - **No models in the server.** Keeps the web process light and lets the heavy
   path run/scale separately.
 
-## Frontend (`frontend/`, React + Vite)
+## Frontend (`frontend/`, React + Vite + TypeScript)
 
-- `App.jsx` — top-level orchestrator: URL-synced filter/view state, data
+The frontend is **strict-mode TypeScript** (`tsconfig.json`, `strict: true`);
+`npm run build` gates on `tsc --noEmit` before `vite build`, and `npm run
+typecheck` runs it standalone.
+
+- `App.tsx` — top-level orchestrator: URL-synced filter/view state, data
   fetching (React Query), keyboard navigation.
-- `urlState.js` — serializes filters/view to the URL (shareable, back-button
-  friendly). `api.js` — typed fetch wrappers. `format.js` — shared formatters
-  incl. `qualityColor`.
+- `urlState.ts` — serializes filters/view/overlay-nav to the URL (shareable,
+  back-button friendly). `api.ts` — typed `fetch` wrappers returning the
+  generated DTO types. `format.ts` — shared formatters incl. `qualityColor`.
+  `types.ts` — shared UI/callback types (decisions, person names, filter updates).
 - **Overlay history model.** Every overlay (lightbox / group / scene review) and
   each in-overlay step (focus a photo, toggle zoom) is a real history entry
-  tagged with a `navDepth` (`App.jsx`), so Back peels one step at a time while
+  tagged with a `navDepth` (`App.tsx`), so Back peels one step at a time while
   Close unwinds the whole overlay in one `history.go(-(depth+1))`. That unwind
   assumes a plain-list entry sits beneath the overlay — true when opened from
   the list, but **not** when the app loads straight into an overlay (deep link /
@@ -154,7 +162,30 @@ globals, which is what keeps them testable and reusable.
   (scene hierarchy); `GroupReview` (filmstrip review modal); `Lightbox`
   (full-res). Panels: `Sidebar`, `FolderTree`, `SettingsPanel`, `AnalyzePanel`,
   `ApplyPanel`. Controls: `RangeSlider`, `DecideButtons`, `DecisionBadge`.
-- Tests are colocated `*.test.{js,jsx}` (Vitest).
+- Tests are colocated `*.test.{ts,tsx}` (Vitest).
+
+### API type contract (codegen — "can't drift")
+
+Response shapes are generated from the backend, not hand-mirrored, so the two
+sides can't silently diverge:
+
+```
+sift/web/schemas.py (Pydantic response_model)
+        │  app.openapi()  (sift/web/openapi_schema.py)
+        ▼
+   /openapi.json ──► openapi-typescript ──► src/api/schema.d.ts
+                                                  │  friendly aliases
+                                                  ▼
+                                            src/api/types.ts ──► api.ts, components
+```
+
+Run `npm run codegen` after any backend response change. It dumps the schema via
+`python -m sift.web.openapi_schema` and regenerates `src/api/schema.d.ts`. The
+intermediate `frontend/openapi.json` is gitignored; **the committed artifact is
+`schema.d.ts`** so the frontend builds without a running backend. Caveat: codegen
+is run manually (not yet wired into CI), so the guarantee holds only as long as
+someone regenerates after touching a `response_model`.
+
 - **Styling** lives in one `styles.css` fronted by a `:root` **design-token
   layer**: the palette plus semantic tokens — `--accent/keep/del` (+ `*-rgb`
   triples for translucent `rgba(var(--x-rgb), a)` fills), `--on-accent/keep/del`
@@ -186,7 +217,8 @@ Three tiers, by cost and what they exercise:
   still CI-safe.
 - **ML efficacy** (`tests/ml/`, opt-in) — see below. Skipped by default.
 - **Frontend** (`frontend/`, `npm test`): URL state, API wrappers,
-  formatters, and key components.
+  formatters, and key components (Vitest, strict TS). `npm run build` (or
+  `npm run typecheck`) additionally enforces `tsc --noEmit` across the tree.
 
 ### ML efficacy harness (`tests/ml/`)
 

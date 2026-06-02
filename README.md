@@ -108,6 +108,15 @@ cd frontend && npm run dev
 serve a build from elsewhere, pass `--frontend-dist <dir>` or set
 `$SIFT_FRONTEND_DIST`.
 
+The frontend is strict TypeScript. Its API response types are **generated** from
+the backend's OpenAPI schema, so they can't drift from the server. After changing
+any endpoint's `response_model`, regenerate them:
+
+```bash
+cd frontend && npm run codegen   # → src/api/schema.d.ts (commit this)
+npm run typecheck                # tsc --noEmit; also runs as part of `npm run build`
+```
+
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
 captions; review duplicate groups; auto-cull (keep the best of each group);
 and finally **Apply** to move every `del`-marked file into `<library>/_rejected/`.
