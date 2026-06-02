@@ -127,6 +127,15 @@ globals, which is what keeps them testable and reusable.
   (full-res). Panels: `Sidebar`, `FolderTree`, `SettingsPanel`, `AnalyzePanel`,
   `ApplyPanel`. Controls: `RangeSlider`, `DecideButtons`, `DecisionBadge`.
 - Tests are colocated `*.test.{js,jsx}` (Vitest).
+- **Styling** lives in one `styles.css` fronted by a `:root` **design-token
+  layer**: the palette plus semantic tokens — `--accent/keep/del` (+ `*-rgb`
+  triples for translucent `rgba(var(--x-rgb), a)` fills), `--on-accent/keep/del`
+  (foreground on a solid fill), `--gold/amber/info`, `--thumb-bg`,
+  `--term-bg/fg`, `--font-sans/mono`, `--shadow-card/pop`. Components reference
+  tokens, never raw literals, so re-theming or tweaking an accent is a one-line
+  change. Deliberately **not** tokenized yet: radius/spacing/font-size scales
+  (the current values are ad hoc and snapping them to a scale would shift
+  pixels — a redesign, not a consolidation).
 
 ## Tests
 

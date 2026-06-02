@@ -1,4 +1,5 @@
 :root {
+  /* ── Base palette ─────────────────────────────────────────────── */
   --bg: #0d0f12;
   --bg-panel: #161a1f;
   --bg-card: #1c2127;
@@ -6,9 +7,38 @@
   --border: #2a313b;
   --text: #e6e9ee;
   --text-dim: #8b95a3;
+
+  /* ── Semantic accents ─────────────────────────────────────────── */
   --accent: #4f9cf9;
   --keep: #2ecc71;
   --del: #e74c3c;
+  /* RGB triples of the three accents above, for translucent fills via
+     rgba(var(--x-rgb), a). Keep these in sync with the hexes. */
+  --accent-rgb: 79, 156, 249;
+  --keep-rgb: 46, 204, 113;
+  --del-rgb: 231, 76, 60;
+  /* Foreground drawn on top of a solid accent/keep/del fill. */
+  --on-accent: #fff;
+  --on-keep: #06231a;
+  --on-del: #2a0a06;
+
+  /* ── Decorative / status ──────────────────────────────────────── */
+  --gold: #f5c518;        /* "best of group" marker */
+  --amber: #ffd27f;       /* duplicate / filtered badge text */
+  --info: #6cb6ff;        /* duplicate-in-scene pill text */
+  --info-rgb: 52, 152, 219;
+  --thumb-bg: #000;       /* backdrop behind any image/thumbnail */
+  --term-bg: #0a0c0f;     /* analyze console background */
+  --term-fg: #c7d0da;     /* analyze console text */
+
+  /* ── Typography ───────────────────────────────────────────────── */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Consolas", monospace;
+
+  /* ── Elevation ────────────────────────────────────────────────── */
+  --shadow-card: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.4);
+
   --sidebar-w: 280px;
 }
 
@@ -22,7 +52,7 @@ html, body, #root {
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
@@ -233,7 +263,7 @@ select:focus, input:focus {
 .chip.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .chip .count { opacity: 0.7; margin-left: 4px; }
 
@@ -267,7 +297,7 @@ select:focus, input:focus {
   cursor: pointer;
 }
 .seg button:last-child { border-right: none; }
-.seg button.active { background: var(--accent); color: #fff; }
+.seg button.active { background: var(--accent); color: var(--on-accent); }
 
 .stats {
   font-size: 12px;
@@ -314,12 +344,12 @@ select:focus, input:focus {
   border-radius: 10px;
 }
 .card-slot.focused {
-  outline: 2px solid var(--accent, #5b8cff);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
-  box-shadow: 0 0 0 4px rgba(91, 140, 255, 0.25);
+  box-shadow: 0 0 0 4px rgba(var(--accent-rgb), 0.25);
 }
 .card-slot.focused .card {
-  border-color: var(--accent, #5b8cff);
+  border-color: var(--accent);
 }
 
 .empty {
@@ -343,7 +373,7 @@ select:focus, input:focus {
 .card .thumb-wrap {
   position: relative;
   width: 100%;
-  background: #000;
+  background: var(--thumb-bg);
   cursor: pointer;
   overflow: hidden;
 }
@@ -355,7 +385,7 @@ select:focus, input:focus {
 }
 .face-box {
   position: absolute;
-  border: 1.5px solid rgba(79,156,249,0.9);
+  border: 1.5px solid rgba(var(--accent-rgb), 0.9);
   border-radius: 3px;
   pointer-events: none;
 }
@@ -388,7 +418,7 @@ select:focus, input:focus {
   cursor: pointer;
   font-size: 12px;
 }
-.face-editor button.face-del:hover { background: var(--del); color: #2a0a06; border-color: var(--del); }
+.face-editor button.face-del:hover { background: var(--del); color: var(--on-del); border-color: var(--del); }
 
 /* People manager (rename + merge) */
 .link-btn {
@@ -476,14 +506,14 @@ select:focus, input:focus {
   font-size: 12px;
   cursor: pointer;
 }
-.card .actions button.keep.active { background: var(--keep); border-color: var(--keep); color: #06231a; font-weight: 600; }
-.card .actions button.del.active { background: var(--del); border-color: var(--del); color: #2a0a06; font-weight: 600; }
+.card .actions button.keep.active { background: var(--keep); border-color: var(--keep); color: var(--on-keep); font-weight: 600; }
+.card .actions button.del.active { background: var(--del); border-color: var(--del); color: var(--on-del); font-weight: 600; }
 
 .badge-dup {
   position: absolute;
   top: 6px; left: 6px;
   background: rgba(0,0,0,0.7);
-  color: #ffd27f;
+  color: var(--amber);
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 4px;
@@ -496,8 +526,8 @@ select:focus, input:focus {
   border-radius: 4px;
   font-weight: 600;
 }
-.badge-decision.keep { background: var(--keep); color: #06231a; }
-.badge-decision.del { background: var(--del); color: #2a0a06; }
+.badge-decision.keep { background: var(--keep); color: var(--on-keep); }
+.badge-decision.del { background: var(--del); color: var(--on-del); }
 
 /* ---------- Lightbox ---------- */
 .lightbox {
@@ -631,7 +661,7 @@ select:focus, input:focus {
   padding-top: 12px;
 }
 .btn.danger { border-color: var(--del); color: #ff9b8f; }
-.btn.danger:hover:not(:disabled) { background: var(--del); color: #2a0a06; }
+.btn.danger:hover:not(:disabled) { background: var(--del); color: var(--on-del); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .apply-msg { font-size: 12px; color: var(--accent); }
 .apply-hint { font-size: 11px; color: var(--text-dim); }
@@ -669,7 +699,7 @@ select:focus, input:focus {
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--bg-card);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  box-shadow: var(--shadow-card);
 }
 .pile-card img {
   width: 100%;
@@ -703,7 +733,7 @@ select:focus, input:focus {
   border-radius: 4px;
   font-weight: 600;
 }
-.pile-flag.del { background: var(--del); color: #2a0a06; }
+.pile-flag.del { background: var(--del); color: var(--on-del); }
 
 /* One row: prominent quality pill on the left, decision count pills on the
    right. margin-top clears the fanned back-card corners that poke out below
@@ -742,8 +772,8 @@ select:focus, input:focus {
   border: 1px solid transparent;
   white-space: nowrap;
 }
-.cpill.keep { background: rgba(46,204,113,0.16); color: var(--keep); border-color: rgba(46,204,113,0.45); }
-.cpill.del  { background: rgba(231,76,60,0.16);  color: var(--del);  border-color: rgba(231,76,60,0.45); }
+.cpill.keep { background: rgba(var(--keep-rgb), 0.16); color: var(--keep); border-color: rgba(var(--keep-rgb), 0.45); }
+.cpill.del  { background: rgba(var(--del-rgb), 0.16);  color: var(--del);  border-color: rgba(var(--del-rgb), 0.45); }
 .cpill.left { background: var(--bg-hover);        color: var(--text-dim); border-color: var(--border); }
 
 /* ---------- Group review modal ---------- */
@@ -778,13 +808,13 @@ select:focus, input:focus {
 }
 .review-sub { color: var(--text-dim); }
 .review-actions { display: flex; gap: 8px; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 
 .badge-best {
   position: absolute;
   top: 10px; left: 10px;
-  background: #f5c518;
+  background: var(--gold);
   color: #2a2200;
   font-size: 12px;
   font-weight: 700;
@@ -817,7 +847,7 @@ select:focus, input:focus {
   border-radius: 6px;
   overflow: hidden;
   cursor: pointer;
-  background: #000;
+  background: var(--thumb-bg);
 }
 .strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .strip-thumb.active { border-color: var(--accent); }
@@ -840,7 +870,7 @@ select:focus, input:focus {
   top: 10px; left: 50%;
   transform: translateX(-50%);
   background: rgba(0,0,0,0.72);
-  color: #ffd27f;
+  color: var(--amber);
   font-size: 12px;
   font-weight: 600;
   padding: 3px 10px;
@@ -850,7 +880,7 @@ select:focus, input:focus {
 .strip-best {
   position: absolute;
   top: 2px; left: 3px;
-  color: #f5c518;
+  color: var(--gold);
   font-size: 13px;
   text-shadow: 0 0 3px #000;
 }
@@ -873,7 +903,7 @@ select:focus, input:focus {
   gap: 4px;
   padding: 3px 3px 5px;
   border-radius: 7px;
-  background: rgba(79, 156, 249, 0.08);
+  background: rgba(var(--accent-rgb), 0.08);
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
@@ -947,7 +977,7 @@ select:focus, input:focus {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #000;
+  background: var(--thumb-bg);
   cursor: zoom-in;
   padding: 12px;
 }
@@ -961,7 +991,7 @@ select:focus, input:focus {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: #000;
+  background: var(--thumb-bg);
 }
 .review-list-row {
   display: flex;
@@ -984,7 +1014,7 @@ select:focus, input:focus {
   height: 88px;
   object-fit: cover;
   border-radius: 6px;
-  background: #000;
+  background: var(--thumb-bg);
 }
 .rl-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .rl-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -1075,8 +1105,8 @@ select:focus, input:focus {
   font-size: 13px;
   cursor: pointer;
 }
-.herobar-btns button.keep.active { background: var(--keep); border-color: var(--keep); color: #06231a; font-weight: 600; }
-.herobar-btns button.del.active { background: var(--del); border-color: var(--del); color: #2a0a06; font-weight: 600; }
+.herobar-btns button.keep.active { background: var(--keep); border-color: var(--keep); color: var(--on-keep); font-weight: 600; }
+.herobar-btns button.del.active { background: var(--del); border-color: var(--del); color: var(--on-del); font-weight: 600; }
 
 /* Thumbnail strip inside the full-size lightbox */
 .lb-strip {
@@ -1103,7 +1133,7 @@ select:focus, input:focus {
   border-radius: 4px;
   overflow: hidden;
   cursor: pointer;
-  background: #000;
+  background: var(--thumb-bg);
   opacity: 0.55;
 }
 .lb-strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -1170,11 +1200,11 @@ select:focus, input:focus {
   margin: 0;
   padding: 12px 14px;
   overflow-y: auto;
-  background: #0a0c0f;
-  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  background: var(--term-bg);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
-  color: #c7d0da;
+  color: var(--term-fg);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1188,7 +1218,7 @@ select:focus, input:focus {
   margin-top: 8px;
   max-height: 22vh;
   overflow-y: auto;
-  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
 }
 .lb-loc-head { color: var(--del); font-weight: 600; margin-bottom: 4px; font-family: inherit; }
@@ -1203,7 +1233,7 @@ select:focus, input:focus {
 .path-link { white-space: normal; word-break: break-all; }
 .path-sep { color: var(--text-dim); margin: 0 1px; }
 .path-seg { cursor: pointer; border-radius: 3px; padding: 0 1px; }
-.path-seg:hover { color: var(--accent); background: rgba(79,156,249,0.12); text-decoration: underline; }
+.path-seg:hover { color: var(--accent); background: rgba(var(--accent-rgb), 0.12); text-decoration: underline; }
 .path-seg-static { color: var(--text-dim); opacity: 0.7; }
 
 /* ── Settings panel ────────────────────────────────────────────────────────── */
@@ -1233,7 +1263,7 @@ select:focus, input:focus {
 }
 .root-path {
   flex: 1;
-  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
 }
@@ -1244,7 +1274,7 @@ select:focus, input:focus {
   background: var(--bg-hover); color: var(--text-dim);
   cursor: pointer; font-size: 16px; line-height: 1;
 }
-.root-del:hover { background: var(--del); color: #2a0a06; }
+.root-del:hover { background: var(--del); color: var(--on-del); }
 .root-add { display: flex; gap: 8px; align-items: flex-start; }
 .root-add-field { position: relative; flex: 1; }
 .root-add input {
@@ -1272,24 +1302,24 @@ select:focus, input:focus {
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow-pop);
 }
 .fs-opt {
   padding: 6px 8px;
   border-radius: 4px;
   font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.fs-opt.active { background: var(--accent, #3a6df0); color: #fff; }
+.fs-opt.active { background: var(--accent); color: var(--on-accent); }
 .fs-more {
   padding: 6px 8px;
   font-size: 11px;
-  color: var(--text-dim, #888);
+  color: var(--text-dim);
   font-style: italic;
 }
 
@@ -1315,7 +1345,7 @@ select:focus, input:focus {
 }
 .folder-row.selected { background: var(--accent); }
 .folder-row.selected .folder-name,
-.folder-row.selected .folder-count { color: #fff; }
+.folder-row.selected .folder-count { color: var(--on-accent); }
 .folder-twist {
   flex: 0 0 auto;
   width: 16px;
@@ -1353,7 +1383,7 @@ select:focus, input:focus {
   font-size: 11px;
 }
 .folder-label:hover .folder-name { color: var(--accent); }
-.folder-row.selected .folder-label:hover .folder-name { color: #fff; }
+.folder-row.selected .folder-label:hover .folder-name { color: var(--on-accent); }
 .folder-subtoggle {
   display: flex;
   align-items: center;
@@ -1378,9 +1408,9 @@ select:focus, input:focus {
   max-width: 100%;
 }
 .cpill.dup {
-  background: rgba(52,152,219,0.16);
-  color: #6cb6ff;
-  border-color: rgba(52,152,219,0.45);
+  background: rgba(var(--info-rgb), 0.16);
+  color: var(--info);
+  border-color: rgba(var(--info-rgb), 0.45);
 }
 
 /* The scene drill-down reuses the review modal shell but scrolls vertically,
