@@ -18,14 +18,12 @@ import shutil
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent                 # webapp/frontend/e2e
-FRONTEND = HERE.parent                                  # webapp/frontend
-WEBAPP = FRONTEND.parent                                # webapp
-sys.path.insert(0, str(WEBAPP))
+HERE = Path(__file__).resolve().parent                 # frontend/e2e
+FRONTEND = HERE.parent                                  # frontend
 
-import server                                           # noqa: E402
-import photodb                                          # noqa: E402
 import sqlite3                                          # noqa: E402
+
+from sift.web import server, photodb                   # noqa: E402
 
 PORT = int(os.environ.get("E2E_REAL_PORT", "8766"))
 SOURCE = Path(os.environ.get("E2E_SOURCE_FOLDER", r"E:\F\!To Pictures"))

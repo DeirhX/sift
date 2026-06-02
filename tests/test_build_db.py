@@ -5,7 +5,7 @@ import sqlite3
 
 from PIL import Image
 
-import build_db
+from sift.web import build_db
 from conftest import default_report, ingest, items_by_name
 
 

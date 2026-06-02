@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sift"
+dynamic = ["version"]
+description = "A two-stage photo culling toolkit: GPU-heavy analysis + a FastAPI review web app."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+# Core: the classical analysis path (sharpness + perceptual-hash/scene grouping),
+# the SQLite ingest/thumbnailer, and the web server. No multi-GB ML weights — a
+# web-only or classical-only install needs nothing heavier than OpenCV.
+dependencies = [
+    "numpy",
+    "pillow",
+    "tqdm",
+    "opencv-python",
+    "imagehash",
+    "scikit-learn",
+    "fastapi",
+    "uvicorn[standard]",
+]
+
+[project.optional-dependencies]
+# ML scoring: aesthetic (PARA / CLIP-IQA), BLIP captions, Qwen3-VL tags, face
+# detection/clustering. Pulls multi-GB weights on first run; a CUDA build of
+# torch is strongly recommended (see https://pytorch.org/get-started/locally/).
+ml = [
+    "torch",
+    "transformers>=4.57",
+    "open_clip_torch",
+    "huggingface_hub",
+    "bitsandbytes",
+    "accelerate",
+    "facenet-pytorch",
+]
+# Test suite. httpx backs FastAPI's TestClient; pytest-xdist parallelises the
+# model-free suite (`pytest -n auto`). Do NOT combine `-n` with `--run-ml`.
+dev = [
+    "pytest",
+    "pytest-xdist",
+    "httpx",
+]
+
+[project.scripts]
+sift = "sift.cli:main"
+
+[tool.hatch.version]
+path = "sift/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sift"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

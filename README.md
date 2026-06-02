@@ -13,30 +13,36 @@ For a developer-facing map of the modules and design decisions, see
 
 ## How it works
 
-The workflow is a three-stage pipeline:
+The workflow is a three-stage pipeline, driven by one `sift` command:
 
-| Stage | Script | Produces |
-|-------|--------|----------|
-| 1. Analyze | `photo_audit.py` | `audit_report.json` |
-| 2. Index | `webapp/build_db.py` | `photos.db` + `.thumbs/` (WebP cache) |
-| 3. Review | `webapp/server.py` + React UI | browse, decide, apply |
+| Stage | Command | Produces |
+|-------|---------|----------|
+| 1. Analyze | `sift analyze` | `audit_report.json` |
+| 2. Index | `sift index` | `photos.db` + `.thumbs/` (WebP cache) |
+| 3. Review | `sift serve` + React UI | browse, decide, apply |
 
 ```
-photo_audit.py ──► audit_report.json ──► build_db.py ──► photos.db + .thumbs/
-                                                              │
-                                                  server.py (FastAPI) ──► React UI
-                                                              │
-                                              originals  ◄────┴────►  _rejected/
+sift analyze ──► audit_report.json ──► sift index ──► photos.db + .thumbs/
+                                                            │
+                                                sift serve (FastAPI) ──► React UI
+                                                            │
+                                            originals  ◄────┴────►  _rejected/
 ```
 
 ## Install
 
-Requires Python 3.10+ and (for the review UI) Node 18+.
+Requires Python 3.10+ and (for the review UI) Node 18+. Dependencies live in
+`pyproject.toml`; install the package (editable) with the extras you need:
 
 ```bash
-pip install -r requirements.txt          # see notes in requirements.txt re: torch/CUDA
-cd webapp/frontend && npm install
+pip install -e ".[ml]"     # core + the multi-GB ML stack (torch/CUDA: see below)
+# pip install -e .         # core only: classical sharpness + duplicate/scene grouping + web
+# pip install -e ".[dev]"  # + the test suite
+cd frontend && npm install
 ```
+
+This installs the `sift` console command. (`pip install -r requirements.txt`
+still works — it just forwards to `-e .[ml,dev]`.)
 
 The ML scoring path downloads multi-GB model weights on first run and is far
 happier with a CUDA GPU. If you only want sharpness + duplicate detection, you
@@ -47,10 +53,10 @@ can skip the heavy backends with `--no-clip` (see below).
 ### 1. Analyze a folder
 
 ```bash
-python photo_audit.py "E:\Photos" --recurse --backend para --caption --faces
+sift analyze "E:\Photos" --recurse --backend para --caption --faces
 ```
 
-Useful flags (full list in the script's `--help`):
+Useful flags (full list in `sift analyze --help`):
 
 - `--recurse` — include subfolders
 - `--backend {para,clip-iqa,both}` — aesthetic model (default `para`)
@@ -75,7 +81,7 @@ invalidates the cache.)
 ### 2. Build the database + thumbnails
 
 ```bash
-python webapp/build_db.py "E:\Photos\audit_report.json"
+sift index "E:\Photos\audit_report.json"
 ```
 
 This is **incremental**: re-running it after a fresh audit only re-hashes and
@@ -87,16 +93,20 @@ cache.
 
 ```bash
 # Production: build the frontend once, then serve everything from FastAPI
-cd webapp/frontend && npm run build
-python webapp/server.py --db "E:\Photos\photos.db"
+cd frontend && npm run build
+sift serve --db "E:\Photos\photos.db"
 # → http://localhost:8000
 ```
 
 ```bash
 # Development: API on :8000 + Vite dev server on :5173 (proxies /api, /thumb, /img)
-python webapp/server.py --db "E:\Photos\photos.db"
-cd webapp/frontend && npm run dev
+sift serve --db "E:\Photos\photos.db"
+cd frontend && npm run dev
 ```
+
+`sift serve` finds the built frontend at `frontend/dist` (editable install). To
+serve a build from elsewhere, pass `--frontend-dist <dir>` or set
+`$SIFT_FRONTEND_DIST`.
 
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
 captions; review duplicate groups; auto-cull (keep the best of each group);
@@ -128,8 +138,9 @@ content rather than being orphaned.
 
 ## Other scripts
 
-- `reface.py` — re-run only face detection on an existing report
-- `classify_inspiration.py` — one-off CLIP folder classifier (paths hardcoded)
+- `scripts/reface.py` — re-run only face detection on an existing report
+  (`python scripts/reface.py audit_report.json`)
+- `scripts/classify_inspiration.py` — one-off CLIP folder classifier (paths hardcoded)
 
 ## Notes & limitations
 

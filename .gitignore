@@ -13,15 +13,15 @@ env/
 
 # ── Node / frontend ──────────────────────────────────────────────────────
 node_modules/
-webapp/frontend/dist/
+frontend/dist/
 *.tsbuildinfo
 .vite/
 
 # ── Test artifacts (Playwright e2e) ────────────────────────────────────────
-webapp/frontend/test-results/
-webapp/frontend/playwright-report/
-webapp/frontend/e2e/.fixtures/
-webapp/frontend/e2e/.real/
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/.fixtures/
+frontend/e2e/.real/
 .coverage
 htmlcov/
 

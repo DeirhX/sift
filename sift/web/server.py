@@ -42,13 +42,13 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-import photodb
-from photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
+from sift.web import photodb
+from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
-import analysis
-from analysis import AnalysisJob, build_analyze_steps, REPO_ROOT
-from queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
-                     rows_to_items, grouped_page)
+from sift.web import analysis
+from sift.web.analysis import AnalysisJob, build_analyze_steps, REPO_ROOT
+from sift.web.queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
+                              rows_to_items, grouped_page)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -920,7 +920,7 @@ def undo_apply():
     return {"restored": restored, "skipped": skipped}
 
 
-# ── Web-driven re-analysis (run photo_audit.py + build_db.py, stream output) ──
+# ── Web-driven re-analysis (run `sift analyze` + `sift index`, stream output) ──
 # A single job at a time shells out to the existing scripts and streams their
 # stdout/stderr live (including tqdm carriage-return progress) to the browser
 # via Server-Sent Events. The launcher is *constrained*: the server builds the
@@ -1008,6 +1008,18 @@ def _mount_frontend():
         print("  No frontend build found — run Vite dev server (npm run dev) on :5173")
 
 
+def _resolve_frontend_dist(override: str | None) -> Path:
+    """Locate the built React app. CLI flag wins, then $SIFT_FRONTEND_DIST, then
+    the repo's frontend/dist (works for editable installs: this file lives at
+    sift/web/server.py, so the repo root is two parents up)."""
+    if override:
+        return Path(override)
+    env = os.environ.get("SIFT_FRONTEND_DIST")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
 def main() -> None:
     global DB_PATH, THUMB_DIR, FRONTEND_DIST
     ap = argparse.ArgumentParser()
@@ -1018,13 +1030,16 @@ def main() -> None:
     ap.add_argument("--photo-root", action="append", default=None, metavar="DIR",
                     help="Directory the file-reveal feature may open into (repeatable). "
                          "Defaults to the library folder stored in the DB.")
+    ap.add_argument("--frontend-dist", default=None, metavar="DIR",
+                    help="Built React app to serve (default: $SIFT_FRONTEND_DIST, "
+                         "else the repo's frontend/dist for editable installs).")
     args = ap.parse_args()
 
     DB_PATH = Path(args.db)
     if not DB_PATH.exists():
-        print(f"Error: DB {DB_PATH} not found — run build_db.py first"); sys.exit(1)
+        print(f"Error: DB {DB_PATH} not found — run `sift index` first"); sys.exit(1)
     THUMB_DIR = Path(args.thumbs) if args.thumbs else DB_PATH.parent / ".thumbs"
-    FRONTEND_DIST = Path(__file__).parent / "frontend" / "dist"
+    FRONTEND_DIST = _resolve_frontend_dist(args.frontend_dist)
 
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")

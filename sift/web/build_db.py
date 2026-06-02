@@ -3,10 +3,10 @@
 build_db.py — Ingest an audit_report.json into a SQLite database and generate
               WebP thumbnails for fast grid rendering.
 
-This is the data-prep step for the web app. Run it after photo_audit.py.
+This is the data-prep step for the web app. Run it after `sift analyze`.
 
 Usage:
-  python build_db.py <audit_report.json> [options]
+  sift index <audit_report.json> [options]
 
 Options:
   --db <path>          SQLite output path (default: <report_dir>/photos.db)
@@ -44,8 +44,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
-import photodb
-from photodb import bbox_key, largest_face_aggregate
+from sift.web import photodb
+from sift.web.photodb import bbox_key, largest_face_aggregate
 
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 

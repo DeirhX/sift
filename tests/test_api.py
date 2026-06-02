@@ -9,18 +9,12 @@ fall back to a stable path-hash).
 Run:  pytest -q
 """
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-# Make the webapp package importable regardless of pytest's cwd.
-WEBAPP = Path(__file__).resolve().parent.parent / "webapp"
-sys.path.insert(0, str(WEBAPP))
-
-import build_db          # noqa: E402
-import server            # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from sift.web import build_db, server
+from fastapi.testclient import TestClient
 
 
 def _report():

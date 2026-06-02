@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import photo_audit
+from sift import audit as photo_audit
 
 
 def _paths(*names):

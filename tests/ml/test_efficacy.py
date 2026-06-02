@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-import photo_audit
+from sift import audit as photo_audit
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

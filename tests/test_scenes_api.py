@@ -3,7 +3,7 @@ matching, pagination, meta count, and the storage migration that adds the
 scene_group / capture_time columns."""
 import sqlite3
 
-import photodb
+from sift.web import photodb
 from conftest import default_report
 
 

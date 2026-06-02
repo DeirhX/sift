@@ -10,14 +10,10 @@ import os
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent                 # webapp/frontend/e2e
-FRONTEND = HERE.parent                                  # webapp/frontend
-WEBAPP = FRONTEND.parent                                # webapp
-REPO_ROOT = WEBAPP.parent
-sys.path.insert(0, str(WEBAPP))
+HERE = Path(__file__).resolve().parent                 # frontend/e2e
+FRONTEND = HERE.parent                                  # frontend
 
-import build_db                                         # noqa: E402
-import server                                           # noqa: E402
+from sift.web import build_db, server                  # noqa: E402
 from PIL import Image                                   # noqa: E402
 
 PORT = int(os.environ.get("E2E_PORT", "8765"))

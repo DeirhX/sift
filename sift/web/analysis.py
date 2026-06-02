@@ -19,9 +19,11 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-AUDIT_SCRIPT = Path(__file__).resolve().parent.parent / "photo_audit.py"
-BUILD_SCRIPT = Path(__file__).resolve().parent / "build_db.py"
-REPO_ROOT    = AUDIT_SCRIPT.parent
+# Stages are launched as `python -m sift <cmd>` rather than by script path, so
+# the subsystem doesn't care where the package lives. REPO_ROOT is the job's cwd
+# (this file is sift/web/analysis.py, so the repo root is two parents up); it
+# also guarantees `-m sift` resolves even from a non-installed checkout.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _BACKENDS = {"para", "clip-iqa", "both"}
 
@@ -146,8 +148,8 @@ class AnalysisJob:
 
 def build_analyze_steps(payload: dict, *, db_path: Path, thumb_dir: Path,
                         db_factory) -> list[tuple[str, list[str]]]:
-    """Translate the UI payload into argv for photo_audit + build_db. Only
-    known flags are emitted; the folder is validated. Raises HTTPException.
+    """Translate the UI payload into argv for `sift analyze` + `sift index`.
+    Only known flags are emitted; the folder is validated. Raises HTTPException.
 
     `db_path`/`thumb_dir` target the DB the server is serving; `db_factory` is a
     context-manager connection factory used to look up the default folder."""
@@ -163,7 +165,7 @@ def build_analyze_steps(payload: dict, *, db_path: Path, thumb_dir: Path,
     report_path = db_path.parent / "audit_report.json"
     py = sys.executable
 
-    audit = [py, str(AUDIT_SCRIPT), str(fpath), "--out", str(report_path)]
+    audit = [py, "-m", "sift", "analyze", str(fpath), "--out", str(report_path)]
     if payload.get("recurse"):
         audit.append("--recurse")
     if payload.get("no_clip"):
@@ -201,8 +203,8 @@ def build_analyze_steps(payload: dict, *, db_path: Path, thumb_dir: Path,
     _num("scene_time_gap", "--scene-time-gap", 1, 1440, float)
     _num("scene_sim", "--scene-sim", 0.0, 1.0, float)
 
-    build = [py, str(BUILD_SCRIPT), str(report_path),
+    build = [py, "-m", "sift", "index", str(report_path),
              "--db", str(db_path), "--thumbs", str(thumb_dir)]
 
-    # scope=both (confirmed): audit then rebuild the DB the server is serving.
-    return [("photo_audit", audit), ("build_db", build)]
+    # scope=both (confirmed): analyze then rebuild the DB the server is serving.
+    return [("analyze", audit), ("index", build)]

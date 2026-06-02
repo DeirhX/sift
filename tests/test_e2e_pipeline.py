@@ -1,10 +1,11 @@
 """End-to-end pipeline test (model-free).
 
-This is the only test that runs the real `photo_audit.py` CLI as a subprocess
-and then feeds its report through `build_db` into the live API — exercising all
-three stages and the CLI→report→DB→server seams the way the app actually runs.
-It uses `--no-clip`, so only the classical paths run (Laplacian sharpness +
-perceptual-hash duplicates); no ML weights are loaded, so it's CI-safe.
+This is the only test that runs the real `sift analyze` CLI as a subprocess and
+then feeds its report through `sift index` (build_db) into the live API —
+exercising all three stages and the CLI→report→DB→server seams the way the app
+actually runs. It uses `--no-clip`, so only the classical paths run (Laplacian
+sharpness + perceptual-hash duplicates); no ML weights are loaded, so it's
+CI-safe.
 """
 import json
 import os
@@ -14,12 +15,10 @@ from pathlib import Path
 
 import pytest
 
-import build_db
-import server
+from sift.web import build_db, server
 from fastapi.testclient import TestClient
 
 REPO = Path(__file__).resolve().parent.parent
-AUDIT = REPO / "photo_audit.py"
 
 
 def _write_library(lib: Path):
@@ -40,8 +39,8 @@ def _write_library(lib: Path):
 def _run_audit(lib: Path, out: Path):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     return subprocess.run(
-        [sys.executable, str(AUDIT), str(lib), "--recurse", "--no-clip",
-         "--out", str(out)],
+        [sys.executable, "-m", "sift", "analyze", str(lib), "--recurse",
+         "--no-clip", "--out", str(out)],
         cwd=str(REPO), env=env, capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=300)
 

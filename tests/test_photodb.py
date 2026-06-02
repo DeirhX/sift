@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-import photodb
+from sift.web import photodb
 
 
 # ── bbox_key ─────────────────────────────────────────────────────────────────
@@ -19,7 +19,7 @@ def test_bbox_key_accepts_strings_and_ints():
 
 
 def test_bbox_key_is_the_same_object_build_db_uses():
-    import build_db
+    from sift.web import build_db
     assert build_db.bbox_key is photodb.bbox_key
 
 
