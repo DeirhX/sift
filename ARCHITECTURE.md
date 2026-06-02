@@ -29,12 +29,35 @@ subprocess (see `analysis.py`) rather than importing it.
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `photo_audit.py` | ~1460 | Analysis pipeline (CLI). Sharpness, CLIP-IQA/PARA aesthetics, Qwen3-VL tagging + BLIP captions, perceptual-hash duplicate grouping, scene grouping, face detection/clustering. Writes `audit_report.json`. |
+| `photo_audit.py` | ~40 | Thin **re-export shim** + CLI entry point over the `audit/` package. Preserves `python photo_audit.py` (the server invokes it by path) and `import photo_audit.<fn>` (tests). |
+| `audit/` | ~1450 | The analysis pipeline, split into focused modules (see below). Writes `audit_report.json`. |
 | `webapp/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. |
 | `webapp/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
 | `webapp/server.py` | ~1040 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), `_rejected/` apply+undo, and the `/api/analyze/*` lifecycle. |
 | `webapp/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→DTO helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. |
 | `webapp/analysis.py` | ~210 | **Reanalysis subsystem.** `AnalysisJob` (background thread running CLI steps, parsing tqdm `\r` progress into a live line + committed lines) and `build_analyze_steps` (UI payload → validated/clamped argv). Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
+
+### Layering inside `audit/`
+
+The pipeline is split by stage, lowest layer first. `cli` orchestrates; the
+stage modules don't know about each other except the explicit deps shown.
+
+```
+clip_common.py  ── shared CLIP / batching primitives (no intra-package deps)
+   ▲      ▲      ▲
+   │      │      └──── grouping.py   phash dups, scene segmentation, capture time, CLIP embeds
+   │      └─────────── faces.py      MTCNN + VGGFace2 + DBSCAN  (also ──► scoring)
+   └────────────────── scoring.py    Laplacian sharpness + CLIP-IQA + PARA
+                       tagging.py    BLIP captions + Qwen3-VL keyword tags (standalone)
+                          ▲
+cli.py  ── arg parsing + main() orchestration; imports scoring/tagging/grouping/faces
+```
+
+`photo_audit.py` re-exports the public surface of all six modules, so the split
+is invisible to callers; `tests/test_package_smoke.py` asserts the shim stays in
+sync (same objects, no drift). `audit/__init__.py` puts the repo root on
+`sys.path` so `scoring.load_para_scorer` can `import aesthetic_scorer` regardless
+of how the package is reached.
 
 ### Layering inside `webapp/`
 
@@ -116,6 +139,8 @@ Three tiers, by cost and what they exercise:
   and the pure `photo_audit` helpers (`_clean_tags`, `iter_image_batches`,
   `bipolar_score`, scene/dup grouping, the CLI parser). The web tests drive the
   FastAPI app through a `TestClient` against a synthetic report — no models.
+  `test_package_smoke.py` imports every `audit/` submodule and asserts the
+  `photo_audit` shim re-exports the same objects (guards the split's surface).
 - **End-to-end pipeline** (`tests/test_e2e_pipeline.py`) — the only test that
   runs the real `photo_audit.py` CLI as a subprocess (`--no-clip`, so classical
   sharpness + phash duplicates, no weights), then ingests its report with
@@ -154,14 +179,11 @@ re-pays the import. It's kept opt-in rather than default; don't parallelise the
 
 ## Known shape / future work
 
-- `photo_audit.py` (~1460 lines) is the remaining large file. It's a **cohesive,
-  linear pipeline** (each stage loads its own model) rather than a tangle of
-  mixed concerns, and its heavy ML functions have no unit coverage, so splitting
-  it into a package carries real risk for little structural gain today. The
-  natural seams when it's worth doing: `scoring` (sharpness/CLIP-IQA/PARA +
-  shared CLIP helpers), `tagging` (Qwen/BLIP), `grouping` (phash/dups/scenes),
-  `faces`, and a thin `cli`. Keep it a `python photo_audit.py` entry point (the
-  server invokes it by path) or add a shim if converting to `-m`.
+- The analysis pipeline now lives in the `audit/` package (see *Layering inside
+  `audit/`*), split along stage seams with `photo_audit.py` reduced to a thin
+  re-export shim. The neural function bodies are validated by the opt-in
+  `--run-ml` efficacy tier; the import-smoke test guards the package surface.
+  `styles.css` (~1400 lines) is now the largest single file, frontend-side.
 - Duplicate grouping is `O(n²)` over image pairs — fine for thousands, slow for
   very large libraries.
 - `server.py` runtime config is still module-level mutable state
