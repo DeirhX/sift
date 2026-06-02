@@ -61,3 +61,119 @@ def test_threshold_controls_grouping():
     pair = {"a.jpg": "0" * 16, "b.jpg": "0" * 15 + "f"}   # last nibble 0->f = 4 bits
     assert len(photo_audit.group_duplicates(_hashes(pair), threshold=6)) == 1
     assert photo_audit.group_duplicates(_hashes(pair), threshold=2) == []
+
+
+# ── _clean_tags (Qwen3-VL keyword post-processing) ───────────────────────────
+# The model's raw output is a free-form comma list; _clean_tags is the only pure
+# logic on the tagging path (the model call itself can't be unit-tested without
+# loading 6 GB of weights), so it carries the bulk of the tag-quality contract.
+
+def test_clean_tags_lowercases_splits_and_strips():
+    assert photo_audit._clean_tags("Black Cat, Plush Toy , SOFA", 12) == \
+        ["black cat", "plush toy", "sofa"]
+
+
+def test_clean_tags_dedupes_preserving_order():
+    assert photo_audit._clean_tags("cat, dog, cat, bird, dog", 12) == \
+        ["cat", "dog", "bird"]
+
+
+def test_clean_tags_drops_empty_chunks():
+    assert photo_audit._clean_tags("cat, , ,dog,", 12) == ["cat", "dog"]
+
+
+def test_clean_tags_strips_list_markers():
+    # Numbered ("1." / "2)"), dash, and bullet list prefixes the model sometimes
+    # emits despite being told not to.
+    out = photo_audit._clean_tags("1. cat\n2) dog\n- bird\n\u2022 fish", 12)
+    assert out == ["cat", "dog", "bird", "fish"]
+
+
+def test_clean_tags_strips_trailing_period():
+    assert photo_audit._clean_tags("forest scene.", 12) == ["forest scene"]
+
+
+def test_clean_tags_drops_sentence_length_output():
+    long = "this is clearly a whole descriptive sentence rather than a keyword"
+    assert photo_audit._clean_tags(f"cat, {long}, dog", 12) == ["cat", "dog"]
+
+
+def test_clean_tags_drops_more_than_four_words():
+    assert photo_audit._clean_tags(
+        "one two three four, one two three four five", 12) == ["one two three four"]
+
+
+def test_clean_tags_respects_top_k():
+    assert photo_audit._clean_tags("a, b, c, d, e", 3) == ["a", "b", "c"]
+
+
+def test_clean_tags_handles_empty_and_none():
+    assert photo_audit._clean_tags("", 12) == []
+    assert photo_audit._clean_tags(None, 12) == []
+
+
+def test_clean_tags_preserves_leading_digit_words():
+    # Regression: the list-marker strip must NOT eat a digit that's part of a
+    # word ("4k resolution" -> "k resolution" was the bug).
+    assert photo_audit._clean_tags("4k resolution, 35mm, 3d render", 12) == \
+        ["4k resolution", "35mm", "3d render"]
+
+
+def test_clean_tags_splits_on_newlines_and_semicolons():
+    assert photo_audit._clean_tags("cat\ndog;bird", 12) == ["cat", "dog", "bird"]
+
+
+# ── Qwen tagging orchestration (model mocked out) ────────────────────────────
+
+def test_run_qwen_tags_degrades_gracefully_on_load_failure(monkeypatch, tmp_path):
+    """A model/load failure must never propagate: every path gets [] and the
+    run continues. This is what keeps a broken tagger from killing an audit."""
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("torch")
+
+    def boom(*a, **k):
+        raise RuntimeError("no model for you")
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", boom)
+
+    paths = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+    out = photo_audit.run_qwen_tags(paths, device="cpu", top_k=12)
+    assert out == {paths[0]: [], paths[1]: []}
+
+
+def test_run_caption_and_tags_merges_qwen_tags(monkeypatch, tmp_path):
+    """run_caption_and_tags must attach run_qwen_tags' output to each record even
+    when BLIP captioning fails (captioning and tagging are independent paths)."""
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("torch")
+
+    def boom(*a, **k):
+        raise RuntimeError("no blip")
+    monkeypatch.setattr(transformers.BlipProcessor, "from_pretrained", boom)
+
+    p = tmp_path / "x.jpg"
+    monkeypatch.setattr(photo_audit, "run_qwen_tags",
+                        lambda paths, device, top_k=12: {paths[0]: ["cat", "sofa"]})
+
+    res = photo_audit.run_caption_and_tags([p], device="cpu", top_k=12)
+    assert res[p]["tags"] == ["cat", "sofa"]
+    assert res[p]["caption"] == ""          # BLIP failed, but tags still landed
+
+
+# ── CLI surface (locks the contract webapp/server.py relies on) ──────────────
+
+def test_parser_accepts_top_tags():
+    args = photo_audit.build_parser().parse_args(["folder", "--caption", "--top-tags", "5"])
+    assert args.top_tags == 5
+    assert args.caption is True
+
+
+def test_parser_top_tags_defaults_to_12():
+    assert photo_audit.build_parser().parse_args(["folder"]).top_tags == 12
+
+
+@pytest.mark.parametrize("flag", ["--tag-min-prob", "--tag-cap-z", "--no-caption-ground"])
+def test_parser_rejects_retired_clip_tag_flags(flag):
+    # These CLIP-era knobs are gone. server.py never passed them; assert they're
+    # truly removed so nobody silently resurrects a dead grounding path.
+    with pytest.raises(SystemExit):
+        photo_audit.build_parser().parse_args(["folder", flag, "0.1"])

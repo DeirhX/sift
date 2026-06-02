@@ -18,13 +18,12 @@ Options:
   --no-clip             Skip all aesthetic scoring (sharpness + duplicates only)
   --caption             Add natural-language captions + keyword tags
                         Caption: Salesforce/blip-image-captioning-base (~990 MB)
-                        Tags:    CLIP ViT-B/32 vs a curated vocab, softmax-
-                                 calibrated; subject tags are grounded against
-                                 the caption, style/lighting tags stay visual
-  --top-tags <n>        Max keyword tags per image (default: 8)
-  --tag-min-prob <f>    Min tag confidence 0-1 (default: 0.04); raise to cut noise
-  --tag-cap-z <f>       Caption-agreement floor for subject tags (default: 0.5)
-  --no-caption-ground   Tag purely on the image (skip caption grounding)
+                        Tags:    Qwen3-VL-8B-Instruct (4-bit NF4 on GPU, ~6 GB) —
+                                 a vision-language model prompted for concrete
+                                 keywords; reads the scene instead of matching a
+                                 fixed vocab, so it won't hallucinate absent
+                                 subjects the way zero-shot CLIP did
+  --top-tags <n>        Max keyword tags per image (default: 12)
   --faces               Detect + cluster faces (requires facenet-pytorch)
                         Uses MTCNN detection + VGGFace2/InceptionResnetV1 embeddings
                         + DBSCAN identity clustering.  Stores bbox, cluster_id, name.
@@ -347,176 +346,118 @@ def run_para(paths, device, batch_size=32):
     return results
 
 
-# ── CLIP tag vocabulary ───────────────────────────────────────────────────────
+# ── Keyword tags (Qwen3-VL-8B-Instruct, 4-bit NF4) ───────────────────────────
 
-CLIP_TAG_VOCAB = [
-    # Scene type
-    "landscape", "cityscape", "street scene", "interior room", "portrait",
-    # Nature
-    "forest", "mountains", "ocean", "beach", "lake", "river", "desert",
-    "field", "garden", "snow and ice", "waterfall", "rocks and cliffs", "sky and clouds",
-    # Urban / built environment
-    "building and architecture", "bridge", "market or shop", "historical site",
-    # People
-    "single person", "group of people", "crowd", "child or children", "face close-up",
-    # Animals
-    "dog", "cat", "bird", "wildlife animal",
-    # Light / weather
-    "sunset or sunrise", "golden hour", "blue hour", "night scene",
-    "foggy or misty", "rainy weather", "overcast sky", "bright sunny day",
-    # Photographic style
-    "bokeh background blur", "silhouette", "reflection in water",
-    "black and white", "aerial or birds eye view", "long exposure",
-    # Subject category
-    "food or drink", "vehicle or transportation", "boat or ship",
-    "sports or action", "festival or event", "abstract pattern",
-    "indoor", "outdoor",
-]
+QWEN_TAG_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
 
-# Style / lighting / technique / environment terms that a natural-language
-# caption almost never verbalises ("golden hour", "bokeh") but CLIP detects
-# well from pixels. These stay image-only. Everything else is a subject/content
-# term where CLIP hallucinates (e.g. "dog" on a portrait) and the caption is the
-# reliable signal — those are gated on caption agreement. Splitting this way is a
-# judgement call; move a term between the two to change how it's validated.
-STYLE_TAGS = frozenset({
-    "landscape", "cityscape",
-    "sunset or sunrise", "golden hour", "blue hour", "night scene",
-    "foggy or misty", "rainy weather", "overcast sky", "bright sunny day",
-    "bokeh background blur", "silhouette", "reflection in water",
-    "black and white", "aerial or birds eye view", "long exposure",
-    "abstract pattern", "indoor", "outdoor",
-})
+# One instruction, tuned in the spike that retired the old CLIP-vs-vocab tagger:
+# concrete keywords, no synonym spam, no gender hedging, no sentences. The VLM
+# reads the actual scene (it correctly calls a stuffed cat a "plush toy"), so it
+# does not hallucinate absent subjects the way zero-shot CLIP did — which is what
+# let the curated vocabulary and the caption-grounding heuristics go away.
+QWEN_TAG_PROMPT = (
+    "List the distinct, concrete visual keywords describing this photo: "
+    "main subject(s), setting, and notable attributes. Rules: at most {k} "
+    "keywords, each one or two words, no synonyms, no duplicates, no "
+    "sentences. Output ONLY a comma-separated list."
+)
 
 
-# Words/phrases in a caption that imply a subject tag. CLIP's global caption
-# embedding can't separate a present secondary subject ("person") from an absent
-# one ("dog") — they sit at near-identical cosine — but the caption text names
-# them explicitly, so a lexical match is the precise signal. Terms absent here
-# (or with no caption hit) fall back to the semantic z-score in select_tags.
-SUBJECT_KEYWORDS = {
-    "street scene": ["street", "road", "alley", "sidewalk", "avenue", "crosswalk"],
-    "interior room": ["room", "indoor", "living room", "bedroom", "kitchen",
-                       "interior", "inside", "office", "hallway"],
-    "portrait": ["portrait", "headshot", "selfie"],
-    "face close-up": ["face", "close-up", "closeup", "close up"],
-    "forest": ["forest", "woods", "woodland", "jungle", "trees", "tree"],
-    "mountains": ["mountain", "mountains", "peak", "hill", "hills", "alps", "summit"],
-    "ocean": ["ocean", "sea", "waves", "surf"],
-    "beach": ["beach", "sand", "shore", "seaside", "coast"],
-    "lake": ["lake", "pond", "lagoon"],
-    "river": ["river", "stream", "creek", "brook"],
-    "desert": ["desert", "dune", "dunes"],
-    "field": ["field", "meadow", "grass", "grassland", "prairie", "pasture", "lawn"],
-    "garden": ["garden", "flower", "flowers", "blossom", "bloom", "botanical", "park"],
-    "snow and ice": ["snow", "ice", "snowy", "frozen", "glacier", "icy"],
-    "waterfall": ["waterfall", "falls", "cascade"],
-    "rocks and cliffs": ["rock", "rocks", "cliff", "cliffs", "boulder", "canyon", "gorge"],
-    "sky and clouds": ["sky", "cloud", "clouds", "overcast"],
-    "building and architecture": ["building", "buildings", "architecture", "tower",
-                                  "skyscraper", "house", "structure", "facade"],
-    "bridge": ["bridge"],
-    "market or shop": ["market", "shop", "store", "stall", "bazaar", "mall"],
-    "historical site": ["castle", "temple", "ruins", "monument", "historic", "historical",
-                         "cathedral", "palace", "church", "fortress", "shrine"],
-    "single person": ["person", "man", "woman", "boy", "girl", "guy", "lady",
-                       "someone", "gentleman", "individual"],
-    "group of people": ["people", "group", "couple", "men", "women", "family",
-                        "friends", "two ", "three ", "several"],
-    "crowd": ["crowd", "audience", "masses"],
-    "child or children": ["child", "children", "kid", "kids", "baby", "toddler", "infant"],
-    "dog": ["dog", "puppy", "dogs", "canine"],
-    "cat": ["cat", "kitten", "cats", "feline"],
-    "bird": ["bird", "birds", "seagull", "pigeon", "eagle", "owl", "duck", "swan"],
-    "wildlife animal": ["animal", "animals", "wildlife", "deer", "fox", "bear",
-                        "horse", "cow", "sheep", "elephant", "lion", "tiger", "monkey"],
-    "food or drink": ["food", "meal", "drink", "coffee", "dish", "plate", "cake",
-                      "fruit", "breakfast", "lunch", "dinner", "wine", "beer", "pizza"],
-    "vehicle or transportation": ["car", "truck", "bus", "train", "motorcycle",
-                                  "bicycle", "bike", "vehicle", "traffic", "scooter"],
-    "boat or ship": ["boat", "ship", "sailboat", "yacht", "canoe", "kayak", "ferry"],
-    "sports or action": ["playing", "running", "jumping", "sport", "game", "skiing",
-                         "surfing", "soccer", "basketball", "skateboard", "race"],
-    "festival or event": ["festival", "concert", "party", "wedding", "celebration",
-                         "parade", "event"],
-}
-
-
-def select_tags(img_probs, cap_sims, caption=None, *, top_k=8,
-                img_floor=0.04, cap_z_floor=1.5):
-    """Pick keyword tags for one image, fusing visual and caption evidence.
-
-    img_probs : per-vocab softmax probabilities from the image↔vocab CLIP sims.
-    cap_sims  : per-vocab cosine sims between the caption text and the vocab
-                (same CLIP text encoder), or None when there's no caption.
-    caption   : the caption string, for lexical grounding.
-
-    Style/technique terms (STYLE_TAGS) are kept on visual confidence alone
-    (img_floor) — captions don't describe them. Subject/content terms must also
-    agree with the caption: kept when the caption *names* the concept (a
-    SUBJECT_KEYWORDS hit) or is strongly semantically similar (z-score ≥
-    cap_z_floor). The lexical test is what cleanly drops a visually-plausible but
-    absent subject (the "dog" on a portrait) while keeping a genuinely-present
-    one ("person"). Returns up to top_k terms, ordered by visual confidence."""
+def _clean_tags(text: str, top_k: int) -> list[str]:
+    """Parse the model's comma list into clean, deduped, lowercased tags."""
     import re
-    import numpy as np
-    cap_l = (caption or "").lower()
-    if cap_sims is not None:
-        mu = float(np.mean(cap_sims))
-        sd = float(np.std(cap_sims)) or 1e-6
-
-    def named(term):
-        for kw in SUBJECT_KEYWORDS.get(term, ()):
-            if " " in kw:                     # phrase: plain substring
-                if kw in cap_l:
-                    return True
-            elif re.search(rf"\b{re.escape(kw)}\b", cap_l):
-                return True
-        return False
-
-    kept = []
-    for j, term in enumerate(CLIP_TAG_VOCAB):
-        p = float(img_probs[j])
-        if term in STYLE_TAGS:
-            if p >= img_floor:                # style: visual confidence only
-                kept.append((p, term))
-        elif named(term):
-            # The caption explicitly names this subject — authoritative, so keep
-            # it even on weak visual support (it just sorts lower).
-            kept.append((p, term))
-        elif p < img_floor:
-            continue                          # subject needs visual support to compete
-        elif cap_sims is None and not cap_l:
-            kept.append((p, term))            # nothing to ground on → image-only
-        elif cap_sims is not None and (float(cap_sims[j]) - mu) / sd >= cap_z_floor:
-            kept.append((p, term))            # strong semantic agreement w/ caption
-    kept.sort(reverse=True)
-    return [t for _, t in kept[:top_k]]
+    # Strip a leading list marker only: a bullet/dash, or "1." / "2)" followed by
+    # space. Crucially NOT a bare leading digit — that would mangle real tags like
+    # "4k resolution" or "35mm" into "k resolution" / "mm".
+    marker = re.compile(r"^\s*(?:[\-\u2022]\s*|\d+[.)]\s+)")
+    seen: set[str] = set()
+    out: list[str] = []
+    for chunk in re.split(r"[,\n;]", text or ""):
+        t = marker.sub("", chunk.strip()).strip(". ").lower()
+        if not t or len(t) > 40 or len(t.split()) > 4:
+            continue  # drop empties, list bullets/numbering, sentence-length junk
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+        if len(out) >= top_k:
+            break
+    return out
 
 
-# ── Captions (BLIP) + keyword tags (CLIP ViT-B/32) ───────────────────────────
+def run_qwen_tags(paths: list[Path], device: str, top_k: int = 12,
+                  max_side: int = 1024) -> dict:
+    """{path: [tags]} via Qwen3-VL-8B-Instruct.
+
+    4-bit NF4 on CUDA (~6 GB; the vision tower stays in BF16 for tag fidelity),
+    full precision on CPU (correct but slow — bitsandbytes needs CUDA). Greedy
+    decode, so the same image always yields the same tags."""
+    import torch
+    from PIL import ImageOps
+    from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+
+    out: dict[Path, list] = {p: [] for p in paths}
+    print(f"\nLoading Qwen3-VL tagger ({QWEN_TAG_MODEL}) on {device}...")
+    try:
+        proc = AutoProcessor.from_pretrained(QWEN_TAG_MODEL)
+        load_kw: dict = {"dtype": torch.bfloat16}
+        if device == "cuda":
+            from transformers import BitsAndBytesConfig
+            load_kw["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                llm_int8_skip_modules=["visual"],
+            )
+            load_kw["device_map"] = "cuda"
+        else:
+            load_kw["device_map"] = "cpu"
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            QWEN_TAG_MODEL, **load_kw).eval()
+
+        prompt = QWEN_TAG_PROMPT.format(k=top_k)
+        for p in tqdm(paths, desc="Qwen tags"):
+            try:
+                img = Image.open(p).convert("RGB")
+                img = ImageOps.exif_transpose(img)
+                if max(img.size) > max_side:
+                    img.thumbnail((max_side, max_side))
+            except Exception as e:
+                print(f"  skip {p.name}: {e}")
+                continue
+            msgs = [{"role": "user", "content": [
+                {"type": "image"}, {"type": "text", "text": prompt}]}]
+            text = proc.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True)
+            inputs = proc(text=[text], images=[img],
+                          return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                gen = model.generate(**inputs, max_new_tokens=96, do_sample=False)
+            ans = proc.batch_decode(
+                gen[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
+            out[p] = _clean_tags(ans, top_k)
+
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"  Qwen tagging failed: {e}")
+    return out
+
+# ── Captions (BLIP) + keyword tags (Qwen3-VL) ────────────────────────────────
 
 def run_caption_and_tags(paths: list[Path], device: str,
-                         top_k: int = 8,
-                         tag_min_prob: float = 0.04,
-                         cap_z_floor: float = 1.5,
-                         caption_ground: bool = True,
-                         batch_size_blip: int = 16,
-                         batch_size_clip: int = 32) -> dict:
+                         top_k: int = 12,
+                         batch_size_blip: int = 16) -> dict:
     """
     Returns {path: {"caption": str, "tags": list[str]}} for every path.
 
-    Caption : Salesforce/blip-image-captioning-base  (~990 MB, natively in transformers)
-    Tags    : open_clip ViT-B/32 against CLIP_TAG_VOCAB. Image↔vocab cosine sims are
-              softmax-calibrated; tags below `tag_min_prob` are dropped. When
-              `caption_ground` is set, subject/content tags must also agree with the
-              caption (the caption is encoded with the same text encoder and the
-              term's caption similarity must clear `cap_z_floor` std above the
-              caption's mean) — this stops CLIP from hallucinating absent subjects.
-              Style/lighting tags (STYLE_TAGS) stay image-only. See select_tags().
+    Caption : Salesforce/blip-image-captioning-base (~990 MB, in transformers)
+    Tags    : Qwen3-VL-8B-Instruct (4-bit NF4 on GPU) — a vision-language model
+              prompted for concrete keywords. It reads the actual scene rather
+              than matching a fixed vocabulary, so it does not hallucinate absent
+              subjects the way zero-shot CLIP did. See run_qwen_tags().
     """
     import torch
-    import open_clip
     from transformers import BlipProcessor, BlipForConditionalGeneration
 
     results: dict[Path, dict] = {p: {"caption": "", "tags": []} for p in paths}
@@ -558,73 +499,13 @@ def run_caption_and_tags(paths: list[Path], device: str,
     except Exception as e:
         print(f"  BLIP captioning failed: {e}")
 
-    # ── CLIP ViT-B/32 zero-shot keyword tags ───────────────────────────────────
-    print(f"\nLoading CLIP ViT-B/32 for keyword tagging on {device}...")
-    try:
-        clip_model, _, clip_prep = open_clip.create_model_and_transforms(
-            "ViT-B-32-quickgelu", pretrained="openai", device=device
-        )
-        clip_tok = open_clip.get_tokenizer("ViT-B-32-quickgelu")
-        clip_model.eval()
-
-        # Encode the full vocabulary once
-        vocab_tokens = clip_tok(
-            [f"a photo of {t}" for t in CLIP_TAG_VOCAB]
-        ).to(device)
-        with torch.no_grad(), torch.amp.autocast(device):
-            vocab_feats = clip_model.encode_text(vocab_tokens)
-            vocab_feats = vocab_feats / vocab_feats.norm(dim=-1, keepdim=True)
-        vocab_feats = vocab_feats.cpu().float()   # (V, D)
-        # CLIP's trained temperature (~100); turns raw cosine sims into a usable
-        # probability distribution over the vocabulary for thresholding.
-        logit_scale = float(clip_model.logit_scale.exp().item())
-
-        for i in tqdm(range(0, len(paths), batch_size_clip), desc="CLIP tags"):
-            batch_paths = paths[i:i + batch_size_clip]
-            tensors, bpaths = [], []
-            for p in batch_paths:
-                try:
-                    img = Image.open(p).convert("RGB")
-                    tensors.append(clip_prep(img))
-                    bpaths.append(p)
-                except Exception as e:
-                    print(f"  skip {p.name}: {e}")
-            if not tensors:
-                continue
-
-            t = torch.stack(tensors).to(device)
-            with torch.no_grad(), torch.amp.autocast(device):
-                img_feats = clip_model.encode_image(t).cpu().float()
-                img_feats = img_feats / img_feats.norm(dim=-1, keepdim=True)
-
-            sims = img_feats @ vocab_feats.T   # (B, V)
-            img_probs = torch.softmax(sims * logit_scale, dim=1).numpy()   # (B, V)
-
-            # Caption grounding: encode each image's caption with the same text
-            # encoder and score it against the vocab, so subject tags can be
-            # validated against the (more reliable) description. Style tags ignore
-            # this. Paths with no caption fall back to image-only selection.
-            cap_sims = [None] * len(bpaths)
-            if caption_ground:
-                caps = [results[p].get("caption", "") for p in bpaths]
-                grounded = [j for j, c in enumerate(caps) if c.strip()]
-                if grounded:
-                    ctok = clip_tok([f"a photo of {caps[j]}" for j in grounded]).to(device)
-                    with torch.no_grad():
-                        cfeat = clip_model.encode_text(ctok).cpu().float()
-                        cfeat = cfeat / cfeat.norm(dim=-1, keepdim=True)
-                    csim = (cfeat @ vocab_feats.T).numpy()   # (len(grounded), V)
-                    for row, j in enumerate(grounded):
-                        cap_sims[j] = csim[row]
-
-            for j, p in enumerate(bpaths):
-                results[p]["tags"] = select_tags(
-                    img_probs[j], cap_sims[j], results[p].get("caption", ""),
-                    top_k=top_k, img_floor=tag_min_prob, cap_z_floor=cap_z_floor)
-
-        del clip_model
-    except Exception as e:
-        print(f"  CLIP tagging failed: {e}")
+    # ── Qwen3-VL keyword tags ───────────────────────────────────────────────────
+    # BLIP is freed above before the tagger loads, so the ~6 GB NF4 model has the
+    # VRAM to itself. Tagging is independent of the caption (no grounding); the
+    # VLM works straight off the pixels.
+    qtags = run_qwen_tags(paths, device, top_k=top_k)
+    for p, tg in qtags.items():
+        results[p]["tags"] = tg
 
     return results
 
@@ -1159,7 +1040,7 @@ def run_faces(paths: list[Path], device: str,
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("folder")
     ap.add_argument("--recurse",        action="store_true")
@@ -1189,18 +1070,9 @@ def main():
     ap.add_argument("--no-clip",        action="store_true",
                     help="Skip all aesthetic scoring")
     ap.add_argument("--caption",        action="store_true",
-                    help="Add BLIP captions + CLIP keyword tags (slower)")
-    ap.add_argument("--top-tags",       type=int, default=8,
-                    help="Max keyword tags per image (default: 8)")
-    ap.add_argument("--tag-min-prob",   type=float, default=0.04,
-                    help="Min softmax confidence to keep a tag (default: 0.04); "
-                         "raise to cut noise, lower for more (looser) tags")
-    ap.add_argument("--tag-cap-z",      type=float, default=1.5,
-                    help="Semantic-fallback floor for subject tags not named in "
-                         "the caption, in std above the caption's mean vocab "
-                         "similarity (default: 1.5); lower to keep looser matches")
-    ap.add_argument("--no-caption-ground", action="store_true",
-                    help="Disable caption grounding (tag purely on the image)")
+                    help="Add BLIP captions + Qwen3-VL keyword tags (slower)")
+    ap.add_argument("--top-tags",       type=int, default=12,
+                    help="Max keyword tags per image (default: 12)")
     ap.add_argument("--faces",          action="store_true",
                     help="Detect + cluster faces (requires facenet-pytorch)")
     ap.add_argument("--face-ref",       action="append", default=[], metavar="NAME=PATH",
@@ -1219,7 +1091,11 @@ def main():
     ap.add_argument("--top",            type=int,   default=30)
     ap.add_argument("--no-cache",       action="store_true",
                     help="Ignore the previous report; re-score every image")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     folder = Path(args.folder)
     if not folder.exists():
@@ -1392,14 +1268,11 @@ def main():
             paths, scene_assign, dup_groups, times=capture_time,
         )
 
-    # ── BLIP captions + CLIP keyword tags (new files only) ──
+    # ── BLIP captions + Qwen3-VL keyword tags (new files only) ──
     captions: dict[Path, dict] = {}
     if args.caption and to_process:
         captions = run_caption_and_tags(to_process, device_for(),
-                                         top_k=args.top_tags,
-                                         tag_min_prob=args.tag_min_prob,
-                                         cap_z_floor=args.tag_cap_z,
-                                         caption_ground=not args.no_caption_ground)
+                                         top_k=args.top_tags)
 
     # ── Face detection + identity clustering ──
     # Clustering is global, so any change forces a whole-folder re-detection;
@@ -1505,7 +1378,7 @@ def main():
         json.dump({
             "folder":           str(folder),
             "backend":          "none" if args.no_clip else args.backend,
-            "caption_model":    "blip-base+clip-b32" if args.caption else None,
+            "caption_model":    "blip-base+qwen3vl-8b-nf4" if args.caption else None,
             "face_model":       "mtcnn+vggface2" if args.faces else None,
             "face_expr_model":  "clip-b32-expr" if (args.faces and args.face_expr) else None,
             "scene_model":      (None if not use_scenes
