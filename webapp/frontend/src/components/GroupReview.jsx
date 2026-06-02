@@ -23,7 +23,7 @@ import DecideButtons from './DecideButtons.jsx'
 // `title`/`subExtra` let the caller label the header; `showGroupBulk` gates the
 // group-wide actions.
 export default function GroupReview({
-  group, onClose, onDecision, onDecisionsBulk, personName,
+  group, onClose, onDecision, onDecisionsBulk,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
   selId = null, zoom = false, onSelect, onZoom,
 }) {

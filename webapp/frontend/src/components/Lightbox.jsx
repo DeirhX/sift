@@ -1,10 +1,7 @@
 import { useEffect, useCallback, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fullUrl, thumbUrl, fetchLocations, revealPath, fetchMeta } from '../api.js'
-import { fmt, aestheticScore, fmtTime } from '../format.js'
-
-const qColor = (v) =>
-  v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
+import { fmt, aestheticScore, fmtTime, qualityColor } from '../format.js'
 
 // Normalise a path for prefix comparison against the configured roots: lower
 // case, forward slashes, no trailing slash (mirrors the server's normcase).
@@ -159,7 +156,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
 
       <aside className="lb-panel" onClick={(e) => e.stopPropagation()}>
         <div className="lb-panel-head">
-          <span className="q-pill big" style={{ background: qColor(item.combined) }} title="Composite quality">
+          <span className="q-pill big" style={{ background: qualityColor(item.combined) }} title="Composite quality">
             Q {fmt(item.combined)}
           </span>
           <b className="lb-name" title={item.filename}>{item.filename}</b>
@@ -243,7 +240,7 @@ function StatBar({ label, value, hint }) {
     <div className="lb-stat" title={hint}>
       <span className="lb-stat-label">{label}</span>
       <span className="lb-stat-track">
-        <span className="lb-stat-fill" style={{ width: pct + '%', background: qColor(value) }} />
+        <span className="lb-stat-fill" style={{ width: pct + '%', background: qualityColor(value) }} />
       </span>
       <span className="lb-stat-val">{fmt(value)}</span>
     </div>

@@ -177,3 +177,80 @@ def test_parser_rejects_retired_clip_tag_flags(flag):
     # truly removed so nobody silently resurrects a dead grounding path.
     with pytest.raises(SystemExit):
         photo_audit.build_parser().parse_args(["folder", flag, "0.1"])
+
+
+# ── iter_image_batches (shared open/skip/stack loop) ─────────────────────────
+# The CLIP-IQA / PARA / scene-embedding encoders all funnel through this, so its
+# batching + skip-on-error contract is worth pinning without loading any model.
+
+def _write_jpegs(tmp_path, n):
+    from PIL import Image
+    paths = []
+    for i in range(n):
+        p = tmp_path / f"img{i}.jpg"
+        Image.new("RGB", (8, 8), (i * 10 % 256, 0, 0)).save(p, "JPEG")
+        paths.append(p)
+    return paths
+
+
+def test_iter_image_batches_batches_and_aligns_paths(tmp_path):
+    torch = pytest.importorskip("torch")
+    paths = _write_jpegs(tmp_path, 5)
+
+    def prep(img):
+        return torch.zeros(3)            # stand in for a real CLIP preprocess
+
+    batches = list(photo_audit.iter_image_batches(paths, prep, "cpu", 2, "test"))
+    assert [len(bp) for _, bp in batches] == [2, 2, 1]          # 5 over batch_size 2
+    assert [p for _, bp in batches for p in bp] == paths        # order preserved
+    assert all(t.shape[0] == len(bp) for t, bp in batches)      # stacked per batch
+
+
+def test_iter_image_batches_skips_unreadable(tmp_path):
+    torch = pytest.importorskip("torch")
+    good = _write_jpegs(tmp_path, 2)
+    paths = [good[0], tmp_path / "nope.jpg", good[1]]            # middle doesn't exist
+
+    def prep(img):
+        return torch.zeros(3)
+
+    out_paths = [p for _, bp in
+                 photo_audit.iter_image_batches(paths, prep, "cpu", 10, "test")
+                 for p in bp]
+    assert out_paths == good                                    # bad path dropped
+
+
+def test_iter_image_batches_empty_input(tmp_path):
+    pytest.importorskip("torch")
+    assert list(photo_audit.iter_image_batches([], lambda im: im, "cpu", 4, "x")) == []
+
+
+# ── bipolar_score (shared CLIP-IQA / expression scorer) ──────────────────────
+
+def test_bipolar_score_favours_positive_alignment():
+    import math
+    torch = pytest.importorskip("torch")
+    # img aligned with the positive prompt, orthogonal to the negative. Logits
+    # are the raw dot products (1, 0) with no temperature, so softmax -> e/(e+1).
+    img = torch.tensor([1.0, 0.0])
+    pos = torch.tensor([[1.0, 0.0]])
+    neg = torch.tensor([[0.0, 1.0]])
+    expected = math.e / (math.e + 1)
+    assert photo_audit.bipolar_score(img, pos, neg) == pytest.approx(expected, abs=1e-4)
+
+
+def test_bipolar_score_symmetric_is_half():
+    torch = pytest.importorskip("torch")
+    img = torch.tensor([1.0, 0.0])
+    pos = torch.tensor([[1.0, 0.0]])
+    neg = torch.tensor([[1.0, 0.0]])          # equal alignment -> softmax 0.5
+    assert photo_audit.bipolar_score(img, pos, neg) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_bipolar_score_averages_pairs():
+    torch = pytest.importorskip("torch")
+    img = torch.tensor([1.0, 0.0])
+    pos = torch.tensor([[1.0, 0.0], [0.0, 1.0]])   # one aligned, one anti-aligned
+    neg = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+    # pair 1 -> ~1.0, pair 2 -> ~0.0, mean ~0.5
+    assert photo_audit.bipolar_score(img, pos, neg) == pytest.approx(0.5, abs=1e-3)

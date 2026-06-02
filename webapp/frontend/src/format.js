@@ -7,6 +7,12 @@ export const fmt = (v) => (v == null ? '–' : v.toFixed(2))
 // Aesthetic score, falling back to CLIP-IQA when the PARA score is absent.
 export const aestheticScore = (item) => item.para_aesthetic ?? item.clip_iqa
 
+// Quality (0-1) → hue: red (low) → amber → green (high); missing reads as a
+// neutral border grey. Shared by the Q pills and stat bars across the card,
+// lightbox, and pile components so they can't drift apart.
+export const qualityColor = (v) =>
+  v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
+
 // The representative ("medoid") of a near-duplicate set: the most central frame
 // (highest mean cosine to its peers, `dup_central`), with quality as the
 // tie-break. Leading a group with this — not the highest-quality frame — keeps

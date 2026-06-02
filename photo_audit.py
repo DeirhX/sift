@@ -161,8 +161,52 @@ def expand_box(pil_img, box, margin: float = 0.4):
     return pil_img.crop((x1, y1, x2, y2))
 
 
-def _bipolar_score(img_feat, pos_feats, neg_feats) -> float:
-    """Mean positive-vs-negative softmax probability across prompt pairs."""
+def iter_image_batches(paths, preprocess, device, batch_size, desc):
+    """Yield (stacked_tensor, batch_paths) over `paths`, opening each as RGB and
+    mapping it through `preprocess` (PIL.Image -> tensor). Images that fail to
+    open/preprocess are skipped with a warning; empty batches are dropped. This
+    is the one place the open/convert/skip/stack/tqdm boilerplate lives, shared
+    by every CLIP-style batch encoder below."""
+    import torch
+    for i in tqdm(range(0, len(paths), batch_size), desc=desc):
+        tensors, bpaths = [], []
+        for p in paths[i:i + batch_size]:
+            try:
+                tensors.append(preprocess(Image.open(p).convert("RGB")))
+                bpaths.append(p)
+            except Exception as e:
+                print(f"  skip {getattr(p, 'name', p)}: {e}")
+        if tensors:
+            yield torch.stack(tensors).to(device), bpaths
+
+
+def load_openclip_b32(device: str):
+    """Load the OpenAI CLIP ViT-B/32 (quickgelu) backbone used for scene
+    embeddings and expression scoring. Returns (model.eval(), preprocess,
+    tokenizer)."""
+    import open_clip
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32-quickgelu", pretrained="openai", device=device)
+    return model.eval(), preprocess, open_clip.get_tokenizer("ViT-B-32-quickgelu")
+
+
+def encode_prompt_pairs(model, tokenizer, pairs, device):
+    """Encode (positive, negative) prompt pairs with a CLIP text encoder,
+    L2-normalised. Returns (pos_feats, neg_feats), each (len(pairs), D) on CPU."""
+    import torch
+    pos = tokenizer([f"a photo of {p}" for p, _ in pairs]).to(device)
+    neg = tokenizer([f"a photo of {n}" for _, n in pairs]).to(device)
+    with torch.no_grad(), torch.amp.autocast(device):
+        pf = model.encode_text(pos); pf = pf / pf.norm(dim=-1, keepdim=True)
+        nf = model.encode_text(neg); nf = nf / nf.norm(dim=-1, keepdim=True)
+    return pf.cpu().float(), nf.cpu().float()
+
+
+def bipolar_score(img_feat, pos_feats, neg_feats) -> float:
+    """Mean positive-vs-negative softmax probability across prompt pairs — the
+    shared CLIP bipolar-prompt scorer behind both CLIP-IQA and portrait
+    expression quality. `img_feat` and each per-pair feat are 1-D L2-normalised
+    vectors; returns a single 0-1 score."""
     import torch, torch.nn.functional as F
     vals = []
     for pf, nf in zip(pos_feats, neg_feats):
@@ -174,22 +218,14 @@ def _bipolar_score(img_feat, pos_feats, neg_feats) -> float:
 def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
     """Score a list of (expanded) face crops for expression quality (0-1, higher
     = more flattering) via zero-shot CLIP ViT-B/32. Returns one float per crop."""
-    import torch, open_clip
+    import torch
 
     print(f"\nScoring portrait expression on {len(crops)} faces (CLIP ViT-B/32)...")
-    model, _, prep = open_clip.create_model_and_transforms(
-        "ViT-B-32-quickgelu", pretrained="openai", device=device)
-    tok = open_clip.get_tokenizer("ViT-B-32-quickgelu")
-    model.eval()
-
-    pos = tok([f"a photo of {p}" for p, _ in EXPRESSION_PAIRS]).to(device)
-    neg = tok([f"a photo of {n}" for _, n in EXPRESSION_PAIRS]).to(device)
-    with torch.no_grad(), torch.amp.autocast(device):
-        pf = model.encode_text(pos); pf = pf / pf.norm(dim=-1, keepdim=True)
-        nf = model.encode_text(neg); nf = nf / nf.norm(dim=-1, keepdim=True)
-    pf, nf = pf.cpu().float(), nf.cpu().float()
+    model, prep, tok = load_openclip_b32(device)
+    pf, nf = encode_prompt_pairs(model, tok, EXPRESSION_PAIRS, device)
 
     scores: list = []
+    # crops are already-decoded PIL images, so this can't use iter_image_batches.
     for i in tqdm(range(0, len(crops), batch_size), desc="Expression"):
         batch = crops[i:i + batch_size]
         t = torch.stack([prep(c.convert("RGB")) for c in batch]).to(device)
@@ -197,7 +233,7 @@ def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
             feats = model.encode_image(t).cpu().float()
             feats = feats / feats.norm(dim=-1, keepdim=True)
         for fe in feats:
-            scores.append(round(_bipolar_score(fe, pf, nf), 4))
+            scores.append(round(bipolar_score(fe, pf, nf), 4))
 
     del model
     return scores
@@ -224,59 +260,25 @@ def load_clip_iqa(device: str):
     return model, preprocess, tokenizer
 
 
-def encode_quality_texts(model, tokenizer, device):
-    import torch
-    pos_texts = [f"a photo of {p}" for p, _ in QUALITY_PAIRS]
-    neg_texts = [f"a photo of {n}" for _, n in QUALITY_PAIRS]
-    tokens = tokenizer(pos_texts + neg_texts).to(device)
-    with torch.no_grad(), torch.amp.autocast(device):
-        feats = model.encode_text(tokens)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-    feats = feats.cpu().float()
-    n = len(QUALITY_PAIRS)
-    return feats[:n], feats[n:]
-
-
-def clip_iqa_score(img_feat, pos_feats, neg_feats) -> float:
-    import torch, torch.nn.functional as F
-    scores = []
-    for pf, nf in zip(pos_feats, neg_feats):
-        logits = torch.tensor([(img_feat @ pf.unsqueeze(-1)).item(),
-                               (img_feat @ nf.unsqueeze(-1)).item()])
-        scores.append(F.softmax(logits, dim=0)[0].item())
-    return float(np.mean(scores))
-
-
 def run_clip_iqa(paths, device, batch_size=32):
     import torch
     from sklearn.preprocessing import normalize
 
     model, preprocess, tokenizer = load_clip_iqa(device)
-    pos_feats, neg_feats = encode_quality_texts(model, tokenizer, device)
+    pos_feats, neg_feats = encode_prompt_pairs(model, tokenizer, QUALITY_PAIRS, device)
 
     embeddings, valid = [], []
-    for i in tqdm(range(0, len(paths), batch_size), desc="CLIP-IQA embed"):
-        batch = paths[i:i + batch_size]
-        tensors, bvalid = [], []
-        for p in batch:
-            try:
-                img = Image.open(p).convert("RGB")
-                tensors.append(preprocess(img))
-                bvalid.append(p)
-            except Exception as e:
-                print(f"  skip {p.name}: {e}")
-        if not tensors:
-            continue
-        t = torch.stack(tensors).to(device)
+    for t, bpaths in iter_image_batches(paths, preprocess, device,
+                                        batch_size, "CLIP-IQA embed"):
         with torch.no_grad(), torch.amp.autocast(device):
             f = model.encode_image(t).cpu().float().numpy()
         embeddings.extend(f)
-        valid.extend(bvalid)
+        valid.extend(bpaths)
 
     embs = normalize(np.array(embeddings))
     scores = {}
     for p, e in zip(valid, embs):
-        scores[p] = clip_iqa_score(torch.tensor(e), pos_feats, neg_feats)
+        scores[p] = bipolar_score(torch.tensor(e), pos_feats, neg_feats)
     for p in paths:
         scores.setdefault(p, 0.5)
 
@@ -317,21 +319,13 @@ def run_para(paths, device, batch_size=32):
     import torch
 
     scorer, processor = load_para_scorer(device)
+
+    def prep(img):
+        return processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+
     results = {}
-    for i in tqdm(range(0, len(paths), batch_size), desc="PARA scoring"):
-        batch = paths[i:i + batch_size]
-        tensors, bpaths = [], []
-        for p in batch:
-            try:
-                img = Image.open(p).convert("RGB")
-                t = processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
-                tensors.append(t)
-                bpaths.append(p)
-            except Exception as e:
-                print(f"  skip {p.name}: {e}")
-        if not tensors:
-            continue
-        batch_t = torch.stack(tensors).to(device)
+    for batch_t, bpaths in iter_image_batches(paths, prep, device,
+                                              batch_size, "PARA scoring"):
         with torch.no_grad():
             out = scorer(batch_t)
         head_lists = [o.squeeze(1).tolist() for o in out]
@@ -781,25 +775,12 @@ def compute_clip_embeddings(paths: list[Path], device: str,
     similarity. Standardised on ViT-B/32 regardless of the aesthetic backend so
     scene grouping is consistent. Returns {path: 1-D float32 ndarray}."""
     import torch
-    import open_clip
 
-    model, _, prep = open_clip.create_model_and_transforms(
-        "ViT-B-32-quickgelu", pretrained="openai", device=device)
-    model.eval()
+    model, prep, _ = load_openclip_b32(device)
 
     embs: dict = {}
-    for i in tqdm(range(0, len(paths), batch_size), desc="Scene embeddings (CLIP)"):
-        batch = paths[i:i + batch_size]
-        tensors, bpaths = [], []
-        for p in batch:
-            try:
-                tensors.append(prep(Image.open(p).convert("RGB")))
-                bpaths.append(p)
-            except Exception as e:
-                print(f"  skip {p.name}: {e}")
-        if not tensors:
-            continue
-        t = torch.stack(tensors).to(device)
+    for t, bpaths in iter_image_batches(paths, prep, device,
+                                        batch_size, "Scene embeddings (CLIP)"):
         with torch.no_grad(), torch.amp.autocast(device):
             f = model.encode_image(t)
             f = f / f.norm(dim=-1, keepdim=True)

@@ -163,6 +163,18 @@ def test_delete_face_persists(env):
     assert len(items["c.jpg"]["faces"]) == 1        # stayed deleted across ingest
 
 
+def test_delete_largest_face_recomputes_portrait(env):
+    # c.jpg's portrait is driven by its LARGEST face (sharp 0.60, expr 0.50).
+    items = {it["filename"]: it for it in env.client.get("/api/images?limit=50").json()["items"]}
+    assert items["c.jpg"]["portrait"] == pytest.approx(0.6 * 0.6 + 0.4 * 0.5, abs=1e-3)
+    env.client.delete(f"/api/faces/{_face_id(env, 'c.jpg', which=0)}")  # delete the large face
+    c = {it["filename"]: it for it in
+         env.client.get("/api/images?limit=50").json()["items"]}["c.jpg"]
+    assert len(c["faces"]) == 1
+    # portrait must follow the now-largest (small) face, not stay stale at 0.56.
+    assert c["portrait"] == pytest.approx(0.6 * 0.2 + 0.4 * 0.3, abs=1e-3)
+
+
 def test_rename_cluster(env):
     env.client.post("/api/clusters", json={"cluster_id": 0, "name": "Bob"})
     meta = {c["cluster_id"]: c for c in env.client.get("/api/meta").json()["clusters"]}

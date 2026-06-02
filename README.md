@@ -8,6 +8,9 @@ folder. Nothing is ever hard-deleted.
 
 Everything runs on your machine. There is no cloud, no auth, no telemetry.
 
+For a developer-facing map of the modules and design decisions, see
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## How it works
 
 The workflow is a three-stage pipeline:

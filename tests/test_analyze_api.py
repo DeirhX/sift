@@ -6,6 +6,13 @@ import pytest
 from fastapi import HTTPException
 
 import server
+import analysis
+
+
+def _build_steps(env, payload):
+    """Call the (now decoupled) argv builder with the env's DB/thumb paths."""
+    return analysis.build_analyze_steps(
+        payload, db_path=env.db, thumb_dir=env.thumbs, db_factory=server.db)
 
 
 @pytest.fixture(autouse=True)
@@ -39,18 +46,18 @@ def test_start_rejects_missing_folder(env):
 
 def test_build_steps_bad_folder_raises(env):
     with pytest.raises(HTTPException) as ei:
-        server._build_analyze_steps({"folder": "/no/such/folder/xyz"})
+        _build_steps(env, {"folder": "/no/such/folder/xyz"})
     assert ei.value.status_code == 400
 
 
 def test_build_steps_bad_backend_raises(env, tmp_path):
     with pytest.raises(HTTPException) as ei:
-        server._build_analyze_steps({"folder": str(tmp_path), "backend": "bogus"})
+        _build_steps(env, {"folder": str(tmp_path), "backend": "bogus"})
     assert ei.value.status_code == 400
 
 
 def test_build_steps_emits_two_steps_with_flags(env, tmp_path):
-    steps = server._build_analyze_steps({
+    steps = _build_steps(env, {
         "folder": str(tmp_path), "backend": "para",
         "recurse": True, "faces": True, "face_expr": True,
     })
@@ -61,7 +68,7 @@ def test_build_steps_emits_two_steps_with_flags(env, tmp_path):
 
 
 def test_build_steps_clamps_numeric_knobs(env, tmp_path):
-    audit = dict(server._build_analyze_steps({
+    audit = dict(_build_steps(env, {
         "folder": str(tmp_path), "backend": "para",
         "dup_threshold": 999, "face_min_rel": 2.0,
     }))["photo_audit"]
@@ -72,6 +79,6 @@ def test_build_steps_clamps_numeric_knobs(env, tmp_path):
 
 def test_build_steps_rejects_bad_numeric(env, tmp_path):
     with pytest.raises(HTTPException) as ei:
-        server._build_analyze_steps({
+        _build_steps(env, {
             "folder": str(tmp_path), "backend": "para", "dup_threshold": "abc"})
     assert ei.value.status_code == 400

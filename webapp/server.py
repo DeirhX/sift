@@ -26,7 +26,6 @@ Usage:
 import os
 import sys
 import json
-import time
 import string
 import shutil
 import asyncio
@@ -44,7 +43,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 import photodb
-from photodb import bbox_key, MANUAL_CLUSTER_BASE
+from photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
+
+import analysis
+from analysis import AnalysisJob, build_analyze_steps, REPO_ROOT
+from queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
+                     rows_to_items, grouped_page)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -84,19 +88,6 @@ def _ensure_schema():
     with db() as conn:
         photodb.ensure_schema(conn)
         conn.commit()
-
-
-def _has_fts(conn) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='images_fts'"
-    ).fetchone()
-    return row is not None
-
-
-# Decisions are keyed by content hash, so every query that needs a photo's
-# keep/del state joins on it the same way. One definition so the join key can't
-# drift across the half-dozen queries that use it.
-DEC_ON = "decisions d ON d.hash = i.content_hash"
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -147,12 +138,12 @@ def get_meta():
         # Fixed-domain [0,1] histograms so the slider track shows the value
         # distribution behind each range control.
         histograms = {
-            "combined":  _histogram(conn, "combined"),
-            "sharpness": _histogram(conn, "sharpness"),
-            "aesthetic": _histogram(conn, "COALESCE(para_aesthetic, clip_iqa)"),
+            "combined":  histogram(conn, "combined"),
+            "sharpness": histogram(conn, "sharpness"),
+            "aesthetic": histogram(conn, "COALESCE(para_aesthetic, clip_iqa)"),
         }
         if has_portrait_col:
-            histograms["portrait"] = _histogram(conn, "portrait")
+            histograms["portrait"] = histogram(conn, "portrait")
 
         # Folder facet: every directory that directly holds images, with its
         # direct image count. The sidebar reconstructs the tree (compressing
@@ -178,112 +169,7 @@ def get_meta():
     }
 
 
-def _histogram(conn, expr: str, bins: int = 24) -> list[int]:
-    """Count rows of `expr` into `bins` equal buckets across the [0,1] domain.
-    Values are clamped into [0,1]; NULLs are ignored."""
-    counts = [0] * bins
-    rows = conn.execute(
-        f"SELECT {expr} AS v FROM images WHERE {expr} IS NOT NULL")
-    for r in rows:
-        v = r["v"]
-        if v < 0:
-            v = 0.0
-        elif v > 1:
-            v = 1.0
-        b = int(v * bins)
-        if b >= bins:
-            b = bins - 1
-        counts[b] += 1
-    return counts
-
-
 # ── Faceted image query ───────────────────────────────────────────────────────
-
-SORT_COLUMNS = {
-    "combined":  "i.combined",
-    "sharpness": "i.sharpness",
-    "aesthetic": "COALESCE(i.para_aesthetic, i.clip_iqa)",
-    "portrait":  "i.portrait",
-    "filename":  "i.filename",
-}
-
-
-def _folder_sep(folder: str) -> str:
-    """Path separator embedded in `folder`. Falls back to the server's native
-    separator for degenerate inputs like a bare drive letter ("E:")."""
-    if "\\" in folder:
-        return "\\"
-    if "/" in folder:
-        return "/"
-    return os.sep
-
-
-def _image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
-                 aes_min, aes_max, tags, people, q, decision,
-                 portrait_min=0.0, portrait_max=1.0,
-                 folder=None, folder_recursive=True):
-    """Build the shared image-level WHERE clauses + params used by both
-    /api/images and /api/groups. Clauses reference alias `i` (images) and
-    `d` (decisions LEFT JOIN on content hash)."""
-    where = ["i.combined BETWEEN ? AND ?",
-             "i.sharpness BETWEEN ? AND ?"]
-    params: list = [score_min, score_max, sharp_min, sharp_max]
-
-    # Folder filter: prefix-match the stored path. Recursive matches everything
-    # below `folder`; non-recursive additionally requires no further separator
-    # after the prefix, i.e. the file sits directly in `folder`. Done with
-    # substr/instr (not LIKE) to sidestep LIKE's %/_ wildcard escaping across
-    # both Windows and POSIX separators.
-    if folder:
-        sep = _folder_sep(folder)
-        prefix = folder.rstrip("\\/") + sep
-        plen = len(prefix)
-        where.append("substr(i.path, 1, ?) = ?")
-        params += [plen, prefix]
-        if not folder_recursive:
-            where.append("instr(substr(i.path, ?), ?) = 0")
-            params += [plen + 1, sep]
-
-    # Aesthetic range only constrains rows that have a score.
-    where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
-    params += [aes_min, aes_max]
-
-    # Portrait range only constrains rows that have a portrait score (faces).
-    if portrait_min > 0.0 or portrait_max < 1.0:
-        where.append("(i.portrait IS NOT NULL AND i.portrait BETWEEN ? AND ?)")
-        params += [portrait_min, portrait_max]
-
-    if tags:
-        tag_list = [t for t in tags.split(",") if t]
-        if tag_list:
-            ph = ",".join("?" * len(tag_list))
-            where.append(f"i.id IN (SELECT image_id FROM image_tags WHERE tag IN ({ph}))")
-            params += tag_list
-
-    if people:
-        cids = [int(c) for c in people.split(",") if c.lstrip("-").isdigit()]
-        if cids:
-            ph = ",".join("?" * len(cids))
-            where.append(f"i.id IN (SELECT image_id FROM faces WHERE cluster_id IN ({ph}))")
-            params += cids
-
-    if decision == "keep":
-        where.append("d.decision = 'keep'")
-    elif decision == "del":
-        where.append("d.decision = 'del'")
-    elif decision == "unmarked":
-        where.append("d.decision IS NULL")
-
-    if q:
-        if _has_fts(conn):
-            where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
-            params.append(q)
-        else:
-            where.append("i.caption LIKE ?")
-            params.append(f"%{q}%")
-
-    return where, params
-
 
 @app.get("/api/images")
 def get_images(
@@ -304,7 +190,7 @@ def get_images(
     q:       str | None = None,     # caption text search
 ):
     with db() as conn:
-        where, params = _image_where(
+        where, params = image_where(
             conn, score_min=score_min, score_max=score_max,
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
@@ -342,60 +228,9 @@ def get_images(
             params + [limit, offset],
         ).fetchall()
 
-        items = _rows_to_items(conn, rows)
+        items = rows_to_items(conn, rows)
 
     return {"total": total, "offset": offset, "limit": limit, "items": items}
-
-
-def _rows_to_items(conn, rows) -> list[dict]:
-    """Attach face boxes + tags to a batch of image rows and shape them
-    into the JSON payload used by /api/images and /api/groups."""
-    ids = [r["id"] for r in rows]
-    faces_by_img: dict[int, list] = {i: [] for i in ids}
-    tags_by_img:  dict[int, list] = {i: [] for i in ids}
-    if ids:
-        ph = ",".join("?" * len(ids))
-        for fr in conn.execute(
-            f"""SELECT id, image_id, x1, y1, x2, y2, prob, cluster_id, sharp, expr
-                FROM faces WHERE image_id IN ({ph})""", ids):
-            faces_by_img[fr["image_id"]].append({
-                "id": fr["id"],
-                "bbox": [fr["x1"], fr["y1"], fr["x2"], fr["y2"]],
-                "prob": fr["prob"], "cluster_id": fr["cluster_id"],
-                "sharp": fr["sharp"], "expr": fr["expr"],
-            })
-        for tr in conn.execute(
-            f"SELECT image_id, tag FROM image_tags WHERE image_id IN ({ph})", ids):
-            tags_by_img[tr["image_id"]].append(tr["tag"])
-
-    items = []
-    for r in rows:
-        d = dict(r)
-        items.append({
-            "id": d["id"], "filename": d["filename"], "path": d["path"],
-            "hash": d["content_hash"],
-            "combined": d["combined"], "sharpness": d["sharpness"],
-            "para_aesthetic": d["para_aesthetic"],
-            "para_quality": d["para_quality"],
-            "para_composition": d["para_composition"],
-            "para_light": d["para_light"],
-            "para_color": d["para_color"],
-            "para_dof": d["para_dof"],
-            "para_content": d["para_content"],
-            "clip_iqa": d["clip_iqa"],
-            "dup_group": d["dup_group"],
-            "dup_central": d.get("dup_central"),
-            "scene_group": d.get("scene_group"),
-            "capture_time": d.get("capture_time"),
-            "caption": d["caption"],
-            "imgw": d["imgw"], "imgh": d["imgh"],
-            "face_sharp": d.get("face_sharp"), "face_expr": d.get("face_expr"),
-            "portrait": d.get("portrait"),
-            "decision": d.get("decision"),
-            "faces": faces_by_img.get(d["id"], []),
-            "tags": tags_by_img.get(d["id"], []),
-        })
-    return items
 
 
 # ── Duplicate groups ──────────────────────────────────────────────────────────
@@ -422,63 +257,20 @@ def get_groups(
     member is returned so the full duplicate set stays reviewable."""
     order_sql = "c DESC, dup_group ASC" if order == "size" else "dup_group ASC"
     with db() as conn:
-        where, params = _image_where(
+        where, params = image_where(
             conn, score_min=score_min, score_max=score_max,
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
             tags=tags, people=people, q=q, decision=decision,
             folder=folder, folder_recursive=folder_recursive)
-        where.append("i.dup_group IS NOT NULL")
-        where_sql = " AND ".join(where)
-
-        # dup_groups with at least one member passing the filters
-        qual = (f"SELECT DISTINCT i.dup_group FROM images i "
-                f"LEFT JOIN {DEC_ON} "
-                f"WHERE {where_sql}")
-
-        total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
-
-        grp_rows = conn.execute(
-            f"""SELECT dup_group, COUNT(*) c
-                FROM images WHERE dup_group IN ({qual})
-                GROUP BY dup_group
-                ORDER BY {order_sql}
-                LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
-
-        page_gids = [gr["dup_group"] for gr in grp_rows]
-
-        # Which member ids on this page actually pass the filters — so the UI
-        # can show the full group but flag the members outside the filter.
-        match_ids: set[int] = set()
-        if page_gids:
-            gph = ",".join("?" * len(page_gids))
-            match_sql = (f"SELECT i.id FROM images i "
-                         f"LEFT JOIN {DEC_ON} "
-                         f"WHERE {where_sql} AND i.dup_group IN ({gph})")
-            match_ids = {r[0] for r in conn.execute(match_sql, params + page_gids)}
-
-        groups = []
-        for gr in grp_rows:
-            gid = gr["dup_group"]
-            members = conn.execute(
-                f"""SELECT i.*, d.decision
-                   FROM images i
-                   LEFT JOIN {DEC_ON}
-                   WHERE i.dup_group = ?
-                   ORDER BY i.combined DESC, i.id ASC""",
-                (gid,),
-            ).fetchall()
-            items = _rows_to_items(conn, members)
-            n_match = 0
-            for it in items:
-                it["matches"] = it["id"] in match_ids
-                n_match += it["matches"]
-            groups.append({"dup_group": gid, "count": len(items),
-                           "match_count": n_match, "items": items})
-
+        total, page = grouped_page(conn, "dup_group", where, params,
+                                   order_sql, offset, limit)
+        groups = [
+            {"dup_group": gr["dup_group"], "count": len(items),
+             "match_count": sum(it["matches"] for it in items), "items": items}
+            for gr, items in page
+        ]
     return {"total": total, "offset": offset, "limit": limit, "groups": groups}
 
 
@@ -513,67 +305,25 @@ def get_scenes(
         order_sql = "tmin ASC, scene_group ASC"
 
     with db() as conn:
-        where, params = _image_where(
+        where, params = image_where(
             conn, score_min=score_min, score_max=score_max,
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
             tags=tags, people=people, q=q, decision=decision,
             folder=folder, folder_recursive=folder_recursive)
-        where.append("i.scene_group IS NOT NULL")
-        where_sql = " AND ".join(where)
-
-        # scenes with at least one member passing the filters
-        qual = (f"SELECT DISTINCT i.scene_group FROM images i "
-                f"LEFT JOIN {DEC_ON} "
-                f"WHERE {where_sql}")
-
-        total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
-
-        scene_rows = conn.execute(
-            f"""SELECT scene_group, COUNT(*) c,
-                       MIN(capture_time) tmin, MAX(capture_time) tmax
-                FROM images WHERE scene_group IN ({qual})
-                GROUP BY scene_group
-                ORDER BY {order_sql}
-                LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
-
-        page_sids = [sr["scene_group"] for sr in scene_rows]
-
-        match_ids: set[int] = set()
-        if page_sids:
-            sph = ",".join("?" * len(page_sids))
-            match_sql = (f"SELECT i.id FROM images i "
-                         f"LEFT JOIN {DEC_ON} "
-                         f"WHERE {where_sql} AND i.scene_group IN ({sph})")
-            match_ids = {r[0] for r in conn.execute(match_sql, params + page_sids)}
-
-        scenes = []
-        for sr in scene_rows:
-            sid = sr["scene_group"]
-            members = conn.execute(
-                f"""SELECT i.*, d.decision
-                   FROM images i
-                   LEFT JOIN {DEC_ON}
-                   WHERE i.scene_group = ?
-                   ORDER BY i.combined DESC, i.id ASC""",
-                (sid,),
-            ).fetchall()
-            items = _rows_to_items(conn, members)
-            n_match = 0
-            for it in items:
-                it["matches"] = it["id"] in match_ids
-                n_match += it["matches"]
-            # how many distinct near-dup sets this scene contains
-            n_dup_sets = len({it["dup_group"] for it in items
-                              if it["dup_group"] is not None})
-            scenes.append({"scene_group": sid, "count": len(items),
-                           "match_count": n_match, "dup_sets": n_dup_sets,
-                           "time_start": sr["tmin"], "time_end": sr["tmax"],
-                           "items": items})
-
+        total, page = grouped_page(
+            conn, "scene_group", where, params, order_sql, offset, limit,
+            agg_extra=", MIN(capture_time) tmin, MAX(capture_time) tmax")
+        scenes = [
+            {"scene_group": gr["scene_group"], "count": len(items),
+             "match_count": sum(it["matches"] for it in items),
+             # how many distinct near-dup sets this scene contains
+             "dup_sets": len({it["dup_group"] for it in items
+                              if it["dup_group"] is not None}),
+             "time_start": gr["tmin"], "time_end": gr["tmax"], "items": items}
+            for gr, items in page
+        ]
     return {"total": total, "offset": offset, "limit": limit, "scenes": scenes}
 
 
@@ -894,6 +644,28 @@ def _record_override(conn, hash_, bbox, action, cluster_id=None):
         "VALUES (?,?,?,?)", (hash_, bbox, action, cluster_id))
 
 
+def _reanchor_cluster(conn, cid: int) -> None:
+    """Re-pin a cluster's current name across all of its faces. Called after
+    membership changes (merge/assign) so the name follows the cluster on a
+    rebuild and stale source-cluster anchors on moved faces are cleared."""
+    row = conn.execute("SELECT name FROM clusters WHERE cluster_id=?", (cid,)).fetchone()
+    photodb.set_cluster_name_anchors(conn, cid, row[0] if row else None)
+
+
+def _reaggregate_faces(conn, image_id) -> None:
+    """Recompute an image's face count + portrait fields from its current faces.
+    Mirrors build_db's override-replay recompute via the same
+    largest_face_aggregate, so an API face edit and a fresh ingest can't disagree
+    on n_faces/face_sharp/face_expr/portrait."""
+    rows = conn.execute(
+        "SELECT x1, y1, x2, y2, sharp, expr FROM faces WHERE image_id=?",
+        (image_id,)).fetchall()
+    n, fs, fe, portrait = largest_face_aggregate(rows)
+    conn.execute(
+        "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
+        (n, fs, fe, portrait, image_id))
+
+
 @app.post("/api/clusters/merge")
 def merge_clusters(payload: dict = Body(...)):
     """Reassign every face of the `from` cluster(s) into `into`, then drop the
@@ -928,9 +700,7 @@ def merge_clusters(payload: dict = Body(...)):
         # Re-anchor the destination to its current name across all of its faces
         # (now including the moved ones); this also clears the moved faces' old
         # source-cluster anchors so a stale name can't resurface on rebuild.
-        into_name = conn.execute(
-            "SELECT name FROM clusters WHERE cluster_id=?", (into,)).fetchone()
-        photodb.set_cluster_name_anchors(conn, into, into_name[0] if into_name else None)
+        _reanchor_cluster(conn, into)
         conn.commit()
     return {"ok": True, "moved": moved}
 
@@ -967,9 +737,7 @@ def assign_face(face_id: int, payload: dict = Body(...)):
         _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                          "assign", target)
         # Keep the target's name anchors in step with its new membership.
-        tgt_name = conn.execute(
-            "SELECT name FROM clusters WHERE cluster_id=?", (target,)).fetchone()
-        photodb.set_cluster_name_anchors(conn, target, tgt_name[0] if tgt_name else None)
+        _reanchor_cluster(conn, target)
         conn.commit()
     return {"ok": True, "cluster_id": target}
 
@@ -983,8 +751,7 @@ def delete_face(face_id: int):
         if not r:
             raise HTTPException(404, "face not found")
         conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
-        conn.execute("UPDATE images SET n_faces = MAX(0, n_faces - 1) WHERE id=?",
-                     (r["img"],))
+        _reaggregate_faces(conn, r["img"])
         _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
                          "delete")
         conn.commit()
@@ -1160,192 +927,10 @@ def undo_apply():
 # argv from a fixed set of known flags — only the target folder is free text,
 # and it's validated to be an existing directory. No raw commands.
 
-AUDIT_SCRIPT = Path(__file__).resolve().parent.parent / "photo_audit.py"
-BUILD_SCRIPT = Path(__file__).resolve().parent / "build_db.py"
-REPO_ROOT    = AUDIT_SCRIPT.parent
-
-_BACKENDS = {"para", "clip-iqa", "both"}
-
-
-class AnalysisJob:
-    """Runs an ordered list of (label, argv) steps in a background thread,
-    capturing output as committed lines (split on \\n) plus a single live
-    'partial' line that tqdm's \\r progress updates overwrite in place."""
-
-    def __init__(self, steps: list[tuple[str, list[str]]], cwd: Path):
-        self.steps = steps
-        self.cwd = str(cwd)
-        self.lines: list[str] = []      # committed (newline-terminated) lines
-        self.partial: str = ""          # current in-progress line (\r updates)
-        self.state = "running"          # running | done | failed | cancelled
-        self.exit_code: int | None = None
-        self.started = time.time()
-        self.ended: float | None = None
-        self._proc: subprocess.Popen | None = None
-        self._cancel = False
-        self._cond = threading.Condition()
-
-    # ── output buffer (thread-safe) ──
-    def _commit(self, text: str):
-        with self._cond:
-            self.lines.append(text)
-            self.partial = ""
-            self._cond.notify_all()
-
-    def _set_partial(self, text: str):
-        with self._cond:
-            self.partial = text
-            self._cond.notify_all()
-
-    def _finish(self, state: str, code: int | None):
-        with self._cond:
-            self.state = state
-            self.exit_code = code
-            self.ended = time.time()
-            self._cond.notify_all()
-
-    def snapshot(self):
-        with self._cond:
-            return {
-                "state": self.state, "exit_code": self.exit_code,
-                "started": self.started, "ended": self.ended,
-                "commands": [" ".join(_shell_quote(a) for a in argv)
-                             for _, argv in self.steps],
-            }
-
-    def cancel(self):
-        self._cancel = True
-        p = self._proc
-        if p and p.poll() is None:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-
-    def run(self):
-        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-        for label, argv in self.steps:
-            if self._cancel:
-                self._finish("cancelled", None)
-                return
-            self._commit(f"$ {' '.join(_shell_quote(a) for a in argv)}")
-            try:
-                self._proc = subprocess.Popen(
-                    argv, cwd=self.cwd, env=env,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            except Exception as e:
-                self._commit(f"[error] failed to launch {label}: {e}")
-                self._finish("failed", -1)
-                return
-            self._pump(self._proc.stdout)
-            code = self._proc.wait()
-            self._commit(f"[{label} exited with code {code}]")
-            if self._cancel:
-                self._finish("cancelled", code)
-                return
-            if code != 0:
-                self._finish("failed", code)
-                return
-        self._finish("done", 0)
-
-    def _pump(self, stream):
-        """Read raw bytes, splitting into lines. A lone \\r is a tqdm progress
-        update (overwrites the live 'partial' line); \\r\\n and \\n commit a line.
-        Distinguishing the two matters on Windows, where child stdout turns every
-        '\\n' print into '\\r\\n' — naive \\r handling would blank every line."""
-        buf = bytearray()
-        pending_cr = False
-        while True:
-            chunk = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
-            if not chunk:
-                break
-            for b in chunk:
-                if pending_cr:
-                    pending_cr = False
-                    if b == 0x0A:            # \r\n → one committed line
-                        self._commit(buf.decode("utf-8", "replace"))
-                        buf = bytearray()
-                        continue
-                    # lone \r → progress update; show buf, then handle b below
-                    self._set_partial(buf.decode("utf-8", "replace"))
-                    buf = bytearray()
-                if b == 0x0D:                # \r → defer (could be \r\n)
-                    pending_cr = True
-                elif b == 0x0A:              # bare \n → commit
-                    self._commit(buf.decode("utf-8", "replace"))
-                    buf = bytearray()
-                else:
-                    buf.append(b)
-        if pending_cr or buf:
-            self._commit(buf.decode("utf-8", "replace"))
-
-
-def _shell_quote(s: str) -> str:
-    s = str(s)
-    return f'"{s}"' if (" " in s or "!" in s) else s
-
-
+# The job runner (AnalysisJob) and the payload→argv translation
+# (build_analyze_steps) live in analysis.py; the routes below own the
+# single-job lifecycle and the SSE stream.
 CURRENT_JOB: AnalysisJob | None = None
-
-
-def _build_analyze_steps(payload: dict) -> list[tuple[str, list[str]]]:
-    """Translate the UI payload into argv for photo_audit + build_db. Only
-    known flags are emitted; the folder is validated. Raises HTTPException."""
-    folder = (payload.get("folder") or "").strip()
-    if not folder:
-        with db() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-            folder = row["value"] if row else ""
-    fpath = Path(folder)
-    if not folder or not fpath.is_dir():
-        raise HTTPException(400, f"folder not found: {folder!r}")
-
-    report_path = DB_PATH.parent / "audit_report.json"
-    py = sys.executable
-
-    audit = [py, str(AUDIT_SCRIPT), str(fpath), "--out", str(report_path)]
-    if payload.get("recurse"):
-        audit.append("--recurse")
-    if payload.get("no_clip"):
-        audit.append("--no-clip")
-    else:
-        backend = payload.get("backend", "para")
-        if backend not in _BACKENDS:
-            raise HTTPException(400, f"bad backend: {backend!r}")
-        audit += ["--backend", backend]
-    if payload.get("caption"):
-        audit.append("--caption")
-    if payload.get("faces"):
-        audit.append("--faces")
-        if payload.get("face_expr"):
-            audit.append("--face-expr")
-    if payload.get("no_cache"):
-        audit.append("--no-cache")
-    if payload.get("no_scenes"):
-        audit.append("--no-scenes")
-
-    # Numeric knobs — parsed/clamped, never passed through verbatim.
-    def _num(key, flag, lo, hi, cast):
-        v = payload.get(key)
-        if v is None or v == "":
-            return
-        try:
-            v = cast(v)
-        except (TypeError, ValueError):
-            raise HTTPException(400, f"bad {key}: {v!r}")
-        audit.extend([flag, str(max(lo, min(hi, v)))])
-
-    _num("dup_threshold", "--dup-threshold", 0, 64, int)
-    _num("face_min_rel", "--face-min-rel", 0.0, 1.0, float)
-    _num("face_eps", "--face-eps", 0.05, 1.5, float)
-    _num("scene_time_gap", "--scene-time-gap", 1, 1440, float)
-    _num("scene_sim", "--scene-sim", 0.0, 1.0, float)
-
-    build = [py, str(BUILD_SCRIPT), str(report_path),
-             "--db", str(DB_PATH), "--thumbs", str(THUMB_DIR)]
-
-    # scope=both (confirmed): audit then rebuild the DB the server is serving.
-    return [("photo_audit", audit), ("build_db", build)]
 
 
 @app.post("/api/analyze")
@@ -1353,7 +938,8 @@ def start_analyze(payload: dict = Body(...)):
     global CURRENT_JOB
     if CURRENT_JOB and CURRENT_JOB.state == "running":
         raise HTTPException(409, "an analysis is already running")
-    steps = _build_analyze_steps(payload)
+    steps = build_analyze_steps(payload, db_path=DB_PATH, thumb_dir=THUMB_DIR,
+                                db_factory=db)
     CURRENT_JOB = AnalysisJob(steps, cwd=REPO_ROOT)
     threading.Thread(target=CURRENT_JOB.run, daemon=True).start()
     return {"ok": True, **CURRENT_JOB.snapshot()}

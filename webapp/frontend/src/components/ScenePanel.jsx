@@ -8,7 +8,7 @@ import GroupReview from './GroupReview.jsx'
 // near-dups" action. The whole-scene "keep best · delete rest" is intentionally
 // hidden, since a scene's members aren't all duplicates of each other.
 export default function ScenePanel({
-  scene, selId, zoom, onSelect, onZoom, onClose, onDecision, onDecisionsBulk, personName,
+  scene, selId, zoom, onSelect, onZoom, onClose, onDecision, onDecisionsBulk,
 }) {
   const when = fmtTimeRange(scene.time_start, scene.time_end)
   return (
@@ -25,7 +25,6 @@ export default function ScenePanel({
       onClose={onClose}
       onDecision={onDecision}
       onDecisionsBulk={onDecisionsBulk}
-      personName={personName}
     />
   )
 }
