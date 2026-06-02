@@ -65,6 +65,29 @@ def test_phash_fallback_when_no_embeddings():
     assert n == 1
 
 
+def test_compute_phashes_honours_exif_orientation(tmp_path):
+    """A portrait frame carries its rotation in the EXIF Orientation tag, not the
+    pixels. compute_phashes must hash the upright image (else a portrait reads as
+    a 90°-rotated stranger and never dedups against a landscape reframe)."""
+    imagehash = pytest.importorskip("imagehash")
+    from PIL import Image, ImageDraw, ImageOps
+
+    # Asymmetric content so orientation actually changes the hash.
+    img = Image.new("RGB", (320, 240), "black")
+    ImageDraw.Draw(img).rectangle([0, 0, 140, 70], fill="white")
+    exif = img.getexif()
+    exif[0x0112] = 6  # Orientation: rotate 90° CW on display
+    path = tmp_path / "portrait.jpg"
+    img.save(path, "JPEG", exif=exif)
+
+    hashes, _ = photo_audit.compute_phashes([path])
+    upright = imagehash.phash(ImageOps.exif_transpose(Image.open(path)))
+    raw = imagehash.phash(Image.open(path))
+
+    assert hashes[path] == upright          # hashed the displayed orientation
+    assert (hashes[path] - raw) > 0         # and the tag genuinely changed it
+
+
 def test_time_order_is_used_not_input_order():
     # Input order is reversed vs capture order; segmentation must sort by time.
     p = _paths("late.jpg", "early.jpg", "mid.jpg")

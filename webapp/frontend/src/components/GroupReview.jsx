@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { thumbUrl, fullUrl } from '../api.js'
 import { fmt, aestheticScore, groupByDup, repFirst } from '../format.js'
 import Lightbox from './Lightbox.jsx'
@@ -114,6 +114,15 @@ export default function GroupReview({
     return () => window.removeEventListener('keydown', onKey)
   }, [full, view, sel, onClose, onDecision])
 
+  // Follow the selection: when arrow keys move it past the rendered edge of the
+  // strip, scroll the active member back into view (horizontal only, no page
+  // jump). Re-runs on layout changes (group/expand) since the tile moves too.
+  const stripRef = useRef(null)
+  useEffect(() => {
+    stripRef.current?.querySelector('.active')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  }, [sel, grouped, expanded])
+
   const cur = view[sel] ?? view[0]
   const aes = aestheticScore(cur)
 
@@ -181,23 +190,30 @@ export default function GroupReview({
   }
 
   // A collapsed near-dup set: a stacked card showing its medoid and a ×N count.
-  // Clicking it selects the medoid and expands the set inline so its members
-  // appear — drilling into one group without leaving the scene.
+  // Clicking the card just previews the medoid (no surprise reflow); the `+`
+  // expander to its left opens the set inline — mirroring the `–` collapser at
+  // the end of an expanded cluster, so expand/collapse are symmetric affordances.
   const renderGroupTile = (s) => {
     const rep = s.items[0]
     const repIdx = idIndex.get(rep.id)
     const anyDecided = s.items.some((it) => it.decision)
     return (
-      <button
-        key={'tile-' + s.dup_group}
-        className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
-        onClick={() => { selectIdx(repIdx); toggleExpand(s.dup_group) }}
-        title={`near-duplicate set · ${s.items.length} photos · click to expand`}
-      >
-        <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
-        <span className="strip-count">×{s.items.length}</span>
-        {anyDecided && <span className="strip-grouptile-decided" />}
-      </button>
+      <div className="strip-collapsed" key={'tile-' + s.dup_group}>
+        <button
+          className="strip-expand"
+          onClick={() => toggleExpand(s.dup_group)}
+          title={`Expand near-duplicate set (${s.items.length} photos)`}
+        >+</button>
+        <button
+          className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
+          onClick={() => selectIdx(repIdx)}
+          title={`near-duplicate set · ${s.items.length} photos · click to preview, + to expand`}
+        >
+          <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
+          <span className="strip-count">×{s.items.length}</span>
+          {anyDecided && <span className="strip-grouptile-decided" />}
+        </button>
+      </div>
     )
   }
 
@@ -238,7 +254,7 @@ export default function GroupReview({
 
         {/* Filmstrip — flat by default; "Group dups" collapses each near-dup
             set into a stacked tile that expands inline on click. */}
-        <div className="review-strip">
+        <div className="review-strip" ref={stripRef}>
           {canGroup && grouped ? (
             <>
               {sets.map((s) => (

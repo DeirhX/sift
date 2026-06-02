@@ -5,7 +5,7 @@ loop and the OpenCLIP ViT-B/32 helpers that the scoring, grouping and face
 modules all build on. No intra-package dependencies.
 """
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 
 
@@ -14,13 +14,20 @@ def iter_image_batches(paths, preprocess, device, batch_size, desc):
     mapping it through `preprocess` (PIL.Image -> tensor). Images that fail to
     open/preprocess are skipped with a warning; empty batches are dropped. This
     is the one place the open/convert/skip/stack/tqdm boilerplate lives, shared
-    by every CLIP-style batch encoder below."""
+    by every CLIP-style batch encoder below.
+
+    EXIF orientation is applied (``exif_transpose``) so the models see each image
+    upright, exactly as the viewer displays it. This matters a lot: a portrait
+    frame (EXIF orient 6/8) left as raw sensor pixels is effectively rotated 90°,
+    which collapses its CLIP cosine to a differently-oriented frame of the same
+    scene (measured 0.74 raw vs 0.97 upright) and skews the aesthetic/quality
+    scorers that were trained on upright photos."""
     import torch
     for i in tqdm(range(0, len(paths), batch_size), desc=desc):
         tensors, bpaths = [], []
         for p in paths[i:i + batch_size]:
             try:
-                tensors.append(preprocess(Image.open(p).convert("RGB")))
+                tensors.append(preprocess(ImageOps.exif_transpose(Image.open(p)).convert("RGB")))
                 bpaths.append(p)
             except Exception as e:
                 print(f"  skip {getattr(p, 'name', p)}: {e}")

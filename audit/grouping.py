@@ -7,7 +7,7 @@ scene grouping that the duplicate groups nest inside.
 from datetime import datetime
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
 
 from .clip_common import iter_image_batches, load_openclip_b32
@@ -18,7 +18,12 @@ from .clip_common import iter_image_batches, load_openclip_b32
 def compute_phashes(paths: list) -> tuple[dict, dict]:
     """Returns (hashes, sizes). Sizes are raw (pre-EXIF-transpose) (w, h),
     matching the coordinate space the face detector uses for its bboxes, so
-    the frontend can scale face overlays and lay out aspect-correct tiles."""
+    the frontend can scale face overlays and lay out aspect-correct tiles.
+
+    The hash itself is taken on the EXIF-corrected (upright) image, so an
+    orientation-variant re-save matches its sibling instead of reading as a
+    90°-rotated stranger. `sizes` stays raw on purpose — it's a coordinate
+    contract with the face overlays, a separate concern from visual similarity."""
     import imagehash
     hashes: dict = {}
     sizes:  dict = {}
@@ -26,7 +31,7 @@ def compute_phashes(paths: list) -> tuple[dict, dict]:
         try:
             im = Image.open(p)
             sizes[p] = im.size
-            hashes[p] = imagehash.phash(im)
+            hashes[p] = imagehash.phash(ImageOps.exif_transpose(im))
         except Exception as e:
             print(f"  hash error {p.name}: {e}")
     return hashes, sizes
