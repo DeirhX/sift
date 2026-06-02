@@ -49,6 +49,11 @@ from sift.web import analysis
 from sift.web.analysis import AnalysisJob, build_analyze_steps, REPO_ROOT
 from sift.web.queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
+from sift.web.schemas import (
+    MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
+    LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
+    MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
+    ApplyResponse, UndoResponse, AnalyzeStatus)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -92,7 +97,7 @@ def _ensure_schema():
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
 
-@app.get("/api/meta")
+@app.get("/api/meta", response_model=MetaResponse)
 def get_meta():
     with db() as conn:
         meta = {k: v for k, v in conn.execute("SELECT key, value FROM meta")}
@@ -171,7 +176,7 @@ def get_meta():
 
 # ── Faceted image query ───────────────────────────────────────────────────────
 
-@app.get("/api/images")
+@app.get("/api/images", response_model=ImagesResponse)
 def get_images(
     offset: int = 0,
     limit:  int = Query(60, le=300),
@@ -235,7 +240,7 @@ def get_images(
 
 # ── Duplicate groups ──────────────────────────────────────────────────────────
 
-@app.get("/api/groups")
+@app.get("/api/groups", response_model=GroupsResponse)
 def get_groups(
     offset: int = 0,
     limit:  int = Query(40, le=200),
@@ -276,7 +281,7 @@ def get_groups(
 
 # ── Scenes (rough hierarchy: scene -> nested near-dup sets) ────────────────────
 
-@app.get("/api/scenes")
+@app.get("/api/scenes", response_model=ScenesResponse)
 def get_scenes(
     offset: int = 0,
     limit:  int = Query(40, le=200),
@@ -354,7 +359,7 @@ def serve_full(image_id: int):
     return FileResponse(path)
 
 
-@app.get("/api/images/{image_id}/locations")
+@app.get("/api/images/{image_id}/locations", response_model=LocationsResponse)
 def image_locations(image_id: int):
     """Every path holding the exact same file bytes (matched on content_hash) as
     this image. Lets the UI surface 'this file also lives at N other locations'
@@ -457,7 +462,7 @@ def _reveal_in_os(target: Path) -> None:
         subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
 
 
-@app.post("/api/reveal")
+@app.post("/api/reveal", response_model=OkResponse)
 def reveal_path(payload: dict = Body(...)):
     """Open a path in the OS file manager. Bounded to the configured photo
     root(s) (see --photo-root / meta.folder): the target must be a root or sit
@@ -487,12 +492,12 @@ def _roots_payload():
     return {"photo_roots": PHOTO_ROOT_DIRS}
 
 
-@app.get("/api/settings/roots")
+@app.get("/api/settings/roots", response_model=RootsResponse)
 def get_roots():
     return _roots_payload()
 
 
-@app.post("/api/settings/roots")
+@app.post("/api/settings/roots", response_model=RootsResponse)
 def add_root(payload: dict = Body(...)):
     """Add a directory to the configured photo roots. Validates it exists and is
     a directory, stores its resolved absolute path, and de-dupes case-insensitively."""
@@ -518,7 +523,7 @@ def add_root(payload: dict = Body(...)):
     return _roots_payload()
 
 
-@app.delete("/api/settings/roots")
+@app.delete("/api/settings/roots", response_model=RootsResponse)
 def delete_root(payload: dict = Body(...)):
     """Remove a configured photo root by its stored path."""
     raw = (payload.get("path") or "").strip()
@@ -552,7 +557,7 @@ def _list_drives() -> list[str]:
     return [f"{c}:\\" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")]
 
 
-@app.get("/api/fs/complete")
+@app.get("/api/fs/complete", response_model=FsCompleteResponse)
 def fs_complete(q: str = Query("")):
     """Directory autocomplete for the settings folder field. Given a partial
     path, return matching child directories (full paths). If the query ends in a
@@ -595,7 +600,7 @@ def fs_complete(q: str = Query("")):
 
 # ── Decisions (keep / delete) ─────────────────────────────────────────────────
 
-@app.post("/api/decisions")
+@app.post("/api/decisions", response_model=OkResponse)
 def set_decision(payload: dict = Body(...)):
     h = payload.get("hash")
     decision = payload.get("decision")    # 'keep' | 'del' | None
@@ -620,7 +625,7 @@ def set_decision(payload: dict = Body(...)):
 
 # ── Cluster names ─────────────────────────────────────────────────────────────
 
-@app.post("/api/clusters")
+@app.post("/api/clusters", response_model=OkResponse)
 def rename_cluster(payload: dict = Body(...)):
     cid = payload.get("cluster_id")
     name = payload.get("name")
@@ -666,7 +671,7 @@ def _reaggregate_faces(conn, image_id) -> None:
         (n, fs, fe, portrait, image_id))
 
 
-@app.post("/api/clusters/merge")
+@app.post("/api/clusters/merge", response_model=MergeResponse)
 def merge_clusters(payload: dict = Body(...)):
     """Reassign every face of the `from` cluster(s) into `into`, then drop the
     now-empty source cluster name rows. Pure DB edit — no re-embedding. Each
@@ -713,7 +718,7 @@ def _face_key(conn, face_id):
     return r
 
 
-@app.post("/api/faces/{face_id}/assign")
+@app.post("/api/faces/{face_id}/assign", response_model=AssignFaceResponse)
 def assign_face(face_id: int, payload: dict = Body(...)):
     """Move one face box to a different person. Either pass an existing
     `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
@@ -742,7 +747,7 @@ def assign_face(face_id: int, payload: dict = Body(...)):
     return {"ok": True, "cluster_id": target}
 
 
-@app.delete("/api/faces/{face_id}")
+@app.delete("/api/faces/{face_id}", response_model=OkResponse)
 def delete_face(face_id: int):
     """Drop a false-positive face box, decrement the image's face count, and
     record a persistent override so it stays deleted across re-ingest."""
@@ -781,7 +786,7 @@ def export_decisions():
 
 # ── Bulk auto-cull duplicate groups ───────────────────────────────────────────
 
-@app.post("/api/groups/autocull")
+@app.post("/api/groups/autocull", response_model=AutocullResponse)
 def autocull_groups():
     """For every duplicate group, mark the best-scoring photo 'keep' and the
     rest 'del'. Overwrites existing marks within groups. Marks only — files
@@ -838,7 +843,7 @@ def _rejected_dir(conn) -> Path:
     return Path(root["value"]) / "_rejected"
 
 
-@app.get("/api/apply/status")
+@app.get("/api/apply/status", response_model=ApplyStatusResponse)
 def apply_status():
     with db() as conn:
         _ensure_moves_table(conn)
@@ -856,7 +861,7 @@ def apply_status():
     return {"pending": pending, "applied": applied, "rejected_dir": rej_str}
 
 
-@app.post("/api/apply")
+@app.post("/api/apply", response_model=ApplyResponse)
 def apply_decisions():
     """Move every 'del'-marked file into <library>/_rejected/. Updates each
     image's stored path and logs the move so it can be undone. Never deletes."""
@@ -892,7 +897,7 @@ def apply_decisions():
     return {"moved": moved, "skipped": skipped, "rejected_dir": rej_str}
 
 
-@app.post("/api/apply/undo")
+@app.post("/api/apply/undo", response_model=UndoResponse)
 def undo_apply():
     """Move every logged file back to its original location and clear the log."""
     restored, skipped = 0, 0
@@ -933,7 +938,7 @@ def undo_apply():
 CURRENT_JOB: AnalysisJob | None = None
 
 
-@app.post("/api/analyze")
+@app.post("/api/analyze", response_model=AnalyzeStatus, response_model_exclude_unset=True)
 def start_analyze(payload: dict = Body(...)):
     global CURRENT_JOB
     if CURRENT_JOB and CURRENT_JOB.state == "running":
@@ -945,14 +950,14 @@ def start_analyze(payload: dict = Body(...)):
     return {"ok": True, **CURRENT_JOB.snapshot()}
 
 
-@app.get("/api/analyze/status")
+@app.get("/api/analyze/status", response_model=AnalyzeStatus, response_model_exclude_unset=True)
 def analyze_status():
     if not CURRENT_JOB:
         return {"state": "idle", "commands": []}
     return CURRENT_JOB.snapshot()
 
 
-@app.post("/api/analyze/cancel")
+@app.post("/api/analyze/cancel", response_model=OkResponse)
 def analyze_cancel():
     if not CURRENT_JOB or CURRENT_JOB.state != "running":
         raise HTTPException(409, "no analysis running")

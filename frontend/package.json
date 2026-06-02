@@ -1,12 +1,14 @@
 {
-  "name": "photo-audit-frontend",
+  "name": "sift-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "codegen": "python -m sift.web.openapi_schema > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vite build && playwright test",
@@ -22,8 +24,13 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
+    "@types/node": "^25.9.1",
+    "@types/react": "^18.3.30",
+    "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.3.4",
     "jsdom": "^29.1.1",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "~5.9",
     "vite": "^6.0.0",
     "vitest": "^4.1.7"
   }
