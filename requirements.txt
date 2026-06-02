@@ -1,48 +1,14 @@
-# PhotoOrganizer Python dependencies.
+# Dependencies now live in pyproject.toml. Install the package (editable) with
+# the extras you need instead of this file:
 #
-# Versions are intentionally unpinned (this repo had no lockfile and no
-# captured environment). Pin these to whatever you actually install if you
-# want reproducible runs:  pip freeze > requirements.lock.txt
+#   pip install -e .            # core: classical analysis + ingest + web server
+#   pip install -e ".[ml]"      # + the multi-GB ML scoring/caption/face stack
+#   pip install -e ".[dev]"     # + the test suite (pytest, httpx)
+#   pip install -e ".[ml,dev]"  # everything
 #
-# Install:  pip install -r requirements.txt
-# A CUDA build of torch is strongly recommended for the ML scoring path;
-# see https://pytorch.org/get-started/locally/ for the right index URL.
-
-# ── Core: analysis + indexing + web server (always needed) ──────────────────
-numpy
-pillow
-tqdm
-opencv-python
-imagehash
-scikit-learn
-fastapi
-uvicorn[standard]
-
-# ── ML scoring: aesthetic (PARA / CLIP-IQA), captions, tags ─────────────────
-# Heavy. Pulls multi-GB model weights on first run.
-# transformers must be recent enough to ship Qwen3VLForConditionalGeneration
-# (the keyword tagger); >=4.57 is known good.
-torch
-transformers>=4.57
-open_clip_torch
-huggingface_hub
-
-# Keyword tagging runs Qwen3-VL-8B-Instruct in 4-bit NF4 (~6 GB VRAM). bnb does
-# the quantization; accelerate handles the device placement. Both are CUDA-only
-# for the 4-bit path — on CPU the tagger falls back to full precision (slow).
-bitsandbytes
-accelerate
-
-# ── Optional: face detection + clustering (--faces) ─────────────────────────
-# Comment this out if you never use the face features; it drags in an older
-# torch-dependent stack.
-facenet-pytorch
-
-# ── Dev: test suite (pytest -q) ─────────────────────────────────────────────
-# httpx backs FastAPI's TestClient. Not needed at runtime.
-# pytest-xdist is optional: `pytest -n auto` parallelises the model-free suite
-# (~20% faster). Do NOT combine `-n` with `--run-ml` — the ML efficacy tests
-# share one GPU and would contend/OOM. See ARCHITECTURE.md "Tests".
-pytest
-pytest-xdist
-httpx
+# A CUDA build of torch is strongly recommended for the [ml] path; see
+# https://pytorch.org/get-started/locally/ for the right index URL.
+#
+# This file is kept only so `pip install -r requirements.txt` still bootstraps a
+# working install (core + ml + dev). It mirrors pyproject.toml — edit deps there.
+-e .[ml,dev]

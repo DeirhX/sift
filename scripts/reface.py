@@ -26,8 +26,8 @@ Typical iteration workflow:
   python reface.py audit_report.json --face-min-rel 0.03 --face-eps 0.55
 
   # After tuning, rebuild the DB and review in the web app
-  python webapp/build_db.py audit_report.json
-  python webapp/server.py --db photos.db
+  sift index audit_report.json
+  sift serve --db photos.db
 """
 
 import sys
@@ -36,9 +36,7 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
-# Make photo_audit importable regardless of working directory
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from photo_audit import run_faces
+from sift.audit.faces import run_faces
 
 
 def analyse(report: dict) -> None:
@@ -167,8 +165,8 @@ def main() -> None:
     analyse(report)
     print(f"\nNow rebuild the DB and review in the web app:")
     db_out = out_path.parent / "photos.db"
-    print(f"  python webapp/build_db.py \"{out_path}\"")
-    print(f"  python webapp/server.py --db \"{db_out}\"")
+    print(f"  sift index \"{out_path}\"")
+    print(f"  sift serve --db \"{db_out}\"")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 Command-line entry point for the photo audit pipeline.
 
 Usage:
-  python photo_audit.py <folder> [options]
+  sift analyze <folder> [options]
 
 Options:
   --recurse             Include subfolders (default: top-level only)

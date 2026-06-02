@@ -1,17 +1,18 @@
 # Architecture
 
-Developer-facing map of PhotoOrganizer: the modules, how they layer, and the
+Developer-facing map of the `sift` package: the modules, how they layer, and the
 design decisions that aren't obvious from any single file. For install/usage see
 [`README.md`](README.md).
 
 ## The pipeline
 
 Three decoupled stages communicate through files, never through shared process
-state. Each can be run, cached, and tested independently.
+state. Each can be run, cached, and tested independently, and all three are
+reachable through one console command (`sift <stage>`, see `sift/cli.py`).
 
 ```
- photo_audit.py        build_db.py              server.py + React UI
- (analyze)             (index)                  (review)
+ sift analyze          sift index               sift serve + React UI
+ (sift.audit)          (sift.web.build_db)      (sift.web.server)
       │                     │                          │
   scans a folder    reads audit_report.json     serves photos.db over HTTP,
   scores/groups/    → photos.db (SQLite)         mutates decisions/faces,
@@ -20,24 +21,26 @@ state. Each can be run, cached, and tested independently.
       └──► audit_report.json ┘                         └──► <library>/_rejected/
 ```
 
-The split matters: the GPU-heavy analysis (`photo_audit.py`) is a batch CLI job;
-the web server (`webapp/`) only ever touches the SQLite DB and the filesystem and
-loads **no ML models**. Re-analysis from the UI shells out to the CLI as a
-subprocess (see `analysis.py`) rather than importing it.
+The split matters: the GPU-heavy analysis (`sift.audit`) is a batch CLI job; the
+web server (`sift.web`) only ever touches the SQLite DB and the filesystem and
+loads **no ML models**. Re-analysis from the UI shells out to `python -m sift
+analyze` / `index` as a subprocess (see `sift/web/analysis.py`) rather than
+importing the analysis stack. This is also why the dependency extras split
+cleanly: a web-only install (`pip install -e .`) skips the multi-GB `[ml]` stack.
 
 ## Backend modules
 
 | File | Lines | Responsibility |
 |------|------:|----------------|
-| `photo_audit.py` | ~40 | Thin **re-export shim** + CLI entry point over the `audit/` package. Preserves `python photo_audit.py` (the server invokes it by path) and `import photo_audit.<fn>` (tests). |
-| `audit/` | ~1450 | The analysis pipeline, split into focused modules (see below). Writes `audit_report.json`. |
-| `webapp/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. |
-| `webapp/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
-| `webapp/server.py` | ~1040 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), `_rejected/` apply+undo, and the `/api/analyze/*` lifecycle. |
-| `webapp/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→DTO helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. |
-| `webapp/analysis.py` | ~210 | **Reanalysis subsystem.** `AnalysisJob` (background thread running CLI steps, parsing tqdm `\r` progress into a live line + committed lines) and `build_analyze_steps` (UI payload → validated/clamped argv). Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
+| `sift/cli.py` | ~50 | The unified `sift` console entry point. Dispatches `analyze`/`index`/`serve` to the owning module's `main()`, importing each lazily so `sift serve` never drags in the ML stack. |
+| `sift/audit/` | ~1450 | The analysis pipeline, split into focused modules (see below). Writes `audit_report.json`. The package `__init__` re-exports the public surface. |
+| `sift/web/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. (`sift index`) |
+| `sift/web/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
+| `sift/web/server.py` | ~1040 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), `_rejected/` apply+undo, and the `/api/analyze/*` lifecycle. (`sift serve`) |
+| `sift/web/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→DTO helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. |
+| `sift/web/analysis.py` | ~210 | **Reanalysis subsystem.** `AnalysisJob` (background thread running `python -m sift` steps, parsing tqdm `\r` progress into a live line + committed lines) and `build_analyze_steps` (UI payload → validated/clamped argv). Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
 
-### Layering inside `audit/`
+### Layering inside `sift/audit/`
 
 The pipeline is split by stage, lowest layer first. `cli` orchestrates; the
 stage modules don't know about each other except the explicit deps shown.
@@ -53,13 +56,14 @@ clip_common.py  ── shared CLIP / batching primitives (no intra-package deps)
 cli.py  ── arg parsing + main() orchestration; imports scoring/tagging/grouping/faces
 ```
 
-`photo_audit.py` re-exports the public surface of all six modules, so the split
-is invisible to callers; `tests/test_package_smoke.py` asserts the shim stays in
-sync (same objects, no drift). `audit/__init__.py` puts the repo root on
-`sys.path` so `scoring.load_para_scorer` can `import aesthetic_scorer` regardless
-of how the package is reached.
+`sift/audit/__init__.py` re-exports the public surface of all six modules, so the
+split is invisible to callers (`sift.audit.<fn>`); `tests/test_package_smoke.py`
+asserts the package re-exports stay in sync (same objects, no drift). Only the
+light deps (numpy/opencv/PIL/tqdm) are imported at package load; torch /
+transformers / imagehash stay lazy. `scoring.load_para_scorer` imports the model
+head as `sift.audit.aesthetic_scorer` — no `sys.path` manipulation anywhere.
 
-### Layering inside `webapp/`
+### Layering inside `sift/web/`
 
 ```
 server.py  ── routing, config, mutations, file I/O, app wiring
@@ -101,8 +105,8 @@ globals, which is what keeps them testable and reusable.
   (`server._reaggregate_faces`) and the ingest path both go through
   `photodb.largest_face_aggregate`, so they can never produce different
   `portrait`/`face_sharp` values for the same faces.
-- **Incremental everywhere.** Both `photo_audit` (report-as-cache, keyed on
-  mtime+size) and `build_db` (re-hash/re-thumb only changed bytes) avoid redoing
+- **Incremental everywhere.** Both `sift analyze` (report-as-cache, keyed on
+  mtime+size) and `sift index` (re-hash/re-thumb only changed bytes) avoid redoing
   expensive work. Thumbnails are named by content hash.
 - **Constrained subprocess, not eval.** `/api/analyze` never runs arbitrary
   commands. `analysis.build_analyze_steps` emits argv from a fixed flag set; only
@@ -114,7 +118,7 @@ globals, which is what keeps them testable and reusable.
 - **No models in the server.** Keeps the web process light and lets the heavy
   path run/scale separately.
 
-## Frontend (`webapp/frontend/`, React + Vite)
+## Frontend (`frontend/`, React + Vite)
 
 - `App.jsx` — top-level orchestrator: URL-synced filter/view state, data
   fetching (React Query), keyboard navigation.
@@ -145,18 +149,19 @@ Three tiers, by cost and what they exercise:
   model-free and fast (~8s). Covers ingest aggregation, every read endpoint, the
   reveal guardrail + settings/roots + fs autocomplete + idle analyze stream,
   face/cluster mutation + override persistence, the analyze argv builder/guards,
-  and the pure `photo_audit` helpers (`_clean_tags`, `iter_image_batches`,
+  and the pure `sift.audit` helpers (`_clean_tags`, `iter_image_batches`,
   `bipolar_score`, scene/dup grouping, the CLI parser). The web tests drive the
   FastAPI app through a `TestClient` against a synthetic report — no models.
-  `test_package_smoke.py` imports every `audit/` submodule and asserts the
-  `photo_audit` shim re-exports the same objects (guards the split's surface).
+  `test_package_smoke.py` imports every `sift.audit` submodule, asserts the
+  package re-exports the same objects (guards the split's surface), and pins the
+  `sift` CLI dispatcher's routing.
 - **End-to-end pipeline** (`tests/test_e2e_pipeline.py`) — the only test that
-  runs the real `photo_audit.py` CLI as a subprocess (`--no-clip`, so classical
+  runs the real `sift analyze` CLI as a subprocess (`--no-clip`, so classical
   sharpness + phash duplicates, no weights), then ingests its report with
-  `build_db` and asserts through the API. This is the cross-stage seam check;
+  `sift index` and asserts through the API. This is the cross-stage seam check;
   still CI-safe.
 - **ML efficacy** (`tests/ml/`, opt-in) — see below. Skipped by default.
-- **Frontend** (`webapp/frontend`, `npm test`): URL state, API wrappers,
+- **Frontend** (`frontend/`, `npm test`): URL state, API wrappers,
   formatters, and key components.
 
 ### ML efficacy harness (`tests/ml/`)
@@ -188,11 +193,12 @@ re-pays the import. It's kept opt-in rather than default; don't parallelise the
 
 ## Known shape / future work
 
-- The analysis pipeline now lives in the `audit/` package (see *Layering inside
-  `audit/`*), split along stage seams with `photo_audit.py` reduced to a thin
-  re-export shim. The neural function bodies are validated by the opt-in
-  `--run-ml` efficacy tier; the import-smoke test guards the package surface.
-  `styles.css` (~1400 lines) is now the largest single file, frontend-side.
+- The whole backend is one import namespace: `sift.audit` (analysis, see
+  *Layering inside `sift/audit/`*) and `sift.web` (ingest + server), driven by a
+  single `sift` console command. The neural function bodies are validated by the
+  opt-in `--run-ml` efficacy tier; the import-smoke test guards the package
+  surface. `styles.css` (~1400 lines) is now the largest single file,
+  frontend-side.
 - Duplicate grouping is `O(n²)` over image pairs — fine for thousands, slow for
   very large libraries.
 - `server.py` runtime config is still module-level mutable state

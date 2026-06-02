@@ -5,8 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import server
-import analysis
+from sift.web import server, analysis
 
 
 def _build_steps(env, payload):
@@ -61,7 +60,7 @@ def test_build_steps_emits_two_steps_with_flags(env, tmp_path):
         "folder": str(tmp_path), "backend": "para",
         "recurse": True, "faces": True, "face_expr": True,
     })
-    assert [name for name, _ in steps] == ["photo_audit", "build_db"]
+    assert [name for name, _ in steps] == ["analyze", "index"]
     audit = steps[0][1]
     assert "--backend" in audit and "para" in audit
     assert "--recurse" in audit and "--faces" in audit and "--face-expr" in audit
@@ -71,7 +70,7 @@ def test_build_steps_clamps_numeric_knobs(env, tmp_path):
     audit = dict(_build_steps(env, {
         "folder": str(tmp_path), "backend": "para",
         "dup_threshold": 999, "face_min_rel": 2.0,
-    }))["photo_audit"]
+    }))["analyze"]
     # dup_threshold clamps to [0,64]; face_min_rel to [0,1].
     assert audit[audit.index("--dup-threshold") + 1] == "64"
     assert audit[audit.index("--face-min-rel") + 1] == "1.0"

@@ -88,7 +88,7 @@ def load_para_scorer(device: str):
     import torch
     from transformers import CLIPVisionModel, CLIPProcessor
     from huggingface_hub import hf_hub_download
-    from aesthetic_scorer import AestheticScorer
+    from sift.audit.aesthetic_scorer import AestheticScorer
 
     print(f"Loading PARA aesthetic scorer (ViT-B/32) on {device}...")
     model_path = hf_hub_download("rsinema/aesthetic-scorer", "model.pt")

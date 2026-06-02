@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import photo_audit
+from sift import audit as photo_audit
 
 
 # ── normalise_sharpness ──────────────────────────────────────────────────────
@@ -151,10 +151,10 @@ def test_run_caption_and_tags_merges_qwen_tags(monkeypatch, tmp_path):
     monkeypatch.setattr(transformers.BlipProcessor, "from_pretrained", boom)
 
     p = tmp_path / "x.jpg"
-    # run_caption_and_tags lives in audit.tagging and calls that module's
+    # run_caption_and_tags lives in sift.audit.tagging and calls that module's
     # run_qwen_tags by name, so patch it where it's looked up (not the
-    # photo_audit re-export alias, which the orchestrator never consults).
-    monkeypatch.setattr("audit.tagging.run_qwen_tags",
+    # sift.audit re-export alias, which the orchestrator never consults).
+    monkeypatch.setattr("sift.audit.tagging.run_qwen_tags",
                         lambda paths, device, top_k=12: {paths[0]: ["cat", "sofa"]})
 
     res = photo_audit.run_caption_and_tags([p], device="cpu", top_k=12)

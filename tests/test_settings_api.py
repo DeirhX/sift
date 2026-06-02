@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-import server
+from sift.web import server
 
 
 @pytest.fixture()

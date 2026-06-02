@@ -6,21 +6,12 @@ models required. Real image files are only created for the tests that actually
 need bytes on disk (thumbnails, apply/undo file moves, duplicate-location).
 """
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
-WEBAPP = ROOT / "webapp"
-# webapp first so `import server/build_db/photodb` resolve as the scripts do.
-sys.path.insert(0, str(WEBAPP))
-sys.path.insert(0, str(ROOT))
-
-import build_db          # noqa: E402
-import photodb           # noqa: E402
-import server            # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+from sift.web import build_db, photodb, server
+from fastapi.testclient import TestClient
 
 
 # ── Synthetic report ──────────────────────────────────────────────────────────
