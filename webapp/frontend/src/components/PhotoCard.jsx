@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api.js'
-import { fmt, aestheticScore } from '../format.js'
+import { fmt, aestheticScore, qualityColor } from '../format.js'
 import DecisionBadge from './DecisionBadge.jsx'
 import DecideButtons from './DecideButtons.jsx'
 
@@ -16,8 +16,6 @@ import DecideButtons from './DecideButtons.jsx'
 // build_db ingest.
 export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, personName, people = [], onFaceChange }) {
   const aes = aestheticScore(item)
-  const qColor = (v) =>
-    v == null ? 'var(--border)' : `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 58%, 42%)`
   const [editFace, setEditFace] = useState(null)   // index into item.faces
   const [busy, setBusy] = useState(false)
 
@@ -82,7 +80,7 @@ export default function PhotoCard({ item, colWidth, thumbH, onOpen, onDecision, 
 
       <div className="meta">
         <div className="scores">
-          <span className="q-pill" style={{ background: qColor(item.combined) }} title="Composite quality">
+          <span className="q-pill" style={{ background: qualityColor(item.combined) }} title="Composite quality">
             Q {fmt(item.combined)}
           </span>
           <span className="score-sub">Sh <b>{fmt(item.sharpness)}</b></span>

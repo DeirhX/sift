@@ -163,10 +163,6 @@ export default function App() {
   const sceneTotal = scenes.data?.pages[0]?.total ?? 0
 
   const people = meta.data?.clusters ?? []
-  const personName = useCallback((cid) => {
-    const c = people.find((p) => p.cluster_id === cid)
-    return c?.name?.trim() ? c.name : null
-  }, [people])
 
   // Resolve the open overlay's backing record from the loaded query pages. May
   // be null right after a deep-link/reload until the relevant page arrives;
@@ -274,7 +270,6 @@ export default function App() {
         toggleInList={toggleInList}
         resetFilters={resetFilters}
         total={total}
-        view={view}
         onPeopleChange={refetchPeople}
       />
       <div className="main">
@@ -361,7 +356,6 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
-          personName={personName}
         />
       )}
 
@@ -375,7 +369,6 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
-          personName={personName}
         />
       )}
 
