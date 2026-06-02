@@ -1,11 +1,20 @@
 import { thumbUrl } from '../api'
-import { fmtTimeRange } from '../format'
+import { fmtTimeRange, sceneKeywords } from '../format'
 import type { Scene } from '../api/types'
+
+interface ScenePileProps {
+  scene: Scene
+  onOpen: () => void
+  activeTags?: string[]
+  onToggleTag?: (tag: string) => void
+}
 
 // A rough scene shown as a stack: the best photo on top, a couple fanned
 // behind, with the photo count, how many near-duplicate sets it contains, and
-// its capture-time range. Clicking opens the scene panel to drill in.
-export default function ScenePile({ scene, onOpen }: { scene: Scene; onOpen: () => void }) {
+// its capture-time range. Clicking opens the scene panel to drill in. Its most
+// common photo keywords are shown as chips that double as tag-filter toggles
+// (`onToggleTag`), so you can pivot the whole view to a keyword from here.
+export default function ScenePile({ scene, onOpen, activeTags = [], onToggleTag }: ScenePileProps) {
   const items = scene.items
   const top = items[0]
   const behind = items.slice(1, 3)
@@ -16,6 +25,7 @@ export default function ScenePile({ scene, onOpen }: { scene: Scene; onOpen: () 
 
   const when = fmtTimeRange(scene.time_start, scene.time_end)
   const dupSets = scene.dup_sets ?? 0
+  const keywords = sceneKeywords(items, 6)
 
   return (
     <div className="pile scene-pile" onClick={onOpen} title={`Scene of ${items.length} photos`}>
@@ -44,6 +54,21 @@ export default function ScenePile({ scene, onOpen }: { scene: Scene; onOpen: () 
           {undecided > 0 && <span className="cpill left">{undecided} left</span>}
         </div>
       </div>
+      {keywords.length > 0 && (
+        <div className="scene-tags">
+          {keywords.map(({ tag, count }) => (
+            <button
+              key={tag}
+              type="button"
+              className={'scene-tag' + (activeTags.includes(tag) ? ' active' : '')}
+              title={`${count} photo${count > 1 ? 's' : ''} tagged “${tag}” · click to filter`}
+              onClick={(e) => { e.stopPropagation(); onToggleTag?.(tag) }}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

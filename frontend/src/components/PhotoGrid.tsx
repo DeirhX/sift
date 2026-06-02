@@ -173,10 +173,11 @@ export default function PhotoGrid(
       case 'Enter':
         if (focusIdx != null) { e.preventDefault(); onOpen(focusIdx) }
         return
-      case 'k': case 'K':
+      // + (keep) / − (delete) mirror k/d; '=' is the unshifted main-row + key.
+      case 'k': case 'K': case '+': case '=':
         if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'keep') }
         return
-      case 'd': case 'D':
+      case 'd': case 'D': case '-':
         if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'del') }
         return
       default: return

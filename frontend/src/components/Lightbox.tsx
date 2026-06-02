@@ -94,8 +94,8 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
       if (e.key === 'Escape') setIndex(null)
       else if (e.key === 'ArrowLeft') go(-1)
       else if (e.key === 'ArrowRight') go(1)
-      else if (e.key === 'k') onDecision(item, 'keep')
-      else if (e.key === 'd') onDecision(item, 'del')
+      else if (e.key === 'k' || e.key === '+' || e.key === '=') onDecision(item, 'keep')
+      else if (e.key === 'd' || e.key === '-') onDecision(item, 'del')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -149,7 +149,10 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
 
   return (
     <div className="lightbox" onClick={() => setIndex(null)}>
-      <div className="lb-stage" onClick={() => setIndex(null)}>
+      <div
+        className={'lb-stage' + (item.decision ? ' dec-' + item.decision : '')}
+        onClick={() => setIndex(null)}
+      >
         <button className="lb-close" onClick={(e) => { e.stopPropagation(); setIndex(null) }}>×</button>
         {index > 0 && (
           <button className="lb-nav prev" onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>
@@ -158,6 +161,11 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
           <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
         )}
         <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
+        {item.decision && (
+          <span className={'lb-decision ' + item.decision}>
+            {item.decision === 'del' ? '✕ Marked for deletion' : '✓ Marked to keep'}
+          </span>
+        )}
 
         {showStrip && items.length > 1 && (
           <div className="lb-strip" ref={stripRef} onClick={(e) => e.stopPropagation()}>
@@ -191,12 +199,12 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
             className="btn lb-act"
             style={{ background: item.decision === 'keep' ? 'var(--keep)' : undefined, color: item.decision === 'keep' ? '#06231a' : undefined }}
             onClick={() => onDecision(item, 'keep')}
-          >Keep (k)</button>
+          >Keep (k / +)</button>
           <button
             className="btn lb-act"
             style={{ background: item.decision === 'del' ? 'var(--del)' : undefined, color: item.decision === 'del' ? '#2a0a06' : undefined }}
             onClick={() => onDecision(item, 'del')}
-          >Delete (d)</button>
+          >Delete (d / −)</button>
         </div>
 
         {item.caption && <div className="lb-caption">{item.caption}</div>}

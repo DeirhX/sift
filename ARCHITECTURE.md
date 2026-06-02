@@ -100,6 +100,16 @@ globals, which is what keeps them testable and reusable.
 
 - **Content-hash identity.** Decisions and face overrides are keyed by file
   content, not path, so reorganizing the library doesn't orphan your review work.
+- **Upright before analysis.** `sift.audit` runs every image through
+  `ImageOps.exif_transpose` before a model embeds it or a perceptual hash is
+  taken (`clip_common.iter_image_batches`, `grouping.compute_phashes`), so a
+  portrait frame (EXIF orient 6/8) is never fed to CLIP/phash as raw,
+  90°-rotated pixels. This is what lets a portrait and a landscape reframe of
+  the *same* moment land in one near-dup group — measured CLIP cosine ~0.74 raw
+  vs ~0.97 upright, the difference between "unrelated" and "above `dup_sim`".
+  The face detector deliberately stays in **raw** sensor coordinates: its bboxes
+  and the stored `imgw/imgh` are a coordinate contract with the frontend face
+  overlays, a separate concern from visual similarity.
 - **Override replay.** UI face edits write to `face_overrides`; `build_db`
   re-applies them after a fresh audit. The API recompute path
   (`server._reaggregate_faces`) and the ingest path both go through
@@ -125,6 +135,20 @@ globals, which is what keeps them testable and reusable.
 - `urlState.js` — serializes filters/view to the URL (shareable, back-button
   friendly). `api.js` — typed fetch wrappers. `format.js` — shared formatters
   incl. `qualityColor`.
+- **Overlay history model.** Every overlay (lightbox / group / scene review) and
+  each in-overlay step (focus a photo, toggle zoom) is a real history entry
+  tagged with a `navDepth` (`App.jsx`), so Back peels one step at a time while
+  Close unwinds the whole overlay in one `history.go(-(depth+1))`. That unwind
+  assumes a plain-list entry sits beneath the overlay — true when opened from
+  the list, but **not** when the app loads straight into an overlay (deep link /
+  reload / new tab). So on mount `App.jsx` plants a list entry beneath a
+  deep-linked overlay; without it, Close had nothing to unwind onto and silently
+  did nothing (regression-guarded in `e2e/flows.spec.js`).
+- The filmstrip review (`GroupReview`) is **selection-driven**: arrow keys move
+  the active member via a global key handler (the strip auto-scrolls to follow),
+  the active tile is the sole highlight (UA focus rings on the tiles are
+  suppressed), and the strip is a fixed height so expanding a collapsed near-dup
+  set (via its `+` handle) never reflows the hero preview.
 - Views: `PhotoGrid` (masonry, aspect-preserving) with `PhotoCard`;
   `GroupView`/`GroupPile` (duplicate sets); `SceneView`/`ScenePile`/`ScenePanel`
   (scene hierarchy); `GroupReview` (filmstrip review modal); `Lightbox`

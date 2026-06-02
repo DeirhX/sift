@@ -177,7 +177,7 @@ test.describe('scenes (rough hierarchy)', () => {
       .toHaveCount(0)
 
     // Clicking the tile only previews its medoid — it must NOT expand the set
-    // (no surprise reflow). The `+` expander to its left opens it inline.
+    // (no surprise reflow). The `+` pill overlaid on the tile opens it inline.
     await review.locator('.strip-grouptile').click()
     await expect(review.locator('.strip-cluster')).toHaveCount(0)
     await review.locator('.strip-expand').click()
@@ -289,6 +289,30 @@ test.describe('browser history + deep links', () => {
     await expect(panel).toBeVisible()
     await expect(page).not.toHaveURL(/[?&]img=/)
     await page.goBack()
+    await expect(panel).toHaveCount(0)
+    await expect(page).not.toHaveURL(/[?&]grp=/)
+  })
+
+  test('Close exits a deep-linked review even after an in-overlay step', async ({ page }) => {
+    // Grab a shareable review URL…
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Groups' }).click()
+    await page.locator('.pile').first().click()
+    const panel = page.locator('.review-panel')
+    await expect(panel).toBeVisible()
+    const deepLink = page.url()
+    expect(deepLink).toMatch(/[?&]grp=\d+/)
+
+    // …then load straight into it (the review is now the first history entry,
+    // with no plain-list entry beneath it) and take one in-overlay step.
+    await page.goto(deepLink)
+    await expect(panel).toBeVisible()
+    await panel.locator('.strip-thumb').nth(1).click()
+    await expect(page).toHaveURL(/[?&]img=\d+/)
+
+    // Close must fully exit — this used to no-op because history.go had no
+    // pre-overlay entry to unwind onto.
+    await panel.getByRole('button', { name: 'Close' }).click()
     await expect(panel).toHaveCount(0)
     await expect(page).not.toHaveURL(/[?&]grp=/)
   })

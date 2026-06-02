@@ -556,6 +556,28 @@ select:focus, input:focus {
   max-height: 96vh;
   object-fit: contain;
 }
+/* Decision made visible on the photo itself (not just the side-panel button):
+   a coloured ring around the image plus an edge vignette flooding the stage, so
+   a marked-for-deletion frame is unmistakable while flicking through. Keep gets
+   the same treatment in green, calmer, so both verdicts read at a glance. */
+.lb-stage.dec-del  { box-shadow: inset 0 0 150px 26px rgba(var(--del-rgb), 0.42); }
+.lb-stage.dec-keep { box-shadow: inset 0 0 150px 26px rgba(var(--keep-rgb), 0.28); }
+.lb-stage.dec-del img  { outline: 3px solid var(--del);  outline-offset: 6px; }
+.lb-stage.dec-keep img { outline: 3px solid var(--keep); outline-offset: 6px; }
+.lb-decision {
+  position: absolute;
+  top: 18px; left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  z-index: 3;
+  pointer-events: none;
+}
+.lb-decision.del  { background: var(--del);  color: var(--on-del); }
+.lb-decision.keep { background: var(--keep); color: var(--on-keep); }
 /* Right: scrollable info rail, so stats never overlay the photo. */
 .lb-panel {
   flex: 0 0 320px;
@@ -780,6 +802,22 @@ select:focus, input:focus {
 .cpill.del  { background: rgba(var(--del-rgb), 0.16);  color: var(--del);  border-color: rgba(var(--del-rgb), 0.45); }
 .cpill.left { background: var(--bg-hover);        color: var(--text-dim); border-color: var(--border); }
 
+/* Scene keyword chips: the scene's most common photo tags, doubling as
+   tag-filter toggles (active = currently filtered on). */
+.scene-tags { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 2px 0; }
+.scene-tag {
+  font-size: 10.5px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.scene-tag:hover { color: var(--text); border-color: var(--accent); }
+.scene-tag.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
 /* ---------- Group review modal ---------- */
 .review-overlay {
   position: fixed;
@@ -859,8 +897,14 @@ select:focus, input:focus {
 .strip-thumb {
   position: relative;
   flex: 0 0 auto;
-  width: 92px;
+  /* Pin height, let width follow the (upright) image's aspect ratio: portrait
+     frames get a tall, narrow tile instead of a sliver letterboxed in a wide
+     box. Width is image-driven rather than DB-driven because the stored
+     imgw/imgh are pre-EXIF-transpose and lie about rotated portraits. */
   height: 70px;
+  width: auto;
+  min-width: 40px;
+  max-width: 130px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 6px;
@@ -868,7 +912,7 @@ select:focus, input:focus {
   cursor: pointer;
   background: var(--thumb-bg);
 }
-.strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.strip-thumb img { height: 100%; width: auto; object-fit: cover; display: block; }
 .strip-thumb.active { border-color: var(--accent); }
 .strip-thumb.is-del { opacity: 0.5; }
 .strip-thumb.is-del.active { opacity: 1; }
@@ -916,6 +960,7 @@ select:focus, input:focus {
 /* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
    structure reads at a glance. Lone-set / no-set scenes don't render this. */
 .strip-cluster {
+  position: relative;
   display: flex;
   gap: 4px;
   padding: 3px;
@@ -936,24 +981,26 @@ select:focus, input:focus {
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
-/* Collapsed near-dup set: a stacked card (offset shadows fake the pile) showing
-   the set's medoid plus a ×N count. Click to expand the set inline. */
+/* Collapsed near-dup set: the medoid thumb plus a ×N count, sitting inside the
+   `.strip-collapsed` bracket (its `+` expander to the left). The bracket — not a
+   fake-pile shadow — is what reads as "this is one group", matching the bracket
+   of an expanded cluster. */
 .strip-grouptile {
   position: relative;
   flex: 0 0 auto;
-  width: 92px;
   height: 70px;
+  width: auto;
+  min-width: 40px;
+  max-width: 130px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 6px;
-  overflow: visible;
+  overflow: hidden;
   cursor: pointer;
-  background: none;
-  box-shadow: 3px 3px 0 -1px var(--bg-panel), 3px 3px 0 0 var(--border),
-              6px 6px 0 -1px var(--bg-panel), 6px 6px 0 0 var(--border);
+  background: var(--thumb-bg);
 }
 .strip-grouptile img {
-  width: 100%; height: 100%;
+  height: 100%; width: auto;
   object-fit: cover; display: block;
   border-radius: 4px;
 }
@@ -976,30 +1023,49 @@ select:focus, input:focus {
   border-radius: 50%;
   background: var(--accent);
 }
-/* A collapsed set: its `+` expander paired with the stacked medoid tile. */
+/* A collapsed set is just its medoid tile (the `×N` badge marks it as a set).
+   The `+` expander rides ON TOP of the tile, revealed on hover, so the strip
+   stays uncluttered and the handle is unambiguously bound to its own group. */
 .strip-collapsed {
+  position: relative;
   display: flex;
-  gap: 4px;
-  align-items: stretch;
   flex: 0 0 auto;
 }
-/* Expand (`+`, left of a collapsed set) / collapse (`–`, end of an expanded
-   set) handles — symmetric dashed affordances that stretch to the set's height. */
+/* Expand (`+`, on the medoid tile) / collapse (`–`, on the expanded cluster)
+   handles — small overlay pills that fade in only while the set is hovered. */
 .strip-collapse,
 .strip-expand {
-  flex: 0 0 auto;
-  width: 22px;
-  align-self: stretch;
-  border: 1px dashed var(--border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 16px;
+  position: absolute;
+  z-index: 2;
+  top: 3px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: rgba(15, 18, 24, 0.82);
+  color: var(--text);
+  font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
-.strip-collapse:hover,
-.strip-expand:hover { color: var(--text); border-color: var(--accent); }
+.strip-expand { left: 3px; }
+.strip-collapse { right: 3px; }
+.strip-collapsed:hover .strip-expand,
+.strip-cluster:hover .strip-collapse { opacity: 1; }
+.strip-expand:hover,
+.strip-collapse:hover { background: var(--accent); color: var(--on-accent); }
+/* Hovering a handle lights up the WHOLE set it controls, so the handle's target
+   is unambiguous — which group does this + / – belong to? */
+.strip-collapsed:has(.strip-expand:hover) .strip-grouptile { border-color: var(--accent); }
+.strip-cluster:has(.strip-collapse:hover) {
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.14);
+}
 .strip-flag {
   position: absolute;
   bottom: 0; left: 0; right: 0;
@@ -1044,6 +1110,12 @@ select:focus, input:focus {
   color: var(--text);
   cursor: pointer;
 }
+/* Verdict made scannable: a thick coloured left bar + tint so a column of rows
+   reads as picks (green) vs dupes-to-delete (red) at a glance. The bar is a
+   box-shadow, so it survives hover/active below which override only border/bg. */
+.review-list-row.dec-keep { border-color: rgba(var(--keep-rgb), 0.45); background: rgba(var(--keep-rgb), 0.10); box-shadow: inset 5px 0 0 var(--keep); }
+.review-list-row.dec-del  { border-color: rgba(var(--del-rgb), 0.45);  background: rgba(var(--del-rgb), 0.10);  box-shadow: inset 5px 0 0 var(--del); }
+.review-list-row.dec-del .rl-thumb { opacity: 0.55; }
 .review-list-row:hover { border-color: var(--accent); }
 .review-list-row.active { border-color: var(--accent); background: var(--bg-panel); }
 .review-list-row.filtered { opacity: 0.55; }
@@ -1164,8 +1236,11 @@ select:focus, input:focus {
 }
 .lb-strip-thumb {
   flex: 0 0 auto;
-  width: 64px;
+  /* Height-pinned, image-driven width — portrait frames stay portrait here too. */
   height: 48px;
+  width: auto;
+  min-width: 28px;
+  max-width: 90px;
   padding: 0;
   border: 2px solid transparent;
   border-radius: 4px;
@@ -1174,7 +1249,7 @@ select:focus, input:focus {
   background: var(--thumb-bg);
   opacity: 0.55;
 }
-.lb-strip-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lb-strip-thumb img { height: 100%; width: auto; object-fit: cover; display: block; }
 .lb-strip-thumb.active { border-color: var(--accent); opacity: 1; }
 .lb-strip-thumb.is-keep { box-shadow: inset 0 -3px 0 var(--keep); }
 .lb-strip-thumb.is-del { box-shadow: inset 0 -3px 0 var(--del); }

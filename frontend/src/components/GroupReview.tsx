@@ -111,6 +111,12 @@ export default function GroupReview({
     if (next.has(gid)) next.delete(gid); else next.add(gid)
     return next
   })
+  // A scene with exactly one near-dup set has nothing to disambiguate by
+  // collapsing — open it on arrival so you see its frames, not a lone ×N tile.
+  // Keyed on `sets` (a fresh ref per scene), so a later manual collapse stands.
+  useEffect(() => {
+    if (sets.length === 1) setExpanded(new Set([sets[0].dup_group]))
+  }, [sets])
 
   // Tooltip / list text for a member: name, key scores, then the caption.
   // \n works in title tooltips; the list renders the same parts as elements.
@@ -136,8 +142,8 @@ export default function GroupReview({
       if (e.key === 'Escape') onClose()
       else if (e.key === 'ArrowRight') selectIdx(Math.min(sel + 1, view.length - 1))
       else if (e.key === 'ArrowLeft') selectIdx(Math.max(sel - 1, 0))
-      else if (e.key === 'k') onDecision(view[sel], 'keep')
-      else if (e.key === 'd') onDecision(view[sel], 'del')
+      else if (e.key === 'k' || e.key === '+' || e.key === '=') onDecision(view[sel], 'keep')
+      else if (e.key === 'd' || e.key === '-') onDecision(view[sel], 'del')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -219,9 +225,9 @@ export default function GroupReview({
   }
 
   // A collapsed near-dup set: a stacked card showing its medoid and a ×N count.
-  // Clicking the card just previews the medoid (no surprise reflow); the `+`
-  // expander to its left opens the set inline — mirroring the `–` collapser at
-  // the end of an expanded cluster, so expand/collapse are symmetric affordances.
+  // Clicking the card just previews the medoid (no surprise reflow); a `+` pill
+  // overlaid on the tile (revealed on hover) opens the set inline — mirroring the
+  // `–` pill on an expanded cluster, so expand/collapse are symmetric affordances.
   const renderGroupTile = (s: DupSet<GroupedImageItem>) => {
     const rep = s.items[0]
     const repIdx = idIndex.get(rep.id)
@@ -236,7 +242,7 @@ export default function GroupReview({
         <button
           className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
           onClick={() => selectIdx(repIdx)}
-          title={`near-duplicate set · ${s.items.length} photos · click to preview, + to expand`}
+          title={`near-duplicate set · ${s.items.length} photos · click to preview, hover for + to expand`}
         >
           <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
           <span className="strip-count">×{s.items.length}</span>
@@ -337,7 +343,8 @@ export default function GroupReview({
                   key={it.id}
                   className={'review-list-row'
                     + (i === sel ? ' active' : '')
-                    + (it.matches === false ? ' filtered' : '')}
+                    + (it.matches === false ? ' filtered' : '')
+                    + (it.decision ? ' dec-' + it.decision : '')}
                   onClick={() => { selectIdx(i); setShowList(false) }}
                   title="Show in preview"
                 >

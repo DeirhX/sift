@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { autocullGroups } from '../api'
+import { applyDecisionHide } from '../format'
 import GroupPile from './GroupPile'
 import type { GroupsResponse } from '../api/types'
 
@@ -19,6 +20,7 @@ interface GroupViewProps {
   query: GroupViewQuery
   onOpen: (dupGroup: number) => void
   reviewOpen?: boolean
+  hideDel?: boolean
 }
 
 // Overview of duplicate groups as stacked photo piles. Arrow keys move a
@@ -26,7 +28,7 @@ interface GroupViewProps {
 // overlay (`onOpen(dup_group)`). The overlay itself lives at the app root so
 // it is URL-driven / Back-navigable. `reviewOpen` lets the app pause grid keys
 // while that overlay is up (the overlay handles its own keyboard).
-export default function GroupView({ query, onOpen, reviewOpen = false }: GroupViewProps) {
+export default function GroupView({ query, onOpen, reviewOpen = false, hideDel = false }: GroupViewProps) {
   const [culling, setCulling] = useState(false)
   const [focusIdx, setFocusIdx] = useState<number | null>(null)   // keyboard-focused pile
   const sentinelRef = useRef<HTMLDivElement>(null)
@@ -50,7 +52,12 @@ export default function GroupView({ query, onOpen, reviewOpen = false }: GroupVi
     }
   }
 
-  const groups = query.data?.pages.flatMap((p) => p.groups) ?? []
+  let groups = query.data?.pages.flatMap((p) => p.groups) ?? []
+  if (hideDel) {
+    groups = groups
+      .map((g) => ({ ...g, items: applyDecisionHide(g.items, 'notdel') }))
+      .filter((g) => g.items.length > 0)
+  }
 
   // Infinite scroll via an IntersectionObserver sentinel at the list end.
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query

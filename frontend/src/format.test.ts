@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst } from './format'
+import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst, applyDecisionHide, sceneKeywords } from './format'
 
 describe('fmt', () => {
   it('formats numbers to two decimals', () => {
@@ -120,5 +120,75 @@ describe('fmtTimeRange', () => {
     // Two days apart guarantees distinct labels regardless of locale.
     const out = fmtTimeRange(1000, 1000 + 2 * 86400)
     expect(out).toContain('–')
+  })
+
+  it('drops the repeated date for a same-day range', () => {
+    const start = 1593864000 // 2020-07-04 ~midday UTC: same local day everywhere
+    const [head, tail] = (fmtTimeRange(start, start + 3600) ?? '').split(' – ')
+    expect(tail).toBeTruthy()
+    expect(tail.length).toBeLessThan(head.length)
+    // The year is in the dated head but not the time-only tail (locale-agnostic).
+    expect(head).toContain('2020')
+    expect(tail).not.toContain('2020')
+  })
+
+  it('keeps both dates when the range spans days', () => {
+    const start = 1593864000
+    const [, tail] = (fmtTimeRange(start, start + 2 * 86400) ?? '').split(' – ')
+    expect(tail).toContain('2020')
+  })
+})
+
+describe('applyDecisionHide', () => {
+  const items = [
+    { id: 1, decision: 'keep' },
+    { id: 2, decision: 'del' },
+    { id: 3, decision: null },
+  ]
+
+  it('drops del-marked members under the "notdel" filter', () => {
+    expect(applyDecisionHide(items, 'notdel').map((i) => i.id)).toEqual([1, 3])
+  })
+
+  it('is a no-op for any other decision value', () => {
+    expect(applyDecisionHide(items, 'all')).toBe(items)
+    expect(applyDecisionHide(items, 'keep')).toBe(items)
+  })
+
+  it('tolerates nullish input', () => {
+    expect(applyDecisionHide(undefined, 'notdel')).toEqual([])
+    expect(applyDecisionHide(null, 'all')).toEqual([])
+  })
+})
+
+describe('sceneKeywords', () => {
+  const items = [
+    { tags: ['beach', 'sunset'] },
+    { tags: ['beach', 'people'] },
+    { tags: ['beach'] },
+    { tags: ['sunset'] },
+    { tags: [] },
+    {},
+  ]
+
+  it('ranks tags by frequency, most common first', () => {
+    const kw = sceneKeywords(items)
+    expect(kw[0]).toEqual({ tag: 'beach', count: 3 })
+    expect(kw[1]).toEqual({ tag: 'sunset', count: 2 })
+    expect(kw.find((k) => k.tag === 'people')).toEqual({ tag: 'people', count: 1 })
+  })
+
+  it('breaks frequency ties alphabetically for stable ordering', () => {
+    const kw = sceneKeywords([{ tags: ['zebra'] }, { tags: ['apple'] }])
+    expect(kw.map((k) => k.tag)).toEqual(['apple', 'zebra'])
+  })
+
+  it('caps the result at the requested limit', () => {
+    expect(sceneKeywords(items, 2).map((k) => k.tag)).toEqual(['beach', 'sunset'])
+  })
+
+  it('returns [] for empty / nullish input', () => {
+    expect(sceneKeywords([])).toEqual([])
+    expect(sceneKeywords(undefined)).toEqual([])
   })
 })

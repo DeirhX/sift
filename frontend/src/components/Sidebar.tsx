@@ -118,6 +118,7 @@ export default function Sidebar(
             { v: 'keep', label: 'Keep' },
             { v: 'del', label: 'Del' },
             { v: 'unmarked', label: 'New' },
+            { v: 'notdel', label: 'Hide del' },
           ]}
           onChange={(v) => updateFilter({ decision: v })}
         />
