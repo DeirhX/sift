@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from 'react'
+import { useEffect, useCallback, useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fullUrl, thumbUrl, fetchLocations, revealPath, fetchMeta } from '../api.js'
 import { fmt, aestheticScore, fmtTime, qualityColor } from '../format.js'
@@ -85,6 +85,14 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
     return () => window.removeEventListener('keydown', onKey)
   }, [go, item, onDecision, setIndex])
 
+  // Keep the active strip thumb in view as ←/→ walk past the rendered edge.
+  const stripRef = useRef(null)
+  useEffect(() => {
+    if (!showStrip) return
+    stripRef.current?.querySelector('.lb-strip-thumb.active')
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  }, [index, showStrip])
+
   // Exact-duplicate locations (same content hash) for the current image.
   const [locs, setLocs] = useState(null)
   useEffect(() => {
@@ -136,7 +144,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
         <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
 
         {showStrip && items.length > 1 && (
-          <div className="lb-strip" onClick={(e) => e.stopPropagation()}>
+          <div className="lb-strip" ref={stripRef} onClick={(e) => e.stopPropagation()}>
             {items.map((it, i) => (
               <button
                 key={it.id}

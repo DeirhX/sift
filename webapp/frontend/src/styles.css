@@ -834,12 +834,20 @@ select:focus, input:focus {
   z-index: 2;
 }
 
-/* Filmstrip of group members */
+/* Filmstrip of group members. Fixed height (sized for its tallest child — the
+   78px bracketed cluster / flat-group rail) with vertically-centred tiles, so
+   expanding a near-dup set inline or toggling Group/Ungroup never changes the
+   strip's height and therefore never reflows (shrinks) the hero preview below.
+   A lone 70px thumb still lands at the same offset it had with the old 12px
+   padding, so the common case is visually unchanged. */
 .review-strip {
   display: flex;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 8px 16px;
+  height: 96px;
+  align-items: center;
   overflow-x: auto;
+  overflow-y: hidden;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
 }
@@ -864,6 +872,16 @@ select:focus, input:focus {
 .strip-thumb.active { border-color: var(--accent); }
 .strip-thumb.is-del { opacity: 0.5; }
 .strip-thumb.is-del.active { opacity: 1; }
+/* The strip tiles are selection-driven (arrow keys move `.active` via a global
+   key handler, not DOM tab focus), so the active member is the one and only
+   highlight. Suppress the UA focus ring that would otherwise linger on the
+   last-clicked thumb and light up a second, different tile than the preview. */
+.strip-thumb:focus,
+.strip-thumb:focus-visible,
+.strip-grouptile:focus,
+.strip-grouptile:focus-visible,
+.lb-strip-thumb:focus,
+.lb-strip-thumb:focus-visible { outline: none; }
 /* Members outside the active filter: greyed + desaturated, but still selectable */
 .strip-thumb.filtered img { opacity: 0.32; filter: grayscale(0.7); }
 .strip-thumb.filtered.active img { opacity: 0.85; filter: grayscale(0.3); }
@@ -958,8 +976,17 @@ select:focus, input:focus {
   border-radius: 50%;
   background: var(--accent);
 }
-/* Collapse handle shown at the end of an expanded set. */
-.strip-collapse {
+/* A collapsed set: its `+` expander paired with the stacked medoid tile. */
+.strip-collapsed {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+/* Expand (`+`, left of a collapsed set) / collapse (`–`, end of an expanded
+   set) handles — symmetric dashed affordances that stretch to the set's height. */
+.strip-collapse,
+.strip-expand {
   flex: 0 0 auto;
   width: 22px;
   align-self: stretch;
@@ -971,7 +998,8 @@ select:focus, input:focus {
   line-height: 1;
   cursor: pointer;
 }
-.strip-collapse:hover { color: var(--text); border-color: var(--accent); }
+.strip-collapse:hover,
+.strip-expand:hover { color: var(--text); border-color: var(--accent); }
 .strip-flag {
   position: absolute;
   bottom: 0; left: 0; right: 0;

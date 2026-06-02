@@ -176,8 +176,11 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(review.getByRole('button', { name: 'Keep best · delete rest' }))
       .toHaveCount(0)
 
-    // Clicking the tile expands that set inline into a bracketed cluster.
+    // Clicking the tile only previews its medoid — it must NOT expand the set
+    // (no surprise reflow). The `+` expander to its left opens it inline.
     await review.locator('.strip-grouptile').click()
+    await expect(review.locator('.strip-cluster')).toHaveCount(0)
+    await review.locator('.strip-expand').click()
     await expect(review.locator('.strip-cluster')).toHaveCount(1)
     await expect(review.locator('.strip-cluster .strip-thumb')).toHaveCount(2)
 
