@@ -107,13 +107,50 @@ globals, which is what keeps them testable and reusable.
 
 ## Tests
 
-- **Python** (`tests/`, `pytest -q`): ingest aggregation, the read endpoints,
+Three tiers, by cost and what they exercise:
+
+- **Unit + API integration** (`tests/`, `pytest -q`) — the default suite, fully
+  model-free and fast (~8s). Covers ingest aggregation, every read endpoint, the
+  reveal guardrail + settings/roots + fs autocomplete + idle analyze stream,
   face/cluster mutation + override persistence, the analyze argv builder/guards,
   and the pure `photo_audit` helpers (`_clean_tags`, `iter_image_batches`,
-  `bipolar_score`, the CLI parser). The web tests drive the FastAPI app through a
-  `TestClient` against a synthetic report — **no ML models required**.
+  `bipolar_score`, scene/dup grouping, the CLI parser). The web tests drive the
+  FastAPI app through a `TestClient` against a synthetic report — no models.
+- **End-to-end pipeline** (`tests/test_e2e_pipeline.py`) — the only test that
+  runs the real `photo_audit.py` CLI as a subprocess (`--no-clip`, so classical
+  sharpness + phash duplicates, no weights), then ingests its report with
+  `build_db` and asserts through the API. This is the cross-stage seam check;
+  still CI-safe.
+- **ML efficacy** (`tests/ml/`, opt-in) — see below. Skipped by default.
 - **Frontend** (`webapp/frontend`, `npm test`): URL state, API wrappers,
   formatters, and key components.
+
+### ML efficacy harness (`tests/ml/`)
+
+`test_efficacy.py` has two tiers:
+
+- **Classical (always run):** the non-neural tasks have synthesizable ground
+  truth, so efficacy is asserted every run — Laplacian sharpness ranks a crisp
+  image above a blurred copy; phash groups a recompressed duplicate and rejects
+  an unrelated image.
+- **Neural (`@pytest.mark.ml`, opt-in):** PARA / CLIP-IQA / Qwen3-VL / BLIP /
+  faces load real weights. Skipped unless `--run-ml` or `RUN_ML=1`. On synthetic
+  inputs these assert the *contract* (score ranges, tag-cleaning, determinism /
+  drift), which catches load breakage and silent regressions. For real
+  *accuracy*, drop labeled photos in `tests/ml/fixtures/` with a `labels.json`
+  (schema in that folder's README) and `test_golden_set_accuracy` checks
+  expected tags/captions/face counts against them.
+
+```bash
+pytest                       # default: model-free suite (~8s)
+pytest -n auto               # ~20% faster via pytest-xdist (model-free only)
+pytest tests/ml -m ml --run-ml   # neural efficacy; needs weights + GPU. NO -n (one GPU).
+```
+
+Profiling note: the model-free suite is import-bound (one `transformers` import
+≈ 5s of the ~8s), not CPU-bound, so `-n auto` only saves ~20% and each worker
+re-pays the import. It's kept opt-in rather than default; don't parallelise the
+`--run-ml` tier — the efficacy tests share a single GPU and would contend/OOM.
 
 ## Known shape / future work
 
