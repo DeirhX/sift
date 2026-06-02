@@ -40,5 +40,9 @@ facenet-pytorch
 
 # ── Dev: test suite (pytest -q) ─────────────────────────────────────────────
 # httpx backs FastAPI's TestClient. Not needed at runtime.
+# pytest-xdist is optional: `pytest -n auto` parallelises the model-free suite
+# (~20% faster). Do NOT combine `-n` with `--run-ml` — the ML efficacy tests
+# share one GPU and would contend/OOM. See ARCHITECTURE.md "Tests".
 pytest
+pytest-xdist
 httpx
