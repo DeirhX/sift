@@ -1,5 +1,6 @@
 import { useRef, useEffect } from 'react'
 import ScenePile from './ScenePile'
+import { applyDecisionHide } from '../format'
 import type { ScenesResponse } from '../api/types'
 
 // Minimal slice of the useInfiniteQuery result this view consumes (decoupled
@@ -12,15 +13,29 @@ interface SceneViewQuery {
   fetchNextPage: () => unknown
 }
 
+interface SceneViewProps {
+  query: SceneViewQuery
+  onOpen: (sceneGroup: number) => void
+  hideDel?: boolean
+  activeTags?: string[]
+  onToggleTag?: (tag: string) => void
+}
+
 // Overview of rough scenes as stacked photo piles. Clicking a pile asks the app
 // to open its scene panel (`onOpen(scene_group)`); the panel itself lives at the
-// app root so it can be URL-driven / Back-navigable.
+// app root so it can be URL-driven / Back-navigable. `hideDel` drops del-marked
+// members (and any scene they emptied) so the overview shrinks live as you cull.
 export default function SceneView(
-  { query, onOpen }: { query: SceneViewQuery; onOpen: (sceneGroup: number) => void },
+  { query, onOpen, hideDel = false, activeTags = [], onToggleTag }: SceneViewProps,
 ) {
   const sentinelRef = useRef<HTMLDivElement>(null)
 
-  const scenes = query.data?.pages.flatMap((p) => p.scenes) ?? []
+  let scenes = query.data?.pages.flatMap((p) => p.scenes) ?? []
+  if (hideDel) {
+    scenes = scenes
+      .map((s) => ({ ...s, items: applyDecisionHide(s.items, 'notdel') }))
+      .filter((s) => s.items.length > 0)
+  }
 
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = query
   useEffect(() => {
@@ -42,7 +57,13 @@ export default function SceneView(
     <div className="grid-scroll">
       <div className="pile-grid scene-grid">
         {scenes.map((s) => (
-          <ScenePile key={s.scene_group} scene={s} onOpen={() => onOpen(s.scene_group)} />
+          <ScenePile
+            key={s.scene_group}
+            scene={s}
+            onOpen={() => onOpen(s.scene_group)}
+            activeTags={activeTags}
+            onToggleTag={onToggleTag}
+          />
         ))}
       </div>
       <div ref={sentinelRef} />

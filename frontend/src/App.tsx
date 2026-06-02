@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchMeta, fetchImages, fetchGroups, fetchScenes, setDecision as apiSetDecision } from './api'
 import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState'
+import { applyDecisionHide } from './format'
 import type { Filters, View, Nav } from './urlState'
 import type { ImageItem } from './api/types'
 import type { Decision, BulkDecision, SetLightboxIndex } from './types'
@@ -116,6 +117,22 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop)
   }, [])
 
+  // If the app loaded straight into an overlay (deep link / reload / new tab),
+  // there's no plain-list entry beneath it for Close to unwind onto — so
+  // closeOverlay's history.go(-(d+1)) would no-op (nothing before entry 0) or
+  // land on another overlay URL, and the modal would never close. Plant that
+  // base entry once: replace the current entry with the list (overlay stripped),
+  // then push the overlay back on top at depth 0. Now every overlay has a
+  // pre-overlay entry below it, so Close works however it was reached.
+  useEffect(() => {
+    if (!INITIAL.nav) return
+    const path = window.location.pathname
+    window.history.replaceState({ navDepth: null }, '',
+      path + buildSearch(INITIAL.filters, INITIAL.view, null))
+    window.history.pushState({ navDepth: 0 }, '',
+      path + buildSearch(INITIAL.filters, INITIAL.view, INITIAL.nav))
+  }, [])
+
   // Hand keyboard focus back to the list when an overlay closes, so arrow
   // navigation resumes (works for grid, groups and scenes — all use
   // `.grid-scroll`).
@@ -171,7 +188,11 @@ export default function App() {
     enabled: view === 'scenes',
   })
 
-  const items = images.data?.pages.flatMap((p) => p.items) ?? []
+  // "Hide deletions" (decision='notdel') also hides photos you mark del *live*:
+  // the server already excludes them on fetch, but optimistic patches don't
+  // refetch, so a freshly-deleted photo is dropped here on the next render.
+  const items = applyDecisionHide(
+    images.data?.pages.flatMap((p) => p.items) ?? [], filters.decision)
   const total = images.data?.pages[0]?.total ?? 0
   const groupTotal = groups.data?.pages[0]?.total ?? 0
   const sceneTotal = scenes.data?.pages[0]?.total ?? 0
@@ -181,12 +202,22 @@ export default function App() {
   // Resolve the open overlay's backing record from the loaded query pages. May
   // be null right after a deep-link/reload until the relevant page arrives;
   // the overlay simply waits rather than rendering against missing data.
-  const openGroupObj = nav?.kind === 'group'
+  // Hide del members in the open review too, so culling shrinks the strip live.
+  // Falls back to the unfiltered set if hiding would empty it (e.g. you deleted
+  // everything in the scene) — an empty review has nothing to render.
+  const cullDel = <I extends { decision?: string | null }, T extends { items: I[] }>(
+    obj: T | null,
+  ): T | null => {
+    if (!obj || filters.decision !== 'notdel') return obj
+    const kept = applyDecisionHide(obj.items, filters.decision)
+    return kept.length ? { ...obj, items: kept } : obj
+  }
+  const openGroupObj = cullDel(nav?.kind === 'group'
     ? (groups.data?.pages.flatMap((p) => p.groups) ?? []).find((g) => g.dup_group === nav.refId) ?? null
-    : null
-  const openSceneObj = nav?.kind === 'scene'
+    : null)
+  const openSceneObj = cullDel(nav?.kind === 'scene'
     ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) ?? null
-    : null
+    : null)
 
   // Adapt the index-based Lightbox (grid) to id-based nav: each move pushes a
   // history step; closing unwinds the overlay.
@@ -340,12 +371,16 @@ export default function App() {
           <SceneView
             query={scenes}
             onOpen={openScene}
+            hideDel={filters.decision === 'notdel'}
+            activeTags={filters.tags}
+            onToggleTag={(t) => toggleInList('tags', t)}
           />
         ) : (
           <GroupView
             query={groups}
             onOpen={openGroup}
             reviewOpen={nav?.kind === 'group'}
+            hideDel={filters.decision === 'notdel'}
           />
         )}
       </div>

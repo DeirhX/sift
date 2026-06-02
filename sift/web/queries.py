@@ -120,6 +120,10 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
         where.append("d.decision = 'del'")
     elif decision == "unmarked":
         where.append("d.decision IS NULL")
+    elif decision == "notdel":
+        # "Hide deletions": everything still in the running (kept + undecided).
+        # Lets the user whittle a scene/grid down to keepers as they cull.
+        where.append("(d.decision IS NULL OR d.decision != 'del')")
 
     if q:
         if has_fts(conn):

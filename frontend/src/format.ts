@@ -91,7 +91,26 @@ export function fmtTime(epoch: number | null | undefined): string | null {
   })
 }
 
-// "start – end" range, collapsing to a single label when both are the same day.
+// Time-only label (no date), for the tail of a same-day range.
+function fmtClock(epoch: number | null | undefined): string | null {
+  if (epoch == null) return null
+  const d = new Date(epoch * 1000)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' })
+}
+
+function sameCalendarDay(start: number, end: number): boolean {
+  const a = new Date(start * 1000)
+  const b = new Date(end * 1000)
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return false
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate()
+}
+
+// "start – end" range. Collapses to one label when both are identical, and drops
+// the repeated date from the end when the range stays within a single day
+// (e.g. "Jul 4, 2020, 07:19 PM – 07:20 PM"); keeps both dates across days.
 export function fmtTimeRange(
   start: number | null | undefined,
   end: number | null | undefined,
@@ -100,5 +119,46 @@ export function fmtTimeRange(
   const b = fmtTime(end)
   if (!a) return null
   if (!b || a === b) return a
+  if (start != null && end != null && sameCalendarDay(start, end)) {
+    const clock = fmtClock(end)
+    if (clock) return `${a} – ${clock}`
+  }
   return `${a} – ${b}`
+}
+
+// "Hide deletions" filter (decision === 'notdel'): drop members already marked
+// for deletion so the set shrinks toward keepers as you cull. The server applies
+// the same rule on fetch; this mirror makes culling LIVE — decisions are patched
+// into the cache optimistically (no refetch), so without it a just-deleted photo
+// would linger. A no-op for every other decision value.
+export function applyDecisionHide<T extends { decision?: string | null }>(
+  items: T[] | null | undefined,
+  decision: string,
+): T[] {
+  if (decision !== 'notdel' || !items) return items ?? []
+  return items.filter((it) => it.decision !== 'del')
+}
+
+export interface SceneKeyword {
+  tag: string
+  count: number
+}
+
+// The most common photo keywords (tags) across a scene's members, most-frequent
+// first, capped at `limit`. Ties break alphabetically so the order is stable
+// across renders. Returns [{ tag, count }] for chip display + filter toggles.
+export function sceneKeywords<T extends { tags?: string[] }>(
+  items: T[] | null | undefined,
+  limit = 6,
+): SceneKeyword[] {
+  const counts = new Map<string, number>()
+  for (const it of items ?? []) {
+    for (const tag of it.tags ?? []) {
+      counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([tag, count]) => ({ tag, count }))
 }
