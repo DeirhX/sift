@@ -17,7 +17,9 @@ Design rules that keep these from *changing* the JSON the server already sends
   ``response_model_exclude_unset=True`` on the route so unset fields are omitted
   rather than serialized as ``null``.
 """
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class Face(BaseModel):
@@ -211,6 +213,43 @@ class ApplyResponse(BaseModel):
 class UndoResponse(BaseModel):
     restored: int
     skipped: int
+
+
+class TaskStartRequest(BaseModel):
+    type: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskSnapshot(BaseModel):
+    id: str
+    type: str
+    state: str
+    phase: str | None = None
+    progress: float | None = None
+    message: str | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    cancel_requested: bool = False
+    started: float | None = None
+    ended: float | None = None
+    commands: list[str] = Field(default_factory=list)
+
+
+class TaskListResponse(BaseModel):
+    tasks: list[TaskSnapshot]
+    current: TaskSnapshot | None = None
+
+
+class TaskEventItem(BaseModel):
+    seq: int
+    event_type: str
+    payload: Any
+    ts: float
+
+
+class TaskStreamEnd(BaseModel):
+    state: str
+    exit_code: int | None = None
 
 
 class AnalyzeStatus(BaseModel):

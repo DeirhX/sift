@@ -1320,6 +1320,86 @@ select:focus, input:focus {
 .term-cmd { color: var(--accent); font-weight: 600; }
 .term-partial { color: #9fb3c8; }
 
+.task-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.task-panel.compact {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-card);
+}
+.task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.task-state { color: var(--text-dim); font-weight: 500; }
+.task-state.done { color: var(--keep); }
+.task-state.failed,
+.task-state.cancelled,
+.task-state.abandoned { color: var(--del); }
+.task-live { color: var(--accent); font-size: 12px; }
+.task-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.task-progress {
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+.task-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.task-pct {
+  width: 38px;
+  text-align: right;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.task-meta {
+  min-height: 1.2em;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.task-commands {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.task-commands summary { cursor: pointer; }
+.task-commands code {
+  display: block;
+  margin-top: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--term-bg);
+  color: var(--term-fg);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.task-term {
+  min-height: 180px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.task-panel.compact .task-term {
+  max-height: 180px;
+  min-height: 90px;
+  padding: 8px;
+  font-size: 11px;
+}
+
 /* ── Lightbox: exact-duplicate locations ───────────────────────────────────── */
 .lb-locations {
   margin-top: 8px;

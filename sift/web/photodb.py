@@ -134,6 +134,40 @@ CREATE TABLE IF NOT EXISTS photo_roots (
 );
 """
 
+# Long-running web operations (analyze, index, apply, etc.) share one persisted
+# task ledger so progress survives browser reconnects and recent history is
+# visible after a panel closes. The process itself is not resumable after a
+# server restart; startup marks any leftover running task abandoned.
+TASKS_DDL = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id                TEXT PRIMARY KEY,
+    type              TEXT NOT NULL,
+    state             TEXT NOT NULL,
+    phase             TEXT,
+    progress          REAL,
+    message           TEXT,
+    params_json       TEXT,
+    result_json       TEXT,
+    error             TEXT,
+    cancel_requested  INTEGER DEFAULT 0,
+    started           REAL,
+    ended             REAL
+);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    seq          INTEGER NOT NULL,
+    ts           REAL NOT NULL,
+    event_type   TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE(task_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_started ON tasks(started DESC);
+CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq);
+"""
+
 # Cluster-name anchors. A person's name is keyed by cluster_id, but the face
 # detector reassigns cluster ids on every re-clustering, so an id-keyed name
 # re-binds to the wrong faces after a rebuild. Anchoring the name to the
@@ -200,6 +234,7 @@ def ensure_schema(conn) -> None:
             conn.execute(f"ALTER TABLE faces ADD COLUMN {col} {decl}")
     ensure_overrides(conn)
     conn.executescript(PHOTO_ROOTS_DDL)
+    conn.executescript(TASKS_DDL)
     ensure_anchors(conn)
     # Created after the ALTERs so legacy tables don't index a missing column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")

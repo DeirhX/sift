@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { startAnalyze, cancelAnalyze, analyzeStatus, analyzeStreamUrl } from '../api'
-
-type AnalyzeState = 'idle' | 'running' | 'done' | 'failed' | 'cancelled'
+import { useState, useEffect } from 'react'
+import { fetchTasks, startTask } from '../api'
+import TaskPanel from './TaskPanel'
+import type { TaskSnapshot } from '../api/types'
 
 interface AnalyzeParams {
   folder: string
@@ -12,15 +12,18 @@ interface AnalyzeParams {
   faces: boolean
   face_expr: boolean
   no_cache: boolean
+  no_scenes: boolean
   dup_threshold: string
   face_min_rel: string
   face_eps: string
+  scene_time_gap: string
+  scene_sim: string
 }
 
 interface AnalyzePanelProps {
   defaultFolder?: string
   onClose: () => void
-  onDone?: () => void
+  onDone?: (task: TaskSnapshot) => void
 }
 
 // Modal to re-run `sift analyze` + `sift index` from the browser, streaming
@@ -37,18 +40,17 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
     faces: true,
     face_expr: true,
     no_cache: false,
+    no_scenes: false,
     dup_threshold: '',
     face_min_rel: '',
     face_eps: '',
+    scene_time_gap: '',
+    scene_sim: '',
   })
-  const [lines, setLines] = useState<string[]>([])
-  const [partial, setPartial] = useState('')
-  const [state, setState] = useState<AnalyzeState>('idle')   // idle|running|done|failed|cancelled
+  const [taskId, setTaskId] = useState<string | null>(null)
+  const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showAdv, setShowAdv] = useState(false)
-  const esRef = useRef<EventSource | null>(null)
-  const termRef = useRef<HTMLDivElement>(null)
-  const running = state === 'running'
 
   const set = (patch: Partial<AnalyzeParams>) => setP((v) => ({ ...v, ...patch }))
 
@@ -60,72 +62,53 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const attachStream = useCallback(() => {
-    esRef.current?.close()
-    const es = new EventSource(analyzeStreamUrl)
-    esRef.current = es
-    es.addEventListener('line', (e) => {
-      const ln = JSON.parse((e as MessageEvent).data) as string
-      setLines((prev) => [...prev, ln])
-    })
-    es.addEventListener('partial', (e) => setPartial(JSON.parse((e as MessageEvent).data) as string))
-    es.addEventListener('end', (e) => {
-      const d = JSON.parse((e as MessageEvent).data) as { state?: AnalyzeState }
-      setPartial('')
-      es.close()
-      if (d.state && d.state !== 'idle') setState(d.state)
-      if (d.state === 'done') onDone?.()
-    })
-    es.onerror = () => { es.close() }
-  }, [onDone])
-
-  // Re-attach to an already-running job on open.
+  // Re-attach to an already-running analyze/index task on open.
   useEffect(() => {
-    analyzeStatus().then((s) => {
-      if (s.state === 'running') {
-        setState('running')
-        setLines([])
-        attachStream()
+    fetchTasks().then((s) => {
+      const cur = s.current
+      if (cur?.state === 'running'
+          && (cur.type === 'analyze_library' || cur.type === 'index_library')) {
+        setTaskId(cur.id)
+        setRunning(true)
       }
     }).catch(() => {})
-    return () => esRef.current?.close()
-  }, [attachStream])
-
-  // Auto-scroll the terminal as output arrives.
-  useEffect(() => {
-    const el = termRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [lines, partial])
+  }, [])
 
   const run = async () => {
     setError(null)
-    setLines([])
-    setPartial('')
-    setState('running')
+    setRunning(true)
     try {
-      await startAnalyze(p)
-      attachStream()
+      const task = await startTask('analyze_library', p as unknown as Record<string, unknown>)
+      setTaskId(task.id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-      setState('failed')
+      setRunning(false)
     }
   }
 
-  const cancel = async () => {
-    await cancelAnalyze().catch(() => {})
+  const runIndex = async () => {
+    setError(null)
+    setRunning(true)
+    try {
+      const task = await startTask('index_library')
+      setTaskId(task.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setRunning(false)
+    }
   }
 
-  const statusLabel: string = {
-    idle: '', running: 'Running…', done: 'Done ✓',
-    failed: 'Failed', cancelled: 'Cancelled',
-  }[state]
+  const taskDone = (task: TaskSnapshot) => {
+    setRunning(false)
+    onDone?.(task)
+  }
 
   return (
     <div className="review-overlay" onClick={onClose}>
       <div className="analyze-panel" onClick={(e) => e.stopPropagation()}>
         <div className="review-head">
-          <b>Re-analyze library</b>
-          <span className={'analyze-status ' + state}>{statusLabel}</span>
+          <b>Library operations</b>
+          {running && <span className="analyze-status running">Running…</span>}
           <div className="spacer" />
           <button className="btn" onClick={onClose}>Close</button>
         </div>
@@ -157,6 +140,8 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
                 onChange={(e) => set({ no_cache: e.target.checked })} /> Re-score all (no cache)</label>
               <label><input type="checkbox" checked={p.no_clip} disabled={running}
                 onChange={(e) => set({ no_clip: e.target.checked })} /> Skip aesthetic (fast)</label>
+              <label><input type="checkbox" checked={p.no_scenes} disabled={running}
+                onChange={(e) => set({ no_scenes: e.target.checked })} /> Skip scenes</label>
             </div>
 
             <label className={'af-row' + (p.no_clip ? ' af-disabled' : '')}>
@@ -183,29 +168,26 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
                 <label className="af-row"><span>Face eps</span>
                   <input type="number" step="0.01" min="0.05" max="1.5" value={p.face_eps} disabled={running}
                     placeholder="0.50" onChange={(e) => set({ face_eps: e.target.value })} /></label>
+                <label className="af-row"><span>Scene gap min</span>
+                  <input type="number" step="1" min="1" max="1440" value={p.scene_time_gap} disabled={running}
+                    placeholder="60" onChange={(e) => set({ scene_time_gap: e.target.value })} /></label>
+                <label className="af-row"><span>Scene sim</span>
+                  <input type="number" step="0.01" min="0" max="1" value={p.scene_sim} disabled={running}
+                    placeholder="0.85" onChange={(e) => set({ scene_sim: e.target.value })} /></label>
               </div>
             )}
 
             <div className="af-actions">
-              {!running
-                ? <button className="btn primary" onClick={run}>Run analysis</button>
-                : <button className="btn" onClick={cancel}>Cancel</button>}
+              <button className="btn primary" disabled={running} onClick={run}>Run analysis + index</button>
+              <button className="btn" disabled={running} onClick={runIndex}>Re-index only</button>
             </div>
             {error && <div className="af-error">{error}</div>}
             <div className="af-note">
-              Runs <code>sift analyze</code> then <code>sift index</code>, then refreshes the view.
+              Runs local tasks from the browser; progress keeps streaming if this panel is reopened.
             </div>
           </div>
 
-          <div className="analyze-term" ref={termRef}>
-            {lines.length === 0 && !partial && (
-              <div className="term-empty">Output will stream here…</div>
-            )}
-            {lines.map((ln, i) => (
-              <div key={i} className={'term-line' + (ln.startsWith('$ ') ? ' term-cmd' : '')}>{ln || '\u00a0'}</div>
-            ))}
-            {partial && <div className="term-line term-partial">{partial}</div>}
-          </div>
+          <TaskPanel taskId={taskId} title="Library task" onDone={taskDone} />
         </div>
       </div>
     </div>

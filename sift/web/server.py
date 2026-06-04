@@ -31,7 +31,6 @@ import shutil
 import asyncio
 import sqlite3
 import argparse
-import threading
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -45,15 +44,15 @@ from fastapi.staticfiles import StaticFiles
 from sift.web import photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
-from sift.web import analysis
-from sift.web.analysis import AnalysisJob, build_analyze_steps, REPO_ROOT
+from sift.web import tasks
 from sift.web.queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
     MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-    ApplyResponse, UndoResponse, AnalyzeStatus)
+    ApplyResponse, UndoResponse, AnalyzeStatus, TaskStartRequest, TaskSnapshot,
+    TaskListResponse)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -93,6 +92,13 @@ def _ensure_schema():
     with db() as conn:
         photodb.ensure_schema(conn)
         conn.commit()
+
+
+def _configure_tasks():
+    """Keep the task runner pointed at the DB/thumb paths currently being served.
+    Tests patch these globals directly, so routes call this defensively instead
+    of assuming `main()` was the only initializer."""
+    tasks.MANAGER.configure(db_path=DB_PATH, thumb_dir=THUMB_DIR, db_factory=db)
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -925,75 +931,127 @@ def undo_apply():
     return {"restored": restored, "skipped": skipped}
 
 
-# ── Web-driven re-analysis (run `sift analyze` + `sift index`, stream output) ──
-# A single job at a time shells out to the existing scripts and streams their
-# stdout/stderr live (including tqdm carriage-return progress) to the browser
-# via Server-Sent Events. The launcher is *constrained*: the server builds the
-# argv from a fixed set of known flags — only the target folder is free text,
-# and it's validated to be an existing directory. No raw commands.
+# ── Generic web tasks (analyze, index, apply, undo, autocull) ─────────────────
 
-# The job runner (AnalysisJob) and the payload→argv translation
-# (build_analyze_steps) live in analysis.py; the routes below own the
-# single-job lifecycle and the SSE stream.
-CURRENT_JOB: AnalysisJob | None = None
+CURRENT_ANALYZE_TASK_ID: str | None = None
 
 
+def _sse(event: str, data) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.post("/api/tasks", response_model=TaskSnapshot)
+def start_task(payload: TaskStartRequest):
+    _configure_tasks()
+    return tasks.MANAGER.start(payload.type, payload.params)
+
+
+@app.get("/api/tasks", response_model=TaskListResponse)
+def list_tasks(limit: int = Query(20, le=100)):
+    _configure_tasks()
+    return tasks.MANAGER.list_recent(limit)
+
+
+@app.get("/api/tasks/{task_id}", response_model=TaskSnapshot)
+def task_status(task_id: str):
+    _configure_tasks()
+    return tasks.MANAGER.snapshot(task_id)
+
+
+@app.post("/api/tasks/{task_id}/cancel", response_model=TaskSnapshot)
+def task_cancel(task_id: str):
+    _configure_tasks()
+    return tasks.MANAGER.cancel(task_id)
+
+
+@app.get("/api/tasks/{task_id}/stream")
+async def task_stream(task_id: str):
+    """SSE replay + tail for any persisted task."""
+    _configure_tasks()
+    # Validate before returning the StreamingResponse so bad ids get a normal 404.
+    first = tasks.MANAGER.snapshot(task_id)
+
+    async def gen():
+        yield _sse("snapshot", first)
+        seq = 0
+        while True:
+            events = tasks.MANAGER.events_after(task_id, seq)
+            for ev in events:
+                seq = ev["seq"]
+                et = ev["event_type"]
+                if et == "end":
+                    yield _sse("end", ev["payload"])
+                    return
+                yield _sse(et, ev["payload"])
+            snap = tasks.MANAGER.snapshot(task_id)
+            if snap["state"] != "running" and not events:
+                yield _sse("end", {"state": snap["state"], "error": snap.get("error")})
+                return
+            await asyncio.sleep(0.15)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+# Backward-compatible analyze endpoints. The new UI should use /api/tasks; these
+# keep older clients working while the web app migrates off the bespoke route set.
 @app.post("/api/analyze", response_model=AnalyzeStatus, response_model_exclude_unset=True)
 def start_analyze(payload: dict = Body(...)):
-    global CURRENT_JOB
-    if CURRENT_JOB and CURRENT_JOB.state == "running":
-        raise HTTPException(409, "an analysis is already running")
-    steps = build_analyze_steps(payload, db_path=DB_PATH, thumb_dir=THUMB_DIR,
-                                db_factory=db)
-    CURRENT_JOB = AnalysisJob(steps, cwd=REPO_ROOT)
-    threading.Thread(target=CURRENT_JOB.run, daemon=True).start()
-    return {"ok": True, **CURRENT_JOB.snapshot()}
+    global CURRENT_ANALYZE_TASK_ID
+    _configure_tasks()
+    snap = tasks.MANAGER.start("analyze_library", payload)
+    CURRENT_ANALYZE_TASK_ID = snap["id"]
+    return {"ok": True, "state": snap["state"], "started": snap["started"],
+            "ended": snap["ended"], "commands": snap["commands"]}
 
 
 @app.get("/api/analyze/status", response_model=AnalyzeStatus, response_model_exclude_unset=True)
 def analyze_status():
-    if not CURRENT_JOB:
+    _configure_tasks()
+    if not CURRENT_ANALYZE_TASK_ID:
         return {"state": "idle", "commands": []}
-    return CURRENT_JOB.snapshot()
+    try:
+        snap = tasks.MANAGER.snapshot(CURRENT_ANALYZE_TASK_ID)
+    except HTTPException:
+        return {"state": "idle", "commands": []}
+    return {"state": snap["state"], "started": snap["started"], "ended": snap["ended"],
+            "commands": snap["commands"]}
 
 
 @app.post("/api/analyze/cancel", response_model=OkResponse)
 def analyze_cancel():
-    if not CURRENT_JOB or CURRENT_JOB.state != "running":
+    _configure_tasks()
+    if not CURRENT_ANALYZE_TASK_ID:
         raise HTTPException(409, "no analysis running")
-    CURRENT_JOB.cancel()
+    tasks.MANAGER.cancel(CURRENT_ANALYZE_TASK_ID)
     return {"ok": True}
 
 
 @app.get("/api/analyze/stream")
 async def analyze_stream():
-    """SSE stream of the current job's output. Replays from the start so a
-    reconnect/late join gets the full log, then tails live."""
-    job = CURRENT_JOB
-
-    def _sse(event: str, data) -> str:
-        return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    _configure_tasks()
+    task_id = CURRENT_ANALYZE_TASK_ID
 
     async def gen():
-        if not job:
+        if not task_id:
             yield _sse("end", {"state": "idle"})
             return
-        cursor = 0
-        last_partial = None
+        seq = 0
         while True:
-            with job._cond:
-                new = job.lines[cursor:]
-                cursor = len(job.lines)
-                partial = job.partial
-                state = job.state
-                code = job.exit_code
-            for ln in new:
-                yield _sse("line", ln)
-            if partial != last_partial:
-                last_partial = partial
-                yield _sse("partial", partial)
-            if state != "running" and cursor >= len(job.lines):
-                yield _sse("end", {"state": state, "exit_code": code})
+            events = tasks.MANAGER.events_after(task_id, seq)
+            for ev in events:
+                seq = ev["seq"]
+                et = ev["event_type"]
+                if et == "command":
+                    continue
+                if et == "end":
+                    yield _sse("end", ev["payload"])
+                    return
+                yield _sse(et, ev["payload"])
+            snap = tasks.MANAGER.snapshot(task_id)
+            if snap["state"] != "running" and not events:
+                yield _sse("end", {"state": snap["state"], "error": snap.get("error")})
                 return
             await asyncio.sleep(0.15)
 
@@ -1049,6 +1107,8 @@ def main() -> None:
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")
     _ensure_schema()
+    _configure_tasks()
+    tasks.MANAGER.abandon_running()
     _init_photo_roots(args.photo_root)
     _mount_frontend()
 

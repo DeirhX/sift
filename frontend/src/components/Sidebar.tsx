@@ -4,7 +4,7 @@ import RangeSlider from './RangeSlider'
 import FolderTree from './FolderTree'
 import { renameCluster, mergeClusters } from '../api'
 import type { Filters } from '../urlState'
-import type { MetaResponse, ClusterFacet } from '../api/types'
+import type { MetaResponse, ClusterFacet, TaskSnapshot } from '../api/types'
 import type { UpdateFilter } from '../types'
 
 // Left filter panel: sort, score/sharpness/aesthetic ranges, dup mode,
@@ -38,10 +38,11 @@ interface SidebarProps {
   resetFilters: () => void
   total: number
   onPeopleChange?: () => void
+  onTaskDone?: (task: TaskSnapshot) => void
 }
 
 export default function Sidebar(
-  { meta, filters, updateFilter, toggleInList, resetFilters, total, onPeopleChange }: SidebarProps,
+  { meta, filters, updateFilter, toggleInList, resetFilters, total, onPeopleChange, onTaskDone }: SidebarProps,
 ) {
   const clusters = meta?.clusters ?? []
   const tags = meta?.tags ?? []
@@ -201,7 +202,7 @@ export default function Sidebar(
         Export decisions
       </a>
 
-      <ApplyPanel />
+      <ApplyPanel onTaskDone={onTaskDone} />
 
       <div className="stats">
         Showing <b>{total.toLocaleString()}</b> of {(counts?.total ?? 0).toLocaleString()}<br />
