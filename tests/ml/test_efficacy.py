@@ -136,7 +136,7 @@ def test_golden_set_accuracy():
         assert img.exists(), f"missing fixture image: {img}"
 
         if "expect_min_faces" in label:
-            faces, _ = photo_audit.run_faces([img], device)
+            faces, _, _ = photo_audit.run_faces([img], device)
             n = len(faces.get(img, []))
             assert n >= label["expect_min_faces"], \
                 f"{img.name}: detected {n} faces, expected >= {label['expect_min_faces']}"
