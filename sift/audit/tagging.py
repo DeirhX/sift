@@ -3,8 +3,17 @@
 The VLM reads the actual scene instead of matching a fixed vocabulary, so it
 does not hallucinate absent subjects the way zero-shot CLIP did.
 """
-from PIL import Image
+from PIL import Image, ImageOps
 from tqdm import tqdm
+
+
+def _open_upright(p) -> Image.Image:
+    """Open an image as RGB with EXIF orientation applied. Both the caption and
+    the tag path go through this so a rotated photo is never read sideways by
+    one model and upright by the other (they used to disagree: only Qwen
+    transposed, BLIP read raw pixels)."""
+    return ImageOps.exif_transpose(Image.open(p).convert("RGB"))
+
 
 # ── Keyword tags (Qwen3-VL-8B-Instruct, 4-bit NF4) ───────────────────────────
 
@@ -52,7 +61,6 @@ def run_qwen_tags(paths: list, device: str, top_k: int = 12,
     full precision on CPU (correct but slow — bitsandbytes needs CUDA). Greedy
     decode, so the same image always yields the same tags."""
     import torch
-    from PIL import ImageOps
     from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 
     out: dict = {p: [] for p in paths}
@@ -77,8 +85,7 @@ def run_qwen_tags(paths: list, device: str, top_k: int = 12,
         prompt = QWEN_TAG_PROMPT.format(k=top_k)
         for p in tqdm(paths, desc="Qwen tags"):
             try:
-                img = Image.open(p).convert("RGB")
-                img = ImageOps.exif_transpose(img)
+                img = _open_upright(p)
                 if max(img.size) > max_side:
                     img.thumbnail((max_side, max_side))
             except Exception as e:
@@ -136,7 +143,7 @@ def run_caption_and_tags(paths: list, device: str,
             images, bpaths = [], []
             for p in batch_paths:
                 try:
-                    images.append(Image.open(p).convert("RGB"))
+                    images.append(_open_upright(p))
                     bpaths.append(p)
                 except Exception as e:
                     print(f"  skip {p.name}: {e}")
