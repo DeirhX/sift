@@ -15,11 +15,12 @@ const terminalStates = new Set(['done', 'failed', 'cancelled', 'abandoned'])
 export default function TaskPanel({ taskId, title = 'Task', compact = false, onDone }: TaskPanelProps) {
   const [cancelling, setCancelling] = useState(false)
   const termRef = useRef<HTMLDivElement>(null)
-  const { task, lines, partial, progress, connected } = useTaskStream(taskId, onDone)
+  const { task, lines, partial, progress, connected, reconnecting } = useTaskStream(taskId, onDone)
   const running = task?.state === 'running'
   const pct = Math.round(Math.max(0, Math.min(1, progress?.pct ?? task?.progress ?? 0)) * 100)
   const label = progress?.message || task?.message || task?.state || ''
   const phase = progress?.phase || task?.phase || task?.type
+  const hasLog = lines.length > 0 || !!partial
 
   useEffect(() => {
     const el = termRef.current
@@ -45,6 +46,7 @@ export default function TaskPanel({ taskId, title = 'Task', compact = false, onD
           <b>{title}</b>
           {task && <span className={'task-state ' + task.state}> · {task.state}</span>}
           {connected && running && <span className="task-live"> · live</span>}
+          {reconnecting && running && <span className="task-live reconnecting"> · reconnecting</span>}
         </div>
         {running && (
           <button className="btn" disabled={cancelling} onClick={doCancel}>
@@ -64,22 +66,30 @@ export default function TaskPanel({ taskId, title = 'Task', compact = false, onD
         {label && <span>{phase ? ' · ' : ''}{label}</span>}
       </div>
 
-      {task?.commands?.length ? (
-        <details className="task-commands">
-          <summary>Commands</summary>
-          {task.commands.map((cmd, i) => <code key={i}>{cmd}</code>)}
-        </details>
-      ) : null}
-
-      <div className="analyze-term task-term" ref={termRef}>
-        {lines.length === 0 && !partial && (
-          <div className="term-empty">Progress will stream here…</div>
+      <details className="task-details">
+        <summary>Details{hasLog ? ` · ${lines.length} log line${lines.length === 1 ? '' : 's'}` : ''}</summary>
+        {task?.commands?.length ? (
+          <div className="task-commands">
+            <b>Commands</b>
+            {task.commands.map((cmd, i) => <code key={i}>{cmd}</code>)}
+          </div>
+        ) : null}
+        {task?.result && (
+          <div className="task-result">
+            <b>Result</b>
+            <pre>{JSON.stringify(task.result, null, 2)}</pre>
+          </div>
         )}
-        {lines.map((ln, i) => (
-          <div key={i} className={'term-line' + (ln.startsWith('$ ') ? ' term-cmd' : '')}>{ln || '\u00a0'}</div>
-        ))}
-        {partial && <div className="term-line term-partial">{partial}</div>}
-      </div>
+        <div className="analyze-term task-term" ref={termRef}>
+          {lines.length === 0 && !partial && (
+            <div className="term-empty">Progress will stream here…</div>
+          )}
+          {lines.map((ln, i) => (
+            <div key={i} className={'term-line' + (ln.startsWith('$ ') ? ' term-cmd' : '')}>{ln || '\u00a0'}</div>
+          ))}
+          {partial && <div className="term-line term-partial">{partial}</div>}
+        </div>
+      </details>
 
       {task && terminalStates.has(task.state) && task.error && (
         <div className="af-error">{task.error}</div>

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, setDecision as apiSetDecision } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, fetchTasks, setDecision as apiSetDecision } from './api'
 import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState'
 import { applyDecisionHide } from './format'
 import type { Filters, View, Nav } from './urlState'
@@ -19,6 +19,13 @@ import SettingsPanel from './components/SettingsPanel'
 const PAGE = 60
 const GROUP_PAGE = 30
 const SCENE_PAGE = 30
+const TASK_LABELS: Record<string, string> = {
+  analyze_library: 'Analyze',
+  index_library: 'Index',
+  apply_decisions: 'Apply',
+  undo_apply: 'Undo',
+  autocull_duplicates: 'Auto-cull',
+}
 
 // One page of any list query, loosely typed for the optimistic cache patcher
 // (which walks images/groups/scenes pages uniformly).
@@ -322,9 +329,35 @@ export default function App() {
     }
   }, [qc, invalidateLists])
 
+  const taskList = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => fetchTasks(5),
+    refetchInterval: 1000,
+  })
+  const activeTask = taskList.data?.current ?? null
+  const lastRunningTaskId = useRef<string | null>(null)
+  const completedTaskIds = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (activeTask?.state === 'running') {
+      lastRunningTaskId.current = activeTask.id
+      return
+    }
+    const latest = taskList.data?.tasks?.[0]
+    if (!latest || latest.state === 'running') return
+    if (latest.id !== lastRunningTaskId.current) return
+    if (completedTaskIds.current.has(latest.id)) return
+    completedTaskIds.current.add(latest.id)
+    lastRunningTaskId.current = null
+    invalidateAfterTask(latest)
+  }, [activeTask, taskList.data?.tasks, invalidateAfterTask])
+
   const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal : groupTotal
   const headerLabel = view === 'grid' ? 'photos'
     : view === 'scenes' ? 'scenes' : 'duplicate groups'
+  const activeTaskPct = activeTask?.progress == null
+    ? null : Math.round(Math.max(0, Math.min(1, activeTask.progress)) * 100)
+  const activeTaskLabel = activeTask ? (TASK_LABELS[activeTask.type] ?? activeTask.type) : null
 
   return (
     <div className="app">
@@ -359,6 +392,17 @@ export default function App() {
             {headerCount.toLocaleString()} {headerLabel}
           </span>
           <div className="spacer" />
+          {activeTask && (
+            <button
+              className="task-chip"
+              onClick={() => setShowAnalyze(true)}
+              title="Open the current task"
+            >
+              <span className="task-chip-dot" />
+              <span>{activeTaskLabel}</span>
+              {activeTaskPct != null && <span>{activeTaskPct}%</span>}
+            </button>
+          )}
           <button className="btn" onClick={() => setShowAnalyze(true)} title="Re-run analysis from the web">
             Re-analyze
           </button>

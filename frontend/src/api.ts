@@ -11,7 +11,17 @@ import type {
 // Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
 async function jsonFetch<T>(url: string, opts?: RequestInit): Promise<T> {
   const r = await fetch(url, opts)
-  if (!r.ok) throw new Error(`request to ${url} failed`)
+  if (!r.ok) {
+    let detail = ''
+    try {
+      const body = await r.json() as { detail?: unknown }
+      if (typeof body.detail === 'string') detail = body.detail
+      else if (body.detail != null) detail = JSON.stringify(body.detail)
+    } catch {
+      // Non-JSON error bodies still get a useful status-based message below.
+    }
+    throw new Error(detail || `request to ${url} failed (${r.status})`)
+  }
   return r.json() as Promise<T>
 }
 

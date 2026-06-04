@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchApplyStatus, startTask } from '../api'
+import { fetchApplyStatus, fetchTasks, startTask } from '../api'
 import TaskPanel from './TaskPanel'
 import type { TaskSnapshot } from '../api/types'
 
@@ -19,6 +19,17 @@ export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
   const status = useQuery({ queryKey: ['applyStatus'], queryFn: fetchApplyStatus })
   const s = status.data
 
+  useEffect(() => {
+    fetchTasks().then((r) => {
+      const cur = r.current
+      if (cur?.state === 'running'
+          && (cur.type === 'apply_decisions' || cur.type === 'undo_apply')) {
+        setTaskId(cur.id)
+        setBusy(true)
+      }
+    }).catch(() => {})
+  }, [])
+
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['applyStatus'] })
     qc.invalidateQueries({ predicate: (q) => ['images', 'groups'].includes(q.queryKey[0] as string) })
@@ -34,8 +45,8 @@ export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
     try {
       const task = await startTask('apply_decisions')
       setTaskId(task.id)
-    } catch {
-      setMsg('Apply failed.')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Apply failed.')
       setBusy(false)
       refresh()
     }
@@ -48,8 +59,8 @@ export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
     try {
       const task = await startTask('undo_apply')
       setTaskId(task.id)
-    } catch {
-      setMsg('Undo failed.')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Undo failed.')
       setBusy(false)
       refresh()
     }
