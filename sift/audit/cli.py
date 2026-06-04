@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("folder")
     ap.add_argument("--recurse",        action="store_true")
     ap.add_argument("--out",            default=None)
+    ap.add_argument("--embed-store",    default=None,
+                    help="Shared content-hash embedding cache path. Point every "
+                         "root at one library-level store so the merge step can "
+                         "re-cluster faces/scenes across folders without "
+                         "recompute (default: <out_dir>/.embeddings.sqlite)")
     ap.add_argument("--dup-threshold",  type=int,   default=6)
     ap.add_argument("--dup-sim",        type=float, default=0.92, metavar="F",
                     help="CLIP cosine to treat two shots as near-duplicates "
@@ -265,10 +270,14 @@ def main():
     print(f"\nIncremental: {len(cached)} cached, {len(to_process)} to score "
           f"(of {len(paths)})")
 
-    # Content-hash-keyed embedding cache (sidecar next to the report). Optional:
+    # Content-hash-keyed embedding cache. Defaults to a sidecar next to the
+    # report, but a multi-root library points every root at one shared store
+    # (--embed-store) so the merge step can re-cluster across folders. Optional:
     # if it can't be opened we simply recompute everything as before.
+    store_path = (Path(args.embed_store) if args.embed_store
+                  else out_path.parent / ".embeddings.sqlite")
     try:
-        store = EmbedStore(out_path.parent / ".embeddings.sqlite")
+        store = EmbedStore(store_path)
     except Exception as e:
         print(f"  (embedding cache unavailable, will recompute: {e})")
         store = None

@@ -86,6 +86,48 @@ def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
     return scores
 
 
+def cluster_embeddings(emb_norm, eps: float = 0.50, ref_embeddings: dict | None = None,
+                       match_threshold: float = 0.40):
+    """DBSCAN identity clustering over L2-normalised face embeddings.
+
+    `emb_norm` is an (M, D) array of unit vectors (cosine space). Uses
+    min_samples=1 so singletons become their own cluster (label >= 0) rather than
+    noise, so every face is visible. Optionally maps named references
+    (`{name: unit_vector}`) to the nearest cluster centroid within
+    `match_threshold` cosine distance.
+
+    Returns (labels: list[int], cluster_names: {cluster_id: name}). This is the
+    one definition of the clustering rule, shared by per-image detection and the
+    global merge-time re-clustering so the two can't drift."""
+    import numpy as np
+    from sklearn.cluster import DBSCAN
+
+    if len(emb_norm) == 0:
+        return [], {}
+    emb_norm = np.asarray(emb_norm)
+    labels = [int(x) for x in
+              DBSCAN(eps=eps, min_samples=1, metric="cosine").fit(emb_norm).labels_]
+
+    cluster_names: dict = {}
+    if ref_embeddings:
+        cluster_ids = sorted({c for c in labels if c >= 0})
+        centroids = {cid: emb_norm[[i for i, l in enumerate(labels) if l == cid]].mean(axis=0)
+                     for cid in cluster_ids}
+        for name, ref in ref_embeddings.items():
+            ref = np.asarray(ref, dtype=np.float32)
+            n = np.linalg.norm(ref)
+            if n > 0:
+                ref = ref / n
+            best_cid, best_dist = -1, 1.0
+            for cid, c in centroids.items():
+                dist = 1.0 - float(ref @ c)
+                if dist < best_dist:
+                    best_dist, best_cid = dist, cid
+            if best_cid >= 0 and best_dist < match_threshold:
+                cluster_names[best_cid] = name
+    return labels, cluster_names
+
+
 def run_faces(paths, device: str,
               face_refs: dict | None = None,
               min_prob: float = 0.90,
@@ -121,7 +163,6 @@ def run_faces(paths, device: str,
     """
     import torch
     from facenet_pytorch import MTCNN, InceptionResnetV1
-    from sklearn.cluster import DBSCAN
 
     print(f"\nInitialising face detector + embedder on {device}...")
     # post_process=True → crops already normalised to [-1, 1] for InceptionResnetV1
@@ -187,30 +228,15 @@ def run_faces(paths, device: str,
     print(f"  Detected {len(all_faces)} face instances in {len(img_sizes)} images "
           f"(filtered out {n_filtered_rel} faces below rel-size {min_face_rel:.2f})")
 
-    # ── Phase 2: DBSCAN on L2-normalised embeddings (cosine metric) ───────────
+    # ── Phase 2: embed reference photos (model) so the shared clustering helper
+    #            can name clusters without re-loading anything ─────────────────
     emb_matrix = np.array([f[2] for f in all_faces])           # (M, 512)
     norms      = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
     emb_norm   = emb_matrix / np.maximum(norms, 1e-8)
 
-    # min_samples=1 → singletons become their own cluster (label ≥ 0)
-    # rather than noise (-1), so every face is visible in the viewer.
-    db     = DBSCAN(eps=eps, min_samples=1, metric='cosine').fit(emb_norm)
-    labels = db.labels_
-
-    n_clusters = len(set(labels))
-    print(f"  Identity clusters: {n_clusters}")
-
-    # ── Phase 3: cluster centroids ─────────────────────────────────────────────
-    cluster_ids       = [cid for cid in set(labels) if cid >= 0]
-    cluster_centroids = {
-        cid: emb_norm[labels == cid].mean(axis=0)
-        for cid in cluster_ids
-    }
-
-    # ── Phase 4: match reference photos to cluster IDs ────────────────────────
-    cluster_names: dict = {}
+    ref_embeddings: dict = {}
     if face_refs:
-        print("  Matching reference photos to clusters...")
+        print("  Embedding reference photos...")
         for name, ref_path in face_refs.items():
             try:
                 ref_img   = Image.open(ref_path).convert("RGB")
@@ -222,22 +248,16 @@ def run_faces(paths, device: str,
                     ref_crops = ref_crops.unsqueeze(0)
                 with torch.no_grad():
                     ref_emb = resnet(ref_crops[0:1].to(device)).cpu().numpy()[0]
-                ref_norm = ref_emb / max(float(np.linalg.norm(ref_emb)), 1e-8)
-
-                best_cid, best_dist = -1, 1.0
-                for cid, centroid in cluster_centroids.items():
-                    dist = 1.0 - float(ref_norm @ centroid)
-                    if dist < best_dist:
-                        best_dist, best_cid = dist, cid
-
-                MATCH_THRESHOLD = 0.40
-                if best_cid >= 0 and best_dist < MATCH_THRESHOLD:
-                    cluster_names[best_cid] = name
-                    print(f"    '{name}' → cluster {best_cid}  (dist={best_dist:.3f})")
-                else:
-                    print(f"    '{name}' → no match  (best dist={best_dist:.3f})")
+                ref_embeddings[name] = ref_emb
             except Exception as e:
                 print(f"    Reference error '{name}': {e}")
+
+    # ── Phase 3: cluster + name (single source of truth, shared with merge) ───
+    labels, cluster_names = cluster_embeddings(emb_norm, eps=eps,
+                                               ref_embeddings=ref_embeddings)
+    print(f"  Identity clusters: {len(set(labels))}")
+    for cid, name in cluster_names.items():
+        print(f"    '{name}' → cluster {cid}")
 
     # ── Phase 5: face-region sharpness + (optional) expression ─────────────────
     # Normalise sharpness across all detected faces so the score is a relative

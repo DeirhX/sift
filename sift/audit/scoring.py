@@ -43,6 +43,27 @@ def normalise_sharpness(values: list[float]) -> list[float]:
     return [(v - lo) / (hi - lo) for v in log_vals]
 
 
+def sharpness_basis(values: list[float]) -> tuple[float, float]:
+    """The (lo, hi) log1p reference range for normalising raw Laplacian variance
+    to 0-1. Computed once over the whole library and persisted, so per-image
+    sharpness/combined scores stay put across rescans (and are comparable across
+    folders) instead of drifting with each set's own min/max."""
+    logs = [float(np.log1p(v)) for v in values]
+    if not logs:
+        return 0.0, 1.0
+    return min(logs), max(logs)
+
+
+def normalise_with_basis(values: list[float], lo: float, hi: float) -> list[float]:
+    """Normalise raw Laplacian variances against a fixed `(lo, hi)` basis,
+    clamped to [0, 1] so a value beyond the basis saturates rather than
+    re-scaling everyone else. Mirrors normalise_sharpness's log1p transform."""
+    if hi <= lo:
+        return [0.5] * len(values)
+    span = hi - lo
+    return [min(1.0, max(0.0, (float(np.log1p(v)) - lo) / span)) for v in values]
+
+
 # ── CLIP-IQA (ViT-L/14 bipolar prompts) ──────────────────────────────────────
 
 def load_clip_iqa(device: str):

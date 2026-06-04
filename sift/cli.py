@@ -14,6 +14,7 @@ _USAGE = """usage: sift <command> [options]
 
 commands:
   analyze   run the analysis pipeline on a photo folder -> audit_report.json
+  merge     combine per-root audit reports -> one library audit_report.json
   index     ingest an audit_report.json -> photos.db + WebP thumbnails
   serve     launch the FastAPI review web app
 
@@ -30,6 +31,8 @@ def main(argv=None) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd == "analyze":
         from sift.audit.cli import main as run
+    elif cmd == "merge":
+        from sift.audit.merge_cli import main as run
     elif cmd == "index":
         from sift.web.build_db import main as run
     elif cmd == "serve":
