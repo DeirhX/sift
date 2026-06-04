@@ -5,7 +5,7 @@ import type {
   MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
   LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
   MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-  ApplyResponse, UndoResponse, AnalyzeStatus,
+  ApplyResponse, UndoResponse, AnalyzeStatus, TaskSnapshot, TaskListResponse,
 } from './api/types'
 
 // Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
@@ -133,6 +133,25 @@ export function applyDecisions(): Promise<ApplyResponse> {
 export function undoApply(): Promise<UndoResponse> {
   return jsonFetch<UndoResponse>('/api/apply/undo', { method: 'POST' })
 }
+
+// ── Generic long-running tasks ───────────────────────────────────────────────
+export function startTask(type: string, params: Record<string, unknown> = {}): Promise<TaskSnapshot> {
+  return jsonFetch<TaskSnapshot>('/api/tasks', jsonBody({ type, params }))
+}
+
+export function fetchTasks(limit = 20): Promise<TaskListResponse> {
+  return jsonFetch<TaskListResponse>(`/api/tasks?limit=${limit}`)
+}
+
+export function fetchTask(taskId: string): Promise<TaskSnapshot> {
+  return jsonFetch<TaskSnapshot>(`/api/tasks/${taskId}`)
+}
+
+export function cancelTask(taskId: string): Promise<TaskSnapshot> {
+  return jsonFetch<TaskSnapshot>(`/api/tasks/${taskId}/cancel`, { method: 'POST' })
+}
+
+export const taskStreamUrl = (taskId: string): string => `/api/tasks/${taskId}/stream`
 
 // ── Re-analysis (run sift analyze + index from the web, stream output) ────────
 export async function startAnalyze(params: unknown): Promise<AnalyzeStatus> {

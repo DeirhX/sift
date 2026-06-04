@@ -1,6 +1,6 @@
 """Coverage for the re-analysis endpoints WITHOUT spawning subprocesses: status
 when idle, cancel/conflict guards, and argv building + validation/clamping."""
-from types import SimpleNamespace
+import sqlite3
 
 import pytest
 from fastapi import HTTPException
@@ -17,9 +17,11 @@ def _build_steps(env, payload):
 @pytest.fixture(autouse=True)
 def reset_job():
     """No analysis job before/after each test, so we never touch a real run."""
-    server.CURRENT_JOB = None
+    server.CURRENT_ANALYZE_TASK_ID = None
+    server.tasks.MANAGER._active.clear()
     yield
-    server.CURRENT_JOB = None
+    server.CURRENT_ANALYZE_TASK_ID = None
+    server.tasks.MANAGER._active.clear()
 
 
 def test_status_idle(env):
@@ -31,7 +33,10 @@ def test_cancel_with_no_job_conflicts(env):
 
 
 def test_start_conflicts_when_already_running(env):
-    server.CURRENT_JOB = SimpleNamespace(state="running")
+    with sqlite3.connect(env.db) as conn:
+        conn.execute(
+            "INSERT INTO tasks (id, type, state, started) VALUES ('busy', 'analyze_library', 'running', 1)"
+        )
     r = env.client.post("/api/analyze", json={"folder": str(env.db.parent)})
     assert r.status_code == 409
 

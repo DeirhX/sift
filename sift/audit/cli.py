@@ -132,11 +132,22 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--top",            type=int,   default=30)
     ap.add_argument("--no-cache",       action="store_true",
                     help="Ignore the previous report; re-score every image")
+    ap.add_argument("--progress-json",  action="store_true",
+                    help=argparse.SUPPRESS)
     return ap
 
 
 def main():
     args = build_parser().parse_args()
+
+    def emit_progress(phase: str, pct: float, message: str,
+                      current: int | None = None, total: int | None = None):
+        if not args.progress_json:
+            return
+        print("SIFT_PROGRESS " + json.dumps({
+            "phase": phase, "pct": pct, "message": message,
+            "current": current, "total": total,
+        }), flush=True)
 
     folder = Path(args.folder)
     if not folder.exists():
@@ -146,6 +157,7 @@ def main():
     paths = [p for p in folder.glob(glob)
              if p.suffix.lower() in IMAGE_EXTENSIONS and p.is_file()]
     print(f"Found {len(paths)} images in {folder}")
+    emit_progress("scan", 0.03, f"Found {len(paths)} images", 0, len(paths))
     if not paths:
         sys.exit(0)
 
@@ -224,6 +236,7 @@ def main():
         raw_sharp[p] = laplacian_variance(p)
     norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
     sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
+    emit_progress("sharpness", 0.15, "Sharpness complete", len(paths), len(paths))
 
     # ── CLIP-IQA / PARA (new files only) ──
     clip_iqa_scores: dict = {}
@@ -247,6 +260,7 @@ def main():
         return 0.5
 
     combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
+    emit_progress("scoring", 0.35, "Scoring complete", len(paths), len(paths))
 
     # ── Perceptual hashes (reused from cache; only new files hashed) ──
     print("\nComputing perceptual hashes for duplicate detection...")
@@ -259,6 +273,7 @@ def main():
     new_hashes, new_sizes = compute_phashes(to_process) if to_process else ({}, {})
     hashes.update(new_hashes)
     img_sizes = new_sizes
+    emit_progress("duplicates", 0.45, "Perceptual hashes complete", len(paths), len(paths))
 
     # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
     capture_time: dict = {}
@@ -280,6 +295,7 @@ def main():
     if use_scenes and not args.no_clip:
         print()
         embeddings = compute_clip_embeddings(paths, device_for())
+        emit_progress("embeddings", 0.58, "CLIP embeddings complete", len(paths), len(paths))
 
     # 1) Near-duplicates first — the finest grain. CLIP cosine catches the
     #    "same shot, slight motion" pairs that phash (Hamming) reads as unrelated.
@@ -291,6 +307,8 @@ def main():
     )
     # Centrality per member -> the UI leads each group with its medoid frame.
     dup_central = dup_centrality(dup_groups, embeddings)
+    emit_progress("duplicates", 0.68, f"Found {len(dup_groups)} duplicate groups",
+                  len(dup_groups), len(dup_groups))
 
     # 2) Rough scenes, then coarsen so every dup group nests inside one scene
     #    (a near-dup spanning the sequential segmenter's boundary merges them).
@@ -436,6 +454,7 @@ def main():
             "images":           records,
         }, f, indent=2, ensure_ascii=False)
     print(f"\nReport saved: {out_path}")
+    emit_progress("report", 0.90, "Report written", len(records), len(records))
 
     # ── Console summary ──
     print(f"\n{'='*80}")
@@ -511,3 +530,4 @@ def main():
         print(f"\nMoved {moved} images scoring < {args.junk_threshold} to {junk_dir}")
 
     print(f"\nDone. Total: {len(records)} images, {len(dup_groups)} duplicate groups.")
+    emit_progress("done", 1.0, "Analyze complete", len(records), len(records))

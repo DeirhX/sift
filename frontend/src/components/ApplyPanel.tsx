@@ -1,13 +1,20 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchApplyStatus, applyDecisions, undoApply } from '../api'
+import { fetchApplyStatus, startTask } from '../api'
+import TaskPanel from './TaskPanel'
+import type { TaskSnapshot } from '../api/types'
+
+interface ApplyPanelProps {
+  onTaskDone?: (task: TaskSnapshot) => void
+}
 
 // Sidebar panel that moves 'del'-marked files into the library's _rejected/
 // folder (reversible) and can undo the last apply. Files are never deleted.
-export default function ApplyPanel() {
+export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
   const qc = useQueryClient()
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
+  const [taskId, setTaskId] = useState<string | null>(null)
 
   const status = useQuery({ queryKey: ['applyStatus'], queryFn: fetchApplyStatus })
   const s = status.data
@@ -25,12 +32,13 @@ export default function ApplyPanel() {
       `Nothing is permanently deleted — this can be undone.`)) return
     setBusy(true); setMsg(null)
     try {
-      const r = await applyDecisions()
-      setMsg(`Moved ${r.moved}${r.skipped ? `, skipped ${r.skipped}` : ''}.`)
-      refresh()
+      const task = await startTask('apply_decisions')
+      setTaskId(task.id)
     } catch {
       setMsg('Apply failed.')
-    } finally { setBusy(false) }
+      setBusy(false)
+      refresh()
+    }
   }
 
   const doUndo = async () => {
@@ -38,12 +46,25 @@ export default function ApplyPanel() {
     if (!window.confirm(`Move ${s.applied} file(s) back to their original locations?`)) return
     setBusy(true); setMsg(null)
     try {
-      const r = await undoApply()
-      setMsg(`Restored ${r.restored}${r.skipped ? `, skipped ${r.skipped}` : ''}.`)
-      refresh()
+      const task = await startTask('undo_apply')
+      setTaskId(task.id)
     } catch {
       setMsg('Undo failed.')
-    } finally { setBusy(false) }
+      setBusy(false)
+      refresh()
+    }
+  }
+
+  const taskDone = (task: TaskSnapshot) => {
+    setBusy(false)
+    const r = task.result ?? {}
+    if (task.type === 'apply_decisions') {
+      setMsg(`Moved ${r.moved ?? 0}${r.skipped ? `, skipped ${r.skipped}` : ''}.`)
+    } else if (task.type === 'undo_apply') {
+      setMsg(`Restored ${r.restored ?? 0}${r.skipped ? `, skipped ${r.skipped}` : ''}.`)
+    }
+    refresh()
+    onTaskDone?.(task)
   }
 
   if (!s) return null
@@ -64,6 +85,7 @@ export default function ApplyPanel() {
         </button>
       )}
       {msg && <div className="apply-msg">{msg}</div>}
+      <TaskPanel taskId={taskId} title="Apply task" compact onDone={taskDone} />
       <div className="apply-hint">Files move to <code>_rejected/</code>, never deleted.</div>
     </div>
   )

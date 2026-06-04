@@ -101,12 +101,23 @@ def _columns(conn, table: str) -> list[str]:
 
 def build(report_path: Path, db_path: Path, thumb_dir: Path,
           thumb_size: int, thumb_quality: int, workers: int,
-          skip_thumbs: bool, force_thumbs: bool, prune: bool = True) -> None:
+          skip_thumbs: bool, force_thumbs: bool, prune: bool = True,
+          progress_json: bool = False) -> None:
+
+    def emit_progress(phase: str, pct: float, message: str,
+                      current: int | None = None, total: int | None = None):
+        if not progress_json:
+            return
+        print("SIFT_PROGRESS " + json.dumps({
+            "phase": phase, "pct": pct, "message": message,
+            "current": current, "total": total,
+        }), flush=True)
 
     with open(report_path, encoding="utf-8") as f:
         report = json.load(f)
     images = report["images"]
     print(f"Loaded {len(images)} image records from {report_path.name}")
+    emit_progress("load", 0.05, f"Loaded {len(images)} image records", 0, len(images))
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -174,6 +185,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                      sig[0], sig[1]])
 
     print(f"  Hash reuse: {reused}/{len(images)} unchanged files")
+    emit_progress("hash", 0.15, f"Reusing {reused}/{len(images)} hashes", reused, len(images))
 
     hashes: dict[int, str] = {}
     raw_sizes: dict[int, tuple] = {}
@@ -195,6 +207,11 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                     failed += 1
                     if failed <= 10:
                         print(f"  fail (id={idx}): {err}")
+                done = made + skipped + failed
+                if done == len(jobs) or done % 25 == 0:
+                    emit_progress("thumbnails", 0.15 + 0.55 * (done / max(1, len(jobs))),
+                                  f"Processed {done}/{len(jobs)} images",
+                                  done, len(jobs))
 
     # ── Insert image records ─────────────────────────────────────────────────
     cluster_ids_seen: set[int] = set()
@@ -251,6 +268,10 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         if has_fts and im.get("caption"):
             conn.execute("INSERT INTO images_fts (rowid, caption) VALUES (?,?)",
                          (idx, im["caption"]))
+        if (idx + 1) == len(images) or (idx + 1) % 100 == 0:
+            emit_progress("database", 0.70 + 0.20 * ((idx + 1) / max(1, len(images))),
+                          f"Inserted {idx + 1}/{len(images)} rows",
+                          idx + 1, len(images))
 
     # ── Re-apply persisted manual face edits (reassign / delete) ─────────────
     # Faces were just rebuilt from the report, wiping any prior manual edits.
@@ -368,6 +389,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
     conn.commit()
     print(f"  DB written: {db_path}  ({len(cluster_ids_seen)} clusters)")
+    emit_progress("database", 0.95, "Database committed", len(images), len(images))
     if skip_thumbs:
         print("  Skipped thumbnail generation (--skip-thumbs)")
     else:
@@ -387,6 +409,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                     pass
         if removed:
             print(f"  Pruned {removed} orphaned thumbnails")
+    emit_progress("done", 1.0, "Index complete", len(images), len(images))
 
     conn.close()
     print("\nDone. Next:  python server.py --db", db_path)
@@ -405,6 +428,8 @@ def main() -> None:
     ap.add_argument("--force-thumbs",  action="store_true")
     ap.add_argument("--no-prune",      action="store_true",
                     help="Keep thumbnails no longer referenced by any image")
+    ap.add_argument("--progress-json", action="store_true",
+                    help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     report_path = Path(args.report)
@@ -416,7 +441,8 @@ def main() -> None:
 
     build(report_path, db_path, thumb_dir,
           args.thumb_size, args.thumb_quality, args.workers,
-          args.skip_thumbs, args.force_thumbs, prune=not args.no_prune)
+          args.skip_thumbs, args.force_thumbs, prune=not args.no_prune,
+          progress_json=args.progress_json)
 
 
 if __name__ == "__main__":
