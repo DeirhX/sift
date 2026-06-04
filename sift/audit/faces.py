@@ -115,6 +115,9 @@ def run_faces(paths, device: str,
     face_data  : {path: [{"bbox":[x1,y1,x2,y2], "prob":f,
                            "cluster_id":int, "name":str|None}, ...]}
     img_sizes  : {path: (width, height)}  — only for images with detected faces
+    face_embs  : {path: [(bbox, emb), ...]} — L2-normalised VGGFace2 embedding per
+                 detected face, bbox matching face_data's, for persisting to the
+                 content-hash embedding cache so clustering can run without re-detecting.
     """
     import torch
     from facenet_pytorch import MTCNN, InceptionResnetV1
@@ -179,7 +182,7 @@ def run_faces(paths, device: str,
     if not all_faces:
         print("  No faces detected.")
         del resnet
-        return {}, img_sizes
+        return {}, img_sizes, {}
 
     print(f"  Detected {len(all_faces)} face instances in {len(img_sizes)} images "
           f"(filtered out {n_filtered_rel} faces below rel-size {min_face_rel:.2f})")
@@ -243,13 +246,15 @@ def run_faces(paths, device: str,
     expr_scores = (run_face_expression([f[6] for f in all_faces], device)
                    if score_expr else [None] * len(all_faces))
 
-    # ── Phase 6: build per-image face records ──────────────────────────────────
+    # ── Phase 6: build per-image face records + embeddings ─────────────────────
     face_data: dict = {}
+    face_embs: dict = {}
     for idx, (p, _vi, _emb, box, prob, _sr, _ec) in enumerate(all_faces):
         cid  = int(labels[idx])
         name = cluster_names.get(cid) if cid >= 0 else None
+        bbox = [round(v, 1) for v in box]
         rec = {
-            "bbox":       [round(v, 1) for v in box],
+            "bbox":       bbox,
             "prob":       round(prob, 3),
             "cluster_id": cid,
             "name":       name,
@@ -258,6 +263,8 @@ def run_faces(paths, device: str,
         if expr_scores[idx] is not None:
             rec["expr"] = expr_scores[idx]
         face_data.setdefault(p, []).append(rec)
+        # L2-normalised embedding (cosine space), aligned with this face's bbox.
+        face_embs.setdefault(p, []).append((bbox, emb_norm[idx]))
 
     del resnet
-    return face_data, img_sizes
+    return face_data, img_sizes, face_embs

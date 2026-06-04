@@ -77,6 +77,8 @@ from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
                        coarsen_scenes_for_dups, group_scenes, read_capture_time,
                        compute_clip_embeddings)
 from .faces import run_faces
+from .hashing import content_hash as compute_content_hash
+from .embed_store import EmbedStore
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
 
@@ -174,6 +176,7 @@ def main():
     import imagehash
 
     prev_by_path: dict = {}
+    prev_by_hash: dict = {}
     if not args.no_cache and out_path.exists():
         try:
             with open(out_path, encoding="utf-8") as f:
@@ -190,6 +193,10 @@ def main():
                         prev.get("scene_model") is not None)
             if prev_cfg == cur_cfg:
                 prev_by_path = {r["path"]: r for r in prev.get("images", [])}
+                # Content-hash index: lets a file that moved/renamed reuse its
+                # record by identity (same bytes) even though its path changed.
+                prev_by_hash = {r["content_hash"]: r for r in prev.get("images", [])
+                                if r.get("content_hash")}
             else:
                 print(f"  (config changed {prev_cfg} -> {cur_cfg}; re-scoring all)")
         except Exception as e:
@@ -203,18 +210,25 @@ def main():
         except OSError:
             sigs[p] = (None, None)
 
+    def _outputs_ok(prev) -> bool:
+        """True when a cached record carries every output this run needs — the
+        identity-level check shared by path reuse and content-hash reuse."""
+        if not prev or "phash" not in prev:
+            return False
+        if use_para     and "para_aesthetic" not in prev: return False
+        if use_clip_iqa and "clip_iqa"       not in prev: return False
+        if args.caption and "caption"        not in prev: return False
+        if args.faces   and "faces"          not in prev: return False
+        if use_scenes   and "scene_group"    not in prev: return False
+        return True
+
     def reusable(p: Path):
         prev = prev_by_path.get(str(p))
-        if not prev or "phash" not in prev or prev.get("mtime") is None:
+        if not _outputs_ok(prev) or prev.get("mtime") is None:
             return None
         mt, sz = sigs[p]
         if sz is None or prev.get("fsize") != sz or abs(prev["mtime"] - mt) > 1e-6:
             return None
-        if use_para     and "para_aesthetic" not in prev: return None
-        if use_clip_iqa and "clip_iqa"       not in prev: return None
-        if args.caption and "caption"        not in prev: return None
-        if args.faces   and "faces"          not in prev: return None
-        if use_scenes   and "scene_group"    not in prev: return None
         return prev
 
     cached: dict = {}
@@ -222,8 +236,42 @@ def main():
     for p in paths:
         prev = reusable(p)
         (cached.__setitem__(p, prev) if prev is not None else to_process.append(p))
+
+    # Content hash (stable identity) for every image: reuse from an unchanged
+    # path-cached record, else hash the bytes. Persisted in the report so build_db
+    # can skip re-hashing, and used to key the embedding cache below.
+    chash: dict = {}
+    for p in paths:
+        prev = cached.get(p)
+        h = prev.get("content_hash") if prev else None
+        chash[p] = h or compute_content_hash(p)
+
+    # Content-hash reuse: a file that's new *by path* may be a move/rename of one
+    # we already scored. Recover its record by identity so moves cost nothing —
+    # only genuinely new/changed bytes fall through to the models.
+    if prev_by_hash:
+        recovered = []
+        for p in to_process:
+            prev = prev_by_hash.get(chash[p])
+            if _outputs_ok(prev):
+                cached[p] = prev
+                recovered.append(p)
+        if recovered:
+            rec_set = set(recovered)
+            to_process = [p for p in to_process if p not in rec_set]
+            print(f"  Recovered {len(recovered)} moved/renamed file(s) from cache "
+                  f"by content hash")
+
     print(f"\nIncremental: {len(cached)} cached, {len(to_process)} to score "
           f"(of {len(paths)})")
+
+    # Content-hash-keyed embedding cache (sidecar next to the report). Optional:
+    # if it can't be opened we simply recompute everything as before.
+    try:
+        store = EmbedStore(out_path.parent / ".embeddings.sqlite")
+    except Exception as e:
+        print(f"  (embedding cache unavailable, will recompute: {e})")
+        store = None
 
     def device_for() -> str:
         import torch
@@ -289,12 +337,23 @@ def main():
     # Grouping is global (like face clustering): recomputed every run over the
     # whole set, even when all per-image scores came from cache, because near-dup
     # membership and scene boundaries depend on the full set. CLIP embeddings are
-    # re-derived here (never persisted) and drive both "same scene" and the
-    # CLIP-aware near-dup test; phash is the fallback / exact-dup signal.
+    # reused from the content-hash cache when available (only new/changed images
+    # are embedded) and drive both "same scene" and the CLIP-aware near-dup test;
+    # phash is the fallback / exact-dup signal.
     embeddings: dict | None = None
+    clip_new: list = []
     if use_scenes and not args.no_clip:
-        print()
-        embeddings = compute_clip_embeddings(paths, device_for())
+        embeddings = {}
+        if store is not None:
+            cached_clip = store.get_clip({chash[p] for p in paths})
+            embeddings = {p: cached_clip[chash[p]]
+                          for p in paths if chash[p] in cached_clip}
+        clip_new = [p for p in paths if p not in embeddings]
+        if clip_new:
+            print()
+            embeddings.update(compute_clip_embeddings(clip_new, device_for()))
+        print(f"  CLIP embeddings: {len(paths) - len(clip_new)} cached, "
+              f"{len(clip_new)} computed")
         emit_progress("embeddings", 0.58, "CLIP embeddings complete", len(paths), len(paths))
 
     # 1) Near-duplicates first — the finest grain. CLIP cosine catches the
@@ -337,6 +396,7 @@ def main():
     # Clustering is global, so any change forces a whole-folder re-detection;
     # an unchanged folder reuses cached faces.
     face_data: dict = {}
+    face_embs: dict = {}
     faces_global = bool(args.faces and to_process)
     if faces_global:
         refs: dict = {}
@@ -346,7 +406,7 @@ def main():
                 refs[name.strip()] = Path(rpath.strip())
             else:
                 print(f"  Warning: --face-ref '{item}' ignored (expected NAME=PATH)")
-        face_data, _ = run_faces(
+        face_data, _, face_embs = run_faces(
             paths, device_for(),
             face_refs=refs or None,
             min_face_size=args.face_min_size,
@@ -360,6 +420,7 @@ def main():
         mt, sz = sigs[p]
         rec["mtime"] = mt
         rec["fsize"] = sz
+        rec["content_hash"] = chash[p]
         rec["capture_time"] = capture_time.get(p)
         if p in hashes:
             rec["phash"] = str(hashes[p])
@@ -369,7 +430,10 @@ def main():
     for p in paths:
         if p in cached:
             # Reuse all per-image outputs; only recompute set-relative scalars.
+            # path/filename may differ from the cached record if the file moved.
             rec = dict(cached[p])
+            rec["path"] = str(p)
+            rec["filename"] = p.name
             rec["sharpness"] = round(sharpness[p], 4)
             rec["combined"]  = round(combined[p], 4)
             rec["dup_group"] = path_to_group.get(p)
@@ -455,6 +519,26 @@ def main():
         }, f, indent=2, ensure_ascii=False)
     print(f"\nReport saved: {out_path}")
     emit_progress("report", 0.90, "Report written", len(records), len(records))
+
+    # ── Persist newly computed embeddings to the content-hash-keyed cache ──────
+    # CLIP scene vectors and per-face VGGFace2 vectors are pixel-invariant, so
+    # caching them by content hash lets future rescans/moves and the global
+    # face-clustering / scene-regroup steps reuse them with zero recompute. Only
+    # freshly computed vectors are written (cached ones are already stored).
+    if store is not None:
+        try:
+            if embeddings and clip_new:
+                store.put_clip((chash[p], embeddings[p])
+                               for p in clip_new if p in embeddings)
+            for p, items in face_embs.items():
+                store.put_faces(chash[p], items)
+            if clip_new or face_embs:
+                print(f"  Embeddings cached: {len(clip_new)} CLIP, "
+                      f"{sum(len(v) for v in face_embs.values())} faces")
+        except Exception as e:
+            print(f"  (embedding cache write skipped: {e})")
+        finally:
+            store.close()
 
     # ── Console summary ──
     print(f"\n{'='*80}")
