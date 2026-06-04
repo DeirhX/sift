@@ -5,6 +5,7 @@ import type { Scene } from '../api/types'
 interface ScenePileProps {
   scene: Scene
   onOpen: () => void
+  focused?: boolean
   activeTags?: string[]
   onToggleTag?: (tag: string) => void
 }
@@ -14,7 +15,7 @@ interface ScenePileProps {
 // its capture-time range. Clicking opens the scene panel to drill in. Its most
 // common photo keywords are shown as chips that double as tag-filter toggles
 // (`onToggleTag`), so you can pivot the whole view to a keyword from here.
-export default function ScenePile({ scene, onOpen, activeTags = [], onToggleTag }: ScenePileProps) {
+export default function ScenePile({ scene, onOpen, focused = false, activeTags = [], onToggleTag }: ScenePileProps) {
   const items = scene.items
   const top = items[0]
   const behind = items.slice(1, 3)
@@ -28,7 +29,7 @@ export default function ScenePile({ scene, onOpen, activeTags = [], onToggleTag 
   const keywords = sceneKeywords(items, 6)
 
   return (
-    <div className="pile scene-pile" onClick={onOpen} title={`Scene of ${items.length} photos`}>
+    <div className={'pile scene-pile' + (focused ? ' focused' : '')} onClick={onOpen} title={`Scene of ${items.length} photos`}>
       <div className="pile-stack">
         {behind.map((it, i) => (
           <div key={it.id} className={`pile-card back back-${i + 1}`}>

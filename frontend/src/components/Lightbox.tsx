@@ -5,6 +5,7 @@ import { fullUrl, thumbUrl, fetchLocations, revealPath, fetchMeta } from '../api
 import { fmt, aestheticScore, fmtTime, qualityColor } from '../format'
 import type { ImageItem, LocationsResponse } from '../api/types'
 import type { DecisionFn, SetLightboxIndex } from '../types'
+import DecideButtons from './DecideButtons'
 
 // Normalise a path for prefix comparison against the configured roots: lower
 // case, forward slashes, no trailing slash (mirrors the server's normcase).
@@ -195,16 +196,13 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
         </div>
 
         <div className="lb-actions">
-          <button
+          <DecideButtons
+            item={item}
+            onDecision={onDecision}
             className="btn lb-act"
-            style={{ background: item.decision === 'keep' ? 'var(--keep)' : undefined, color: item.decision === 'keep' ? '#06231a' : undefined }}
-            onClick={() => onDecision(item, 'keep')}
-          >Keep (k / +)</button>
-          <button
-            className="btn lb-act"
-            style={{ background: item.decision === 'del' ? 'var(--del)' : undefined, color: item.decision === 'del' ? '#2a0a06' : undefined }}
-            onClick={() => onDecision(item, 'del')}
-          >Delete (d / −)</button>
+            keepLabel="Keep (k / +)"
+            delLabel="Delete (d / −)"
+          />
         </div>
 
         {item.caption && <div className="lb-caption">{item.caption}</div>}
