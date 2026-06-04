@@ -139,6 +139,34 @@ export function applyDecisionHide<T extends { decision?: string | null }>(
   return items.filter((it) => it.decision !== 'del')
 }
 
+// "Hide deletions" applied to a LIST of containers (scenes / duplicate groups):
+// cull each container's del-marked members, then drop any container left empty
+// so the overview shrinks as you cull. A no-op for every non-'notdel' decision.
+// One definition shared by SceneView + GroupView (they used to inline identical
+// map/filter copies).
+export function hideDelContainers<
+  I extends { decision?: string | null },
+  C extends { items: I[] },
+>(containers: C[], decision: string): C[] {
+  if (decision !== 'notdel') return containers
+  return containers
+    .map((c) => ({ ...c, items: applyDecisionHide(c.items, decision) }))
+    .filter((c) => c.items.length > 0)
+}
+
+// "Hide deletions" applied to a SINGLE open review (group/scene overlay): hide
+// del-marked members, but fall back to the unfiltered container rather than
+// empty it — an open overlay with nothing to render is worse than showing the
+// photos you just deleted. Returns null/obj untouched for non-'notdel'.
+export function hideDelInReview<
+  I extends { decision?: string | null },
+  C extends { items: I[] },
+>(container: C | null, decision: string): C | null {
+  if (!container || decision !== 'notdel') return container
+  const kept = applyDecisionHide(container.items, decision)
+  return kept.length ? { ...container, items: kept } : container
+}
+
 export interface SceneKeyword {
   tag: string
   count: number

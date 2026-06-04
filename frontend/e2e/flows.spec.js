@@ -200,6 +200,27 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(review).toHaveCount(0)
   })
 
+  test('arrow keys focus a scene pile and Enter opens its review', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Scenes' }).click()
+    const piles = page.locator('.scene-pile')
+    await expect(piles).toHaveCount(2)
+
+    // Scenes used to be mouse-only; they now share the grid keyboard nav with
+    // the Groups view. Arrowing drives a roving focus ring across the piles.
+    await page.locator('.grid-scroll').focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(page.locator('.scene-pile.focused')).toHaveCount(1)
+
+    // Enter opens the focused scene's review — the same overlay a click yields.
+    await page.keyboard.press('Enter')
+    const review = page.locator('.review-panel')
+    await expect(review).toBeVisible()
+    await expect(review).toContainText('Scene #')
+    await review.getByRole('button', { name: 'Close' }).click()
+    await expect(review).toHaveCount(0)
+  })
+
   test('a scene with no near-dup sets still opens into an open image', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: 'Scenes' }).click()

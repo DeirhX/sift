@@ -509,9 +509,11 @@ select:focus, input:focus {
 /* Decision keep/del active state — shared by the grid cards and the
    group-review herobar so the two decision controls read identically. */
 .card .actions button.keep.active,
-.herobar-btns button.keep.active { background: var(--keep); border-color: var(--keep); color: var(--on-keep); font-weight: 600; }
+.herobar-btns button.keep.active,
+.lb-actions button.keep.active { background: var(--keep); border-color: var(--keep); color: var(--on-keep); font-weight: 600; }
 .card .actions button.del.active,
-.herobar-btns button.del.active { background: var(--del); border-color: var(--del); color: var(--on-del); font-weight: 600; }
+.herobar-btns button.del.active,
+.lb-actions button.del.active { background: var(--del); border-color: var(--del); color: var(--on-del); font-weight: 600; }
 
 .badge-dup {
   position: absolute;

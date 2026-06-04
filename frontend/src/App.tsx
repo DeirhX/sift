@@ -1,9 +1,10 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchMeta, fetchImages, fetchGroups, fetchScenes, fetchTasks, setDecision as apiSetDecision } from './api'
-import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState'
-import { applyDecisionHide } from './format'
-import type { Filters, View, Nav } from './urlState'
+import { DEFAULT_FILTERS, parseState } from './urlState'
+import { applyDecisionHide, hideDelInReview } from './format'
+import { useOverlayNav } from './hooks/useOverlayNav'
+import type { Filters, View } from './urlState'
 import type { ImageItem, TaskSnapshot } from './api/types'
 import type { Decision, BulkDecision, SetLightboxIndex } from './types'
 import Sidebar from './components/Sidebar'
@@ -44,10 +45,6 @@ const INITIAL = parseState(window.location.search)
 export default function App() {
   const [filters, setFilters] = useState<Filters>(INITIAL.filters)
   const [view, setView] = useState<View>(INITIAL.view)   // 'grid' | 'groups' | 'scenes'
-  // The single source of truth for "what overlay is open" (lightbox / group /
-  // scene review, the focused photo, and zoom). Mirrored to the URL so Back,
-  // shared links and reloads all behave (see urlState.ts).
-  const [nav, setNav] = useState<Nav | null>(INITIAL.nav)
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
@@ -56,6 +53,13 @@ export default function App() {
   const focusGrid = useCallback(() => {
     document.querySelector<HTMLElement>('.grid-scroll')?.focus()
   }, [])
+
+  // "What overlay is open" + all of its browser-history choreography lives in
+  // useOverlayNav; here we just consume the resulting nav state and actions.
+  const {
+    nav, closeOverlay,
+    openImage, openGroup, openScene, selectImage, setZoom,
+  } = useOverlayNav({ filters, view, initial: INITIAL, setFilters, setView, focusGrid })
 
   // Global shortcut: "/" jumps to the search box (unless already typing or a
   // modal is open). Pairs with the grid's arrow-key navigation.
@@ -71,94 +75,6 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [nav, showAnalyze, showSettings])
-
-  // --- Overlay navigation -------------------------------------------------
-  // Every overlay transition (open, focus a different photo, zoom, close) is a
-  // real history entry, so Back walks back through exactly what you did. Each
-  // entry stores `navDepth`: 0 when an overlay first opens, +1 per in-overlay
-  // step. The Close button uses that depth to unwind the whole overlay in one
-  // go (history.go), while plain Back peels one step at a time.
-  const writeUrl = useCallback((nextNav: Nav | null, push: boolean) => {
-    const url = window.location.pathname + buildSearch(filters, view, nextNav)
-    let depth: number | null = null
-    if (nextNav) {
-      const prev = window.history.state?.navDepth
-      const sameOverlay = nav && nav.kind === nextNav.kind && nav.refId === nextNav.refId
-      depth = sameOverlay && typeof prev === 'number' ? prev + 1 : 0
-    }
-    const state = { navDepth: depth }
-    if (push) window.history.pushState(state, '', url)
-    else window.history.replaceState(state, '', url)
-  }, [filters, view, nav])
-
-  const navigate = useCallback((nextNav: Nav | null, push = true) => {
-    setNav(nextNav)
-    writeUrl(nextNav, push)
-  }, [writeUrl])
-
-  // Unwind the entire open overlay back to the pre-overlay entry (so Back from
-  // there returns to wherever you were, not back into the overlay).
-  const closeOverlay = useCallback(() => {
-    const d = window.history.state?.navDepth
-    if (typeof d === 'number' && d >= 0) window.history.go(-(d + 1))
-    else navigate(null, true)
-  }, [navigate])
-
-  const openImage = useCallback((id: number) => navigate({ kind: 'lightbox', imgId: id }), [navigate])
-  const openGroup = useCallback((refId: number) => navigate({ kind: 'group', refId, imgId: null, zoom: false }), [navigate])
-  const openScene = useCallback((refId: number) => navigate({ kind: 'scene', refId, imgId: null, zoom: false }), [navigate])
-  // Focus a different photo / toggle zoom inside the current review overlay,
-  // preserving its kind + refId so only the relevant URL bits change.
-  const selectImage = useCallback((id: number) => navigate(nav ? { ...nav, imgId: id } : null), [navigate, nav])
-  const setZoom = useCallback((z: boolean) => navigate(nav ? { ...nav, zoom: z } : null), [navigate, nav])
-
-  // Browser Back/Forward: re-derive everything from the URL.
-  useEffect(() => {
-    const onPop = () => {
-      const s = parseState(window.location.search)
-      setFilters(s.filters)
-      setView(s.view)
-      setNav(s.nav)
-    }
-    window.addEventListener('popstate', onPop)
-    return () => window.removeEventListener('popstate', onPop)
-  }, [])
-
-  // If the app loaded straight into an overlay (deep link / reload / new tab),
-  // there's no plain-list entry beneath it for Close to unwind onto — so
-  // closeOverlay's history.go(-(d+1)) would no-op (nothing before entry 0) or
-  // land on another overlay URL, and the modal would never close. Plant that
-  // base entry once: replace the current entry with the list (overlay stripped),
-  // then push the overlay back on top at depth 0. Now every overlay has a
-  // pre-overlay entry below it, so Close works however it was reached.
-  useEffect(() => {
-    if (!INITIAL.nav) return
-    const path = window.location.pathname
-    window.history.replaceState({ navDepth: null }, '',
-      path + buildSearch(INITIAL.filters, INITIAL.view, null))
-    window.history.pushState({ navDepth: 0 }, '',
-      path + buildSearch(INITIAL.filters, INITIAL.view, INITIAL.nav))
-  }, [])
-
-  // Hand keyboard focus back to the list when an overlay closes, so arrow
-  // navigation resumes (works for grid, groups and scenes — all use
-  // `.grid-scroll`).
-  const prevNavRef = useRef<Nav | null>(nav)
-  useEffect(() => {
-    if (prevNavRef.current && !nav) setTimeout(focusGrid, 0)
-    prevNavRef.current = nav
-  }, [nav, focusGrid])
-
-  // Mirror filter + view + nav into the URL. Filter/view edits replace (no
-  // history spam); overlay transitions already pushed their own entry above,
-  // so here we only canonicalise the string when it drifted, preserving the
-  // current entry's navDepth.
-  useEffect(() => {
-    const next = window.location.pathname + buildSearch(filters, view, nav)
-    if (next !== window.location.pathname + window.location.search) {
-      window.history.replaceState(window.history.state, '', next)
-    }
-  }, [filters, view, nav])
 
   const meta = useQuery({ queryKey: ['meta'], queryFn: fetchMeta })
 
@@ -209,22 +125,14 @@ export default function App() {
   // Resolve the open overlay's backing record from the loaded query pages. May
   // be null right after a deep-link/reload until the relevant page arrives;
   // the overlay simply waits rather than rendering against missing data.
-  // Hide del members in the open review too, so culling shrinks the strip live.
-  // Falls back to the unfiltered set if hiding would empty it (e.g. you deleted
-  // everything in the scene) — an empty review has nothing to render.
-  const cullDel = <I extends { decision?: string | null }, T extends { items: I[] }>(
-    obj: T | null,
-  ): T | null => {
-    if (!obj || filters.decision !== 'notdel') return obj
-    const kept = applyDecisionHide(obj.items, filters.decision)
-    return kept.length ? { ...obj, items: kept } : obj
-  }
-  const openGroupObj = cullDel(nav?.kind === 'group'
+  // hideDelInReview hides del members in the open review too (so culling shrinks
+  // the strip live), falling back to the unfiltered set if hiding would empty it.
+  const openGroupObj = hideDelInReview(nav?.kind === 'group'
     ? (groups.data?.pages.flatMap((p) => p.groups) ?? []).find((g) => g.dup_group === nav.refId) ?? null
-    : null)
-  const openSceneObj = cullDel(nav?.kind === 'scene'
+    : null, filters.decision)
+  const openSceneObj = hideDelInReview(nav?.kind === 'scene'
     ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) ?? null
-    : null)
+    : null, filters.decision)
 
   // Adapt the index-based Lightbox (grid) to id-based nav: each move pushes a
   // history step; closing unwinds the overlay.
@@ -437,6 +345,7 @@ export default function App() {
           <SceneView
             query={scenes}
             onOpen={openScene}
+            reviewOpen={nav?.kind === 'scene'}
             hideDel={filters.decision === 'notdel'}
             activeTags={filters.tags}
             onToggleTag={(t) => toggleInList('tags', t)}
