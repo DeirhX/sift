@@ -62,12 +62,12 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Re-attach to an already-running analyze/index task on open.
+  // Re-attach to any already-running library task on open. The modal is now the
+  // lightweight "current task" surface, not only an analyze form.
   useEffect(() => {
     fetchTasks().then((s) => {
       const cur = s.current
-      if (cur?.state === 'running'
-          && (cur.type === 'analyze_library' || cur.type === 'index_library')) {
+      if (cur?.state === 'running') {
         setTaskId(cur.id)
         setRunning(true)
       }

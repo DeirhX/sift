@@ -936,8 +936,9 @@ def undo_apply():
 CURRENT_ANALYZE_TASK_ID: str | None = None
 
 
-def _sse(event: str, data) -> str:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+def _sse(event: str, data, event_id: int | None = None) -> str:
+    prefix = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{prefix}event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @app.post("/api/tasks", response_model=TaskSnapshot)
@@ -965,7 +966,7 @@ def task_cancel(task_id: str):
 
 
 @app.get("/api/tasks/{task_id}/stream")
-async def task_stream(task_id: str):
+async def task_stream(task_id: str, after: int = 0):
     """SSE replay + tail for any persisted task."""
     _configure_tasks()
     # Validate before returning the StreamingResponse so bad ids get a normal 404.
@@ -973,16 +974,16 @@ async def task_stream(task_id: str):
 
     async def gen():
         yield _sse("snapshot", first)
-        seq = 0
+        seq = max(0, after)
         while True:
             events = tasks.MANAGER.events_after(task_id, seq)
             for ev in events:
                 seq = ev["seq"]
                 et = ev["event_type"]
                 if et == "end":
-                    yield _sse("end", ev["payload"])
+                    yield _sse("end", ev["payload"], seq)
                     return
-                yield _sse(et, ev["payload"])
+                yield _sse(et, ev["payload"], seq)
             snap = tasks.MANAGER.snapshot(task_id)
             if snap["state"] != "running" and not events:
                 yield _sse("end", {"state": snap["state"], "error": snap.get("error")})

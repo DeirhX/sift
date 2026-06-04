@@ -55,4 +55,13 @@ describe('fetch wrappers', () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: false })))
     await expect(fetchMeta()).rejects.toThrow()
   })
+
+  it('jsonFetch surfaces FastAPI detail messages', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: false,
+      status: 409,
+      json: () => Promise.resolve({ detail: 'a task is already running' }),
+    })))
+    await expect(fetchMeta()).rejects.toThrow('a task is already running')
+  })
 })

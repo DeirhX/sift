@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { startTask } from '../api'
+import { fetchTasks, startTask } from '../api'
 import { applyDecisionHide } from '../format'
 import GroupPile from './GroupPile'
 import TaskPanel from './TaskPanel'
@@ -33,11 +33,22 @@ interface GroupViewProps {
 export default function GroupView({ query, onOpen, reviewOpen = false, hideDel = false, onTaskDone }: GroupViewProps) {
   const [culling, setCulling] = useState(false)
   const [taskId, setTaskId] = useState<string | null>(null)
+  const [taskError, setTaskError] = useState<string | null>(null)
   const [focusIdx, setFocusIdx] = useState<number | null>(null)   // keyboard-focused pile
   const sentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const pileGridRef = useRef<HTMLDivElement>(null)
   const qc = useQueryClient()
+
+  useEffect(() => {
+    fetchTasks().then((r) => {
+      const cur = r.current
+      if (cur?.state === 'running' && cur.type === 'autocull_duplicates') {
+        setTaskId(cur.id)
+        setCulling(true)
+      }
+    }).catch(() => {})
+  }, [])
 
   const doAutocull = async () => {
     if (!window.confirm(
@@ -45,16 +56,19 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
       '"delete"? This overwrites existing marks inside groups (files are not ' +
       'moved until you Apply).')) return
     setCulling(true)
+    setTaskError(null)
     try {
       const task = await startTask('autocull_duplicates')
       setTaskId(task.id)
-    } catch {
+    } catch (e) {
+      setTaskError(e instanceof Error ? e.message : 'Auto-cull failed.')
       setCulling(false)
     }
   }
 
   const taskDone = (task: TaskSnapshot) => {
     setCulling(false)
+    setTaskError(null)
     qc.invalidateQueries({ queryKey: ['groups'] })
     qc.invalidateQueries({ queryKey: ['images'] })
     qc.invalidateQueries({ queryKey: ['applyStatus'] })
@@ -170,6 +184,7 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
         </button>
         <span className="group-hint">Marks only — review or undo before applying.</span>
       </div>
+      {taskError && <div className="af-error">{taskError}</div>}
       <TaskPanel taskId={taskId} title="Auto-cull task" compact onDone={taskDone} />
       <div className="pile-grid" ref={pileGridRef}>
         {groups.map((g, i) => (
