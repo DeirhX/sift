@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { autocullGroups } from '../api'
+import { startTask } from '../api'
 import { applyDecisionHide } from '../format'
 import GroupPile from './GroupPile'
-import type { GroupsResponse } from '../api/types'
+import TaskPanel from './TaskPanel'
+import type { GroupsResponse, TaskSnapshot } from '../api/types'
 
 // Minimal slice of the useInfiniteQuery result this view consumes (decoupled
 // from react-query's generics; the real result is structurally assignable).
@@ -21,6 +22,7 @@ interface GroupViewProps {
   onOpen: (dupGroup: number) => void
   reviewOpen?: boolean
   hideDel?: boolean
+  onTaskDone?: (task: TaskSnapshot) => void
 }
 
 // Overview of duplicate groups as stacked photo piles. Arrow keys move a
@@ -28,8 +30,9 @@ interface GroupViewProps {
 // overlay (`onOpen(dup_group)`). The overlay itself lives at the app root so
 // it is URL-driven / Back-navigable. `reviewOpen` lets the app pause grid keys
 // while that overlay is up (the overlay handles its own keyboard).
-export default function GroupView({ query, onOpen, reviewOpen = false, hideDel = false }: GroupViewProps) {
+export default function GroupView({ query, onOpen, reviewOpen = false, hideDel = false, onTaskDone }: GroupViewProps) {
   const [culling, setCulling] = useState(false)
+  const [taskId, setTaskId] = useState<string | null>(null)
   const [focusIdx, setFocusIdx] = useState<number | null>(null)   // keyboard-focused pile
   const sentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -43,13 +46,19 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
       'moved until you Apply).')) return
     setCulling(true)
     try {
-      await autocullGroups()
-      qc.invalidateQueries({ queryKey: ['groups'] })
-      qc.invalidateQueries({ queryKey: ['images'] })
-      qc.invalidateQueries({ queryKey: ['applyStatus'] })
-    } finally {
+      const task = await startTask('autocull_duplicates')
+      setTaskId(task.id)
+    } catch {
       setCulling(false)
     }
+  }
+
+  const taskDone = (task: TaskSnapshot) => {
+    setCulling(false)
+    qc.invalidateQueries({ queryKey: ['groups'] })
+    qc.invalidateQueries({ queryKey: ['images'] })
+    qc.invalidateQueries({ queryKey: ['applyStatus'] })
+    onTaskDone?.(task)
   }
 
   let groups = query.data?.pages.flatMap((p) => p.groups) ?? []
@@ -161,6 +170,7 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
         </button>
         <span className="group-hint">Marks only — review or undo before applying.</span>
       </div>
+      <TaskPanel taskId={taskId} title="Auto-cull task" compact onDone={taskDone} />
       <div className="pile-grid" ref={pileGridRef}>
         {groups.map((g, i) => (
           <GroupPile

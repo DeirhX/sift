@@ -9,7 +9,9 @@ folder. Nothing is ever hard-deleted.
 Everything runs on your machine. There is no cloud, no auth, no telemetry.
 
 For a developer-facing map of the modules and design decisions, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+[`ARCHITECTURE.md`](ARCHITECTURE.md). For the physical culling/apply flow and
+duplicate filtering audit, see
+[`PHOTO_ORGANIZATION_PIPELINE.md`](PHOTO_ORGANIZATION_PIPELINE.md).
 
 ## How it works
 

@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "codegen": "python -m sift.web.openapi_schema > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts",
+    "codegen": "python -c \"import pathlib, sys; sys.path.insert(0, str(pathlib.Path('..').resolve())); from sift.web.openapi_schema import main; main()\" > openapi.json && openapi-typescript openapi.json -o src/api/schema.d.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vite build && playwright test",

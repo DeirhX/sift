@@ -4,7 +4,7 @@ import { fetchMeta, fetchImages, fetchGroups, fetchScenes, setDecision as apiSet
 import { DEFAULT_FILTERS, parseState, buildSearch } from './urlState'
 import { applyDecisionHide } from './format'
 import type { Filters, View, Nav } from './urlState'
-import type { ImageItem } from './api/types'
+import type { ImageItem, TaskSnapshot } from './api/types'
 import type { Decision, BulkDecision, SetLightboxIndex } from './types'
 import Sidebar from './components/Sidebar'
 import PhotoGrid from './components/PhotoGrid'
@@ -301,6 +301,27 @@ export default function App() {
     }
   }, [patchDecision, invalidateLists])
 
+  const invalidateAfterTask = useCallback((task: TaskSnapshot) => {
+    const allLists = () => qc.invalidateQueries({
+      predicate: (q) => ['images', 'groups', 'scenes', 'meta', 'applyStatus'].includes(q.queryKey[0] as string),
+    })
+    switch (task.type) {
+      case 'analyze_library':
+      case 'index_library':
+      case 'apply_decisions':
+      case 'undo_apply':
+        allLists()
+        break
+      case 'autocull_duplicates':
+        qc.invalidateQueries({
+          predicate: (q) => ['images', 'groups', 'scenes', 'applyStatus'].includes(q.queryKey[0] as string),
+        })
+        break
+      default:
+        invalidateLists()
+    }
+  }, [qc, invalidateLists])
+
   const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal : groupTotal
   const headerLabel = view === 'grid' ? 'photos'
     : view === 'scenes' ? 'scenes' : 'duplicate groups'
@@ -315,6 +336,7 @@ export default function App() {
         resetFilters={resetFilters}
         total={total}
         onPeopleChange={refetchPeople}
+        onTaskDone={invalidateAfterTask}
       />
       <div className="main">
         <div className="topbar">
@@ -381,6 +403,7 @@ export default function App() {
             onOpen={openGroup}
             reviewOpen={nav?.kind === 'group'}
             hideDel={filters.decision === 'notdel'}
+            onTaskDone={invalidateAfterTask}
           />
         )}
       </div>
@@ -424,7 +447,7 @@ export default function App() {
         <AnalyzePanel
           defaultFolder={meta.data?.meta?.folder || ''}
           onClose={() => setShowAnalyze(false)}
-          onDone={refetchPeople}
+          onDone={invalidateAfterTask}
         />
       )}
 
