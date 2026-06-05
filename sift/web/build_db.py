@@ -121,8 +121,17 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     emit_progress("load", 0.05, f"Loaded {len(images)} image records", 0, len(images))
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
+
+    # Snapshot the existing library before we wipe and rebuild its tables. The
+    # rebuild is one big transaction (a crash rolls back), but a pre-rebuild copy
+    # is cheap insurance against a bug or file-level corruption taking the
+    # irreplaceable bits (decisions, names, face overrides) with it.
+    from sift.web import backup
+    snap = backup.snapshot(db_path, label="prebuild")
+    if snap:
+        print(f"  Backup before rebuild: {snap}")
+
+    conn = photodb.connect(db_path)
     photodb.create_base_schema(conn)
     has_fts = True
     try:

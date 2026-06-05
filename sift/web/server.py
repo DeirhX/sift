@@ -85,7 +85,7 @@ app.add_middleware(
 
 @contextmanager
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = photodb.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -94,10 +94,20 @@ def db():
 
 
 def _ensure_schema():
-    """Run the shared migration authority so the server works against an older
-    photos.db without a rebuild. New score columns stay NULL until the next
-    build_db ingest populates them."""
+    """Bring the served DB fully up to schema, creating it from scratch if needed.
+
+    Creates the base tables (so a cold/empty photos.db is usable — the whole
+    point of starting the server before anything is analyzed), then runs the
+    shared migration authority so an older DB also works without a rebuild. Every
+    statement is idempotent (CREATE/columns guarded), so this is safe on first
+    boot, on an existing library, and on every restart alike."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db() as conn:
+        photodb.create_base_schema(conn)
+        try:
+            conn.executescript(photodb.FTS_SCHEMA)
+        except sqlite3.OperationalError:
+            pass                                   # SQLite built without FTS5
         photodb.ensure_schema(conn)
         conn.commit()
 
@@ -1173,7 +1183,20 @@ def _init_runtime(db_path: Path, thumb_dir: Path, frontend_dist: Path | None,
         return
     print(f"DB:     {DB_PATH}")
     print(f"Thumbs: {THUMB_DIR}")
+    from sift.web import backup
+    if not backup.quick_check(DB_PATH):
+        print(f"WARNING: integrity check FAILED on {DB_PATH} — the library may be "
+              f"corrupt. Restore a snapshot with `sift backup restore` "
+              f"(see `sift backup list`).")
     _ensure_schema()
+    # Throttled safety snapshot: guarantees a recent copy of accumulating
+    # decisions/names exists, without spamming on reload restarts.
+    try:
+        snap = backup.snapshot_if_stale(DB_PATH)
+        if snap:
+            print(f"Backup: {snap}")
+    except Exception as e:                          # never block startup on this
+        print(f"Backup: skipped ({e})")
     _configure_tasks()
     tasks.MANAGER.abandon_running()
     _init_photo_roots(photo_roots)
@@ -1192,10 +1215,31 @@ def _startup_from_reload_env() -> None:
     _init_runtime(db_path, thumb_dir, frontend_dist, _runtime_env_photo_roots())
 
 
+def _default_db_path() -> Path:
+    """Where the library lives when --db is omitted: a per-user app-data dir, so
+    `sift serve` works cold with zero arguments and the first folder can be
+    analyzed entirely from the web UI.
+
+    The DB, its thumbnail cache (.thumbs) and the analyze report (audit_report.json)
+    all colocate here, deliberately keeping the user's photo folders pristine —
+    no photos.db / .thumbs / audit_report.json scattered among the originals.
+    (Rejected/trashed files still move next to their originals, not here.)"""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "PhotoOrganizer" / "photos.db"
+
+
 def main() -> None:
     global DB_PATH, THUMB_DIR, FRONTEND_DIST
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db",     required=True)
+    ap.add_argument("--db", default=None,
+                    help="SQLite library path. Defaults to a per-user app-data "
+                         "location, created empty on first run so you can analyze "
+                         "your first folder entirely from the web UI.")
     ap.add_argument("--thumbs", default=None)
     ap.add_argument("--host",   default="127.0.0.1")
     ap.add_argument("--port",   type=int, default=8000)
@@ -1210,9 +1254,11 @@ def main() -> None:
                          "Use with the Vite dev server for near-immediate web/API updates.")
     args = ap.parse_args()
 
-    db_path = Path(args.db)
+    db_path = Path(args.db) if args.db else _default_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     if not db_path.exists():
-        print(f"Error: DB {db_path} not found — run `sift index` first"); sys.exit(1)
+        print(f"No library at {db_path} — starting empty. Open the web UI and use "
+              f"'Library operations' to analyze your first folder.")
     thumb_dir = Path(args.thumbs) if args.thumbs else db_path.parent / ".thumbs"
     frontend_dist = _resolve_frontend_dist(args.frontend_dist)
 

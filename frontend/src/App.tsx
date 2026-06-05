@@ -334,7 +334,16 @@ export default function App() {
           images.isLoading ? (
             <div className="spinner">Loading…</div>
           ) : items.length === 0 ? (
-            <div className="empty">No photos match these filters.</div>
+            !meta.data?.meta?.folder ? (
+              <div className="empty empty-cold">
+                <p>No library yet — nothing has been analyzed.</p>
+                <button className="btn primary" onClick={() => setShowAnalyze(true)}>
+                  Analyze your first folder
+                </button>
+              </div>
+            ) : (
+              <div className="empty">No photos match these filters.</div>
+            )
           ) : (
             <PhotoGrid
               items={items}
