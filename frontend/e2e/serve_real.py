@@ -20,6 +20,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent                 # frontend/e2e
 FRONTEND = HERE.parent                                  # frontend
+REPO_ROOT = FRONTEND.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 import sqlite3                                          # noqa: E402
 
@@ -75,9 +77,6 @@ def prepare():
 
 def main():
     prepare()
-    server.DB_PATH = DB
-    server.THUMB_DIR = THUMBS
-    server.FRONTEND_DIST = FRONTEND / "dist"
     # Fresh, empty DB: create the base tables (then migrations) so the server
     # answers queries on an empty library until analysis populates it.
     conn = sqlite3.connect(DB)
@@ -85,7 +84,7 @@ def main():
     photodb.ensure_schema(conn)
     conn.commit()
     conn.close()
-    server._mount_frontend()
+    server._init_runtime(DB, THUMBS, FRONTEND / "dist", [str(LIB)])
     import uvicorn
     print(f"real e2e server on http://127.0.0.1:{PORT}  (db={DB})")
     uvicorn.run(server.app, host="127.0.0.1", port=PORT, log_level="warning")

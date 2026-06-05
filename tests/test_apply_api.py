@@ -1,5 +1,6 @@
 """Coverage for the reversible Trash flow: moving 'del' files into _trash/,
 status accounting, restore, and emptying. Uses real files on disk."""
+import sqlite3
 from pathlib import Path
 
 from conftest import items_by_name
@@ -57,6 +58,21 @@ def test_apply_undo_restores(real_library):
     assert items_by_name(env.client)["y.jpg"]["path"] == str(env.lib / "y.jpg")
     # Log cleared, so nothing is left to undo.
     assert env.client.get("/api/apply/status").json()["applied"] == 0
+
+
+def test_apply_undo_marks_missing_trash_file_missing(real_library):
+    env = real_library(SPECS)
+    _mark(env, "y.jpg", "del")
+    env.client.post("/api/apply")
+    (env.lib / "_trash" / "y.jpg").unlink()
+
+    r = env.client.post("/api/apply/undo").json()
+
+    assert r == {"restored": 0, "skipped": 1}
+    with sqlite3.connect(env.db) as conn:
+        state = conn.execute("SELECT state FROM trash_moves").fetchone()[0]
+    assert state == "missing"
+    assert "y.jpg" not in items_by_name(env.client)
 
 
 def test_apply_empty_trash_deletes(real_library):
