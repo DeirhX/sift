@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { fetchTasks, startTask } from '../api'
+import { fetchTasks, startTask, cancelTask } from '../api'
 import TaskPanel from './TaskPanel'
+import FolderInput from './FolderInput'
 import type { TaskSnapshot } from '../api/types'
 
 interface AnalyzeParams {
@@ -49,6 +50,7 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
   })
   const [taskId, setTaskId] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showAdv, setShowAdv] = useState(false)
 
@@ -100,7 +102,19 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
 
   const taskDone = (task: TaskSnapshot) => {
     setRunning(false)
+    setCancelling(false)
     onDone?.(task)
+  }
+
+  const doCancel = async () => {
+    if (!taskId || !running) return
+    setCancelling(true)
+    try {
+      await cancelTask(taskId)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setCancelling(false)
+    }
   }
 
   return (
@@ -110,18 +124,24 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
           <b>Library operations</b>
           {running && <span className="analyze-status running">Running…</span>}
           <div className="spacer" />
-          <button className="btn" onClick={onClose}>Close</button>
+          <div className="review-head-actions">
+            {running && (
+              <button className="btn danger" disabled={cancelling} onClick={doCancel}>
+                {cancelling ? 'Cancelling…' : 'Cancel run'}
+              </button>
+            )}
+            <button className="btn ghost" onClick={onClose}>Close</button>
+          </div>
         </div>
 
         <div className="analyze-body">
           <div className="analyze-form">
             <label className="af-row">
               <span>Folder</span>
-              <input
-                type="text"
+              <FolderInput
                 value={p.folder}
                 disabled={running}
-                onChange={(e) => set({ folder: e.target.value })}
+                onChange={(v) => set({ folder: v })}
                 placeholder="path to image library"
               />
             </label>
@@ -187,7 +207,7 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
             </div>
           </div>
 
-          <TaskPanel taskId={taskId} title="Library task" onDone={taskDone} />
+          <TaskPanel taskId={taskId} title="Library task" showCancel={false} onDone={taskDone} />
         </div>
       </div>
     </div>
