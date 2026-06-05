@@ -16,7 +16,7 @@ from .imaging import load_rgb
 
 # ── Perceptual hashing / duplicate detection ──────────────────────────────────
 
-def compute_phashes(paths: list) -> tuple[dict, dict]:
+def compute_phashes(paths: list, progress=None) -> tuple[dict, dict]:
     """Returns (hashes, sizes). Sizes are raw (pre-EXIF-transpose) (w, h),
     matching the coordinate space the face detector uses for its bboxes, so
     the frontend can scale face overlays and lay out aspect-correct tiles.
@@ -24,17 +24,24 @@ def compute_phashes(paths: list) -> tuple[dict, dict]:
     The hash itself is taken on the EXIF-corrected (upright) image, so an
     orientation-variant re-save matches its sibling instead of reading as a
     90°-rotated stranger. `sizes` stays raw on purpose — it's a coordinate
-    contract with the face overlays, a separate concern from visual similarity."""
+    contract with the face overlays, a separate concern from visual similarity.
+
+    `progress`, if given, is called as progress(done, total) after each image so
+    a caller can surface live progress — this phase reads every file from disk
+    (slow over a cloud-synced drive), so a frozen bar here is otherwise alarming."""
     import imagehash
     hashes: dict = {}
     sizes:  dict = {}
-    for p in tqdm(paths, desc="Perceptual hashing"):
+    n = len(paths)
+    for i, p in enumerate(tqdm(paths, desc="Perceptual hashing"), 1):
         try:
             im = load_rgb(p)
             sizes[p] = im.size
             hashes[p] = imagehash.phash(ImageOps.exif_transpose(im))
         except Exception as e:
             print(f"  hash error {p.name}: {e}")
+        if progress is not None:
+            progress(i, n)
     return hashes, sizes
 
 
@@ -285,15 +292,18 @@ def read_capture_time(path) -> float | None:
 
 
 def compute_clip_embeddings(paths: list, device: str,
-                            batch_size: int = 64) -> dict:
+                            batch_size: int = 64, progress=None) -> dict:
     """L2-normalised CLIP ViT-B/32 image embeddings per path, for semantic scene
     similarity. Standardised on ViT-B/32 regardless of the aesthetic backend so
-    scene grouping is consistent. Returns {path: 1-D float32 ndarray}."""
+    scene grouping is consistent. Returns {path: 1-D float32 ndarray}.
+
+    `progress(done, total)`, if given, fires after each batch for live progress."""
     import torch
 
     model, prep, _ = load_openclip_b32(device)
 
     embs: dict = {}
+    done, n = 0, len(paths)
     for t, bpaths in iter_image_batches(paths, prep, device,
                                         batch_size, "Scene embeddings (CLIP)"):
         with torch.no_grad(), torch.amp.autocast(device):
@@ -301,6 +311,9 @@ def compute_clip_embeddings(paths: list, device: str,
             f = f / f.norm(dim=-1, keepdim=True)
         for p, v in zip(bpaths, f.cpu().float().numpy()):
             embs[p] = v
+        done += len(bpaths)
+        if progress is not None:
+            progress(done, n)
 
     del model
     return embs
