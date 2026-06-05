@@ -4,7 +4,7 @@ This document audits the part of PhotoOrganizer that decides which photos are
 duplicates and the part that physically moves files. The short version: this is
 a culling pipeline, not a folder reorganization pipeline. It scores and groups
 photos, stores review decisions, then reversibly moves rejected originals into
-`_rejected/`. It does not hard-delete photos.
+`_trash/`. It hard-deletes photos only when the user explicitly empties Trash.
 
 ## Pipeline Overview
 
@@ -14,7 +14,7 @@ The workflow is split into three commands behind the `sift` dispatcher:
 | --- | --- | --- | --- |
 | Analyze | `sift analyze <folder>` | `sift/audit/cli.py`, `sift/audit/grouping.py` | Writes `audit_report.json`; optional `--move-junk` moves low-score files |
 | Index | `sift index <audit_report.json>` | `sift/web/build_db.py`, `sift/web/photodb.py` | Writes `photos.db` and `.thumbs/*.webp`; may prune orphan thumbnails |
-| Review/apply | `sift serve --db photos.db` | `sift/web/server.py`, `frontend/src/*` | Marks keep/delete decisions; Apply moves `del` files to `<library>/_rejected/` |
+| Review/apply | `sift serve --db photos.db` | `sift/web/server.py`, `sift/web/library_ops.py`, `frontend/src/*` | Marks keep/delete decisions; Trash moves `del` files to `<library>/_trash/`; Empty Trash deletes |
 
 End-to-end:
 
@@ -37,8 +37,9 @@ sift index
 sift serve
   -> browser UI reviews grid, duplicate groups, and scenes
   -> decisions table records content_hash -> keep|del
-  -> Apply moves del-marked originals into _rejected/
-  -> Undo moves logged files back
+  -> Trash moves del-marked originals into _trash/
+  -> Restore moves trashed files back
+  -> Empty Trash permanently deletes trashed files
 ```
 
 ## Duplicate Detection
@@ -82,7 +83,7 @@ There are three different meanings of "filtered out" in the codebase:
 
 1. Hidden from a view.
 2. Marked as `del` in the database.
-3. Physically moved to `_rejected/`.
+3. Physically moved to `_trash/`.
 
 Those are deliberately separate. A duplicate group by itself does not move any
 file.
@@ -134,29 +135,31 @@ can produce different keepers for the same duplicate group.
 
 ### Physical Move
 
-`apply_decisions()` in `sift/web/server.py` is the physical exclusion step. It
-selects every image joined to a `del` decision and moves files that still live
-outside the rejected folder:
+`library_ops.trash_decisions()` is the physical exclusion step. It selects every
+image joined to a `del` decision (or explicit `image_ids` for file-level trash)
+and moves files that still live outside the Trash folder:
 
 ```text
-source path -> <library>/_rejected/<unique filename>
+source path -> <library>/_trash/<unique filename>
 ```
 
 The destination folder comes from the DB `meta.folder` value. Filename collisions
-are handled by `_unique_dest()`, which appends `_1`, `_2`, and so on.
+are handled by `unique_dest()`, which appends `_1`, `_2`, and so on.
 
 After a successful move:
 
-- `images.path` is updated to the new `_rejected/` location.
-- The move is logged in `applied_moves`.
+- `images.path` is updated to the new `_trash/` location.
+- The move is logged in `trash_moves` with state `trashed`.
 - The decision remains attached to the content hash.
 
-`undo_apply()` walks `applied_moves` in reverse order and moves files back to
-their original paths when possible.
+`restore_trash()` walks `trash_moves` in reverse order and moves files back to
+their original paths when possible. Successful rows become `restored`; missing
+trash files become `missing`. `empty_trash()` deletes `trashed` files and marks
+rows `emptied`.
 
 Apply skip cases:
 
-- The source file is already under `_rejected/`.
+- The source file is already under `_trash/`.
 - The source path no longer exists.
 - `shutil.move()` raises `OSError`.
 
@@ -174,24 +177,21 @@ workflow.
 
 ## Important Edge Cases
 
-- Exact byte-identical copies share the same `content_hash`, and decisions are
-  keyed by that hash. That is useful for preserving decisions across moves, but
-  it means the system cannot represent "keep this exact copy, delete that exact
-  copy" for two files with identical bytes. A later decision for the same hash
-  overwrites the earlier one. In bulk culling, that can mark every identical copy
-  the same way.
+- Exact byte-identical copies share the same `content_hash`, and normal
+  keep/delete decisions are keyed by that hash. File movement is tracked by
+  `trash_moves.image_id`, so task callers can trash one exact copy with
+  `image_ids`, but the ordinary Del verdict still applies hash-wide.
 - The UI's representative can differ from server auto-cull. UI group review uses
   `dup_central` first; server auto-cull and grid hide-dups use `combined`.
 - `--no-scenes` also prevents CLIP embeddings from being computed in the current
   analyzer flow, so duplicate grouping falls back to phash-only even though the
   flag sounds scene-specific.
-- Re-running `sift analyze --recurse` on the same library after Apply may scan
-  `_rejected/` again unless the caller excludes or moves it outside the scanned
-  tree. Rejected photos can re-enter the report.
+- Re-running `sift analyze --recurse` excludes `_trash/` and legacy `_rejected/`
+  so trashed/rejected photos do not re-enter the report.
 - Duplicate grouping is `O(n^2)` over candidate image pairs, so very large
   libraries will get slow.
-- Apply is reversible, but undo is best-effort. If the rejected file is missing,
-  or the original path already exists, that move is skipped.
+- Trash restore is best-effort. If the trashed file is missing, the row becomes
+  `missing`; if the original path already exists, restore uses a unique filename.
 
 ## Source Map
 
@@ -203,7 +203,8 @@ workflow.
 | DB ingest and thumbnails | `sift/web/build_db.py` |
 | Schema and decision table | `sift/web/photodb.py` |
 | Read filters and grouped pages | `sift/web/queries.py` |
-| Decision API, auto-cull, apply, undo | `sift/web/server.py` |
+| Decision API and routes | `sift/web/server.py` |
+| Auto-cull, trash, restore, empty-trash operations | `sift/web/library_ops.py` |
 | UI representative selection | `frontend/src/format.ts` |
 | Duplicate group review | `frontend/src/components/GroupReview.tsx` |
 | Apply/undo panel | `frontend/src/components/ApplyPanel.tsx` |

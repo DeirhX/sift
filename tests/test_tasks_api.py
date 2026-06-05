@@ -1,4 +1,5 @@
 """Coverage for the generic web task runner."""
+import sqlite3
 import time
 from pathlib import Path
 
@@ -72,6 +73,24 @@ def test_trash_task_can_move_one_exact_duplicate_copy(real_library):
     assert not (env.lib / "copy-b.jpg").exists()
     trash_items = items_by_name(env.client, "?limit=50&decision=trash")
     assert list(trash_items) == ["copy-b.jpg"]
+
+
+def test_restore_task_marks_missing_trash_file_missing(real_library):
+    env = real_library([("x.jpg", 0.80, None, "mx"), ("y.jpg", 0.50, None, "my")])
+    _mark(env, "y.jpg", "del")
+    start = env.client.post("/api/tasks", json={"type": "trash_decisions", "params": {}}).json()
+    _wait_done(env.client, start["id"])
+    (env.lib / "_trash" / "y.jpg").unlink()
+
+    restore = env.client.post("/api/tasks", json={"type": "restore_trash", "params": {}}).json()
+    done = _wait_done(env.client, restore["id"])
+
+    assert done["state"] == "done"
+    assert done["result"] == {"restored": 0, "skipped": 1}
+    with sqlite3.connect(env.db) as conn:
+        state = conn.execute("SELECT state FROM trash_moves").fetchone()[0]
+    assert state == "missing"
+    assert "y.jpg" not in items_by_name(env.client)
 
 
 def test_running_task_conflicts(env):

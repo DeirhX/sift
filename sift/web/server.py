@@ -41,18 +41,18 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from sift.web import photodb
+from sift.web import library_ops, photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
 from sift.web.queries import (DEC_ON, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
+from sift.web.routes.trash import create_router as create_trash_router
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
-    MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-    ApplyResponse, UndoResponse, TrashStatusResponse, TrashListResponse,
-    AnalyzeStatus, TaskStartRequest, TaskSnapshot, TaskListResponse)
+    MergeResponse, AssignFaceResponse, AutocullResponse, AnalyzeStatus,
+    TaskStartRequest, TaskSnapshot, TaskListResponse)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -117,6 +117,9 @@ def _configure_tasks():
     Tests patch these globals directly, so routes call this defensively instead
     of assuming `main()` was the only initializer."""
     tasks.MANAGER.configure(db_path=DB_PATH, thumb_dir=THUMB_DIR, db_factory=db)
+
+
+app.include_router(create_trash_router(db))
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -818,195 +821,7 @@ def autocull_groups():
     rest 'del'. Overwrites existing marks within groups. Marks only — files
     are not touched until /api/apply."""
     with db() as conn:
-        gids = [r["dup_group"] for r in conn.execute(
-            "SELECT DISTINCT dup_group FROM images WHERE dup_group IS NOT NULL")]
-        kept = deleted = 0
-        for gid in gids:
-            members = conn.execute(
-                """SELECT content_hash FROM images WHERE dup_group=?
-                   ORDER BY combined DESC, id ASC""", (gid,)).fetchall()
-            for i, m in enumerate(members):
-                if not m["content_hash"]:
-                    continue
-                dec = "keep" if i == 0 else "del"
-                conn.execute(
-                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                    (m["content_hash"], dec))
-                kept += (i == 0)
-                deleted += (i != 0)
-        conn.commit()
-    return {"groups": len(gids), "kept": kept, "deleted": deleted}
-
-
-# ── Apply decisions: move 'del' files to a _rejected/ folder (reversible) ──────
-
-def _ensure_moves_table(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS applied_moves (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            image_id  INTEGER,
-            from_path TEXT,
-            to_path   TEXT,
-            ts        TEXT
-        )""")
-
-
-def _unique_dest(dest_dir: Path, name: str) -> Path:
-    dest = dest_dir / name
-    if not dest.exists():
-        return dest
-    stem, suf = Path(name).stem, Path(name).suffix
-    k = 1
-    while (dest_dir / f"{stem}_{k}{suf}").exists():
-        k += 1
-    return dest_dir / f"{stem}_{k}{suf}"
-
-
-def _rejected_dir(conn) -> Path:
-    root = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-    if not root:
-        raise HTTPException(500, "library folder unknown")
-    return Path(root["value"]) / "_rejected"
-
-
-def _trash_dir(conn) -> Path:
-    root = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-    if not root:
-        raise HTTPException(500, "library folder unknown")
-    return Path(root["value"]) / "_trash"
-
-
-def _ensure_trash_table(conn):
-    photodb.ensure_schema(conn)
-
-
-def _trash_counts(conn, trash: Path) -> dict:
-    _ensure_trash_table(conn)
-    trash_str = str(trash)
-    pending = 0
-    for r in conn.execute(
-        f"""SELECT i.path FROM images i
-           JOIN {DEC_ON}
-           LEFT JOIN trash_moves tm ON tm.image_id=i.id AND tm.state='trashed'
-           WHERE d.decision='del' AND tm.id IS NULL"""):
-        if not str(r["path"]).startswith(trash_str):
-            pending += 1
-    trashed = conn.execute(
-        "SELECT COUNT(*) FROM trash_moves WHERE state='trashed'").fetchone()[0]
-    emptied = conn.execute(
-        "SELECT COUNT(*) FROM trash_moves WHERE state='emptied'").fetchone()[0]
-    return {"pending": pending, "trashed": trashed, "emptied": emptied}
-
-
-@app.get("/api/apply/status", response_model=ApplyStatusResponse)
-def apply_status():
-    with db() as conn:
-        trash = _trash_dir(conn)
-        counts = _trash_counts(conn, trash)
-        trash_str = str(trash)
-    return {"pending": counts["pending"], "applied": counts["trashed"],
-            "trashed": counts["trashed"], "trash_dir": trash_str,
-            "rejected_dir": trash_str}
-
-
-@app.get("/api/trash/status", response_model=TrashStatusResponse)
-def trash_status():
-    with db() as conn:
-        trash = _trash_dir(conn)
-        counts = _trash_counts(conn, trash)
-    return {**counts, "trash_dir": str(trash)}
-
-
-@app.get("/api/trash", response_model=TrashListResponse)
-def trash_list():
-    with db() as conn:
-        _ensure_trash_table(conn)
-        rows = conn.execute(
-            """SELECT id, image_id, hash, from_path, trash_path, state, trashed_at
-               FROM trash_moves WHERE state='trashed' ORDER BY trashed_at DESC, id DESC"""
-        ).fetchall()
-    items = [{
-        "id": r["id"], "image_id": r["image_id"],
-        "filename": Path(r["trash_path"]).name,
-        "hash": r["hash"], "original_path": r["from_path"],
-        "trash_path": r["trash_path"], "state": r["state"],
-        "trashed_at": r["trashed_at"],
-    } for r in rows]
-    return {"total": len(items), "items": items}
-
-
-@app.post("/api/apply", response_model=ApplyResponse)
-def apply_decisions():
-    """Move every 'del'-marked file into <library>/_trash/. Updates each
-    image's stored path and logs the move so it can be restored. Never deletes."""
-    moved, skipped = 0, 0
-    with db() as conn:
-        _ensure_trash_table(conn)
-        trash = _trash_dir(conn)
-        trash_str = str(trash)
-        rows = conn.execute(
-            f"""SELECT i.id, i.path, i.content_hash FROM images i
-               JOIN {DEC_ON}
-               LEFT JOIN trash_moves tm ON tm.image_id=i.id AND tm.state='trashed'
-               WHERE d.decision='del' AND tm.id IS NULL""").fetchall()
-        if rows:
-            trash.mkdir(parents=True, exist_ok=True)
-        for r in rows:
-            src = Path(r["path"])
-            if str(src).startswith(trash_str) or not src.exists():
-                skipped += 1
-                continue
-            dest = _unique_dest(trash, src.name)
-            try:
-                shutil.move(str(src), str(dest))
-            except OSError:
-                skipped += 1
-                continue
-            # Only the path moves; the decision stays attached via content hash.
-            conn.execute("UPDATE images SET path=? WHERE id=?", (str(dest), r["id"]))
-            conn.execute(
-                """INSERT INTO trash_moves
-                   (image_id, hash, from_path, trash_path, state, trashed_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (r["id"], r["content_hash"], str(src), str(dest), "trashed",
-                 datetime.now().isoformat(timespec="seconds")))
-            moved += 1
-        conn.commit()
-    return {"moved": moved, "skipped": skipped,
-            "trash_dir": trash_str, "rejected_dir": trash_str}
-
-
-@app.post("/api/apply/undo", response_model=UndoResponse)
-def undo_apply():
-    """Restore every trashed file back to its original location."""
-    restored, skipped = 0, 0
-    with db() as conn:
-        _ensure_trash_table(conn)
-        rows = conn.execute(
-            """SELECT id, image_id, from_path, trash_path
-               FROM trash_moves WHERE state='trashed' ORDER BY id DESC"""
-        ).fetchall()
-        for r in rows:
-            src = Path(r["trash_path"])
-            dst = Path(r["from_path"])
-            if src.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.exists():
-                    dst = _unique_dest(dst.parent, dst.name)
-                try:
-                    shutil.move(str(src), str(dst))
-                except OSError:
-                    skipped += 1
-                    continue
-                conn.execute("UPDATE images SET path=? WHERE id=?", (str(dst), r["image_id"]))
-                restored += 1
-            else:
-                skipped += 1
-            conn.execute(
-                "UPDATE trash_moves SET state=?, restored_at=? WHERE id=?",
-                ("restored", datetime.now().isoformat(timespec="seconds"), r["id"]))
-        conn.commit()
-    return {"restored": restored, "skipped": skipped}
+        return library_ops.autocull_duplicates(conn)
 
 
 # ── Generic web tasks (analyze, index, apply, undo, autocull) ─────────────────

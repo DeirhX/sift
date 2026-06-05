@@ -16,9 +16,9 @@ reachable through one console command (`sift <stage>`, see `sift/cli.py`).
       │                     │                          │
   scans a folder    reads audit_report.json     serves photos.db over HTTP,
   scores/groups/    → photos.db (SQLite)         mutates decisions/faces,
-  captions/faces    → .thumbs/ (WebP cache)      moves rejects (reversibly)
+  captions/faces    → .thumbs/ (WebP cache)      moves rejects to Trash
       │                     │                          │
-      └──► audit_report.json ┘                         └──► <library>/_rejected/
+      └──► audit_report.json ┘                         └──► <library>/_trash/
 ```
 
 The split matters: the GPU-heavy analysis (`sift.audit`) is a batch CLI job; the
@@ -36,10 +36,12 @@ cleanly: a web-only install (`pip install -e .`) skips the multi-GB `[ml]` stack
 | `sift/audit/` | ~1450 | The analysis pipeline, split into focused modules (see below). Writes `audit_report.json`. The package `__init__` re-exports the public surface. |
 | `sift/web/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. (`sift index`) |
 | `sift/web/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
-| `sift/web/server.py` | ~1040 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), `_rejected/` apply+undo, and the `/api/analyze/*` lifecycle. (`sift serve`) |
+| `sift/web/server.py` | ~1250 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), generic task routes, and static frontend serving. (`sift serve`) |
 | `sift/web/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→dict helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. Returns plain dicts; FastAPI validates them against the route's `response_model` (see `schemas.py`). |
-| `sift/web/schemas.py` | ~225 | **Response DTOs.** Pydantic models for every endpoint's JSON (`ImageItem`, `GroupedImageItem`, the paginated `*Response` wrappers, `MetaResponse`, `AnalyzeStatus`, …), attached as `response_model=` on the routes. This is what makes `/openapi.json` carry real response schemas, which the frontend codegens into `schema.d.ts` (the "can't drift" contract). Nullable fields are `X \| None` so `null`s are emitted where the UI expects them; `AnalyzeStatus` uses `response_model_exclude_unset=True` to keep its idle-vs-running shape. |
-| `sift/web/analysis.py` | ~210 | **Reanalysis subsystem.** `AnalysisJob` (background thread running `python -m sift` steps, parsing tqdm `\r` progress into a live line + committed lines) and `build_analyze_steps` (UI payload → validated/clamped argv). Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
+| `sift/web/schemas.py` | ~250 | **Response DTOs.** Pydantic models for every endpoint's JSON (`ImageItem`, `GroupedImageItem`, paginated wrappers, `MetaResponse`, task/trash models, …), attached as `response_model=` on the routes. This is what makes `/openapi.json` carry real response schemas, which the frontend codegens into `schema.d.ts` (the "can't drift" contract). |
+| `sift/web/tasks.py` | ~540 | **Generic web task runner.** Persists task state/events in SQLite, runs long operations in a background thread, streams SSE with replay, and delegates library mutations to `library_ops.py`. |
+| `sift/web/library_ops.py` | ~250 | **Write-side library operations.** Shared implementation for autocull, trash counts/list, move-to-trash, restore, and empty-trash. Called by both sync routes and background tasks so file/database behavior has one source of truth. |
+| `sift/web/analysis.py` | ~120 | **Analysis command builder.** `build_analyze_steps` converts UI payloads into validated/clamped `python -m sift analyze/index` argv. Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
 
 ### Layering inside `sift/audit/`
 
@@ -67,18 +69,21 @@ head as `sift.audit.aesthetic_scorer` — no `sys.path` manipulation anywhere.
 ### Layering inside `sift/web/`
 
 ```
-server.py  ── routing, config, mutations, file I/O, app wiring
+server.py  ── routing, config, file serving, app wiring
    │  imports
    ├──► queries.py    (read layer; takes a conn, returns dicts)
    ├──► schemas.py    (Pydantic response_model DTOs ──► /openapi.json)
-   ├──► analysis.py   (reanalysis job + argv builder; config injected)
+   ├──► tasks.py      (background task lifecycle + SSE replay)
+   ├──► library_ops.py (shared write-side filesystem/DB operations)
+   ├──► analysis.py   (analyze/index argv builder; config injected)
    └──► photodb.py    (schema + domain rules)   ◄── also used by build_db.py
 ```
 
-Dependencies point one way: `server` → (`queries`, `schemas`, `analysis`,
-`photodb`). The leaf layers (`queries`, `photodb`) know nothing about FastAPI or
-server globals, which is what keeps them testable and reusable; `schemas` is
-plain Pydantic and equally decoupled.
+Dependencies point one way: `server` → (`queries`, `schemas`, `tasks`,
+`library_ops`, `analysis`, `photodb`). The leaf layers (`queries`,
+`library_ops`, `photodb`) know nothing about FastAPI or server globals, which is
+what keeps them testable and reusable; `schemas` is plain Pydantic and equally
+decoupled.
 
 ## Data model (SQLite, defined in `photodb.py`)
 
@@ -97,7 +102,11 @@ plain Pydantic and equally decoupled.
 - **`cluster_name_anchors`** — pins a person's name to its face keys so renames
   survive re-clustering on a fresh audit.
 - **`photo_roots`** — directories the `/api/reveal` guardrail is allowed to open.
-- **`applied_moves`** — log backing the reversible Apply/Undo of rejects.
+- **`trash_moves`** — file-level recycle-bin ledger (`trashed`, `restored`,
+  `emptied`, `missing`). This is keyed by image/path, not just content hash, so
+  exact byte-identical copies can be trashed/restored independently.
+- **`tasks` / `task_events`** — persisted task snapshots and replayable SSE events
+  for analyze/index/trash/restore/empty/autocull operations.
 
 ## Cross-cutting design decisions
 
@@ -125,9 +134,12 @@ plain Pydantic and equally decoupled.
   commands. `analysis.build_analyze_steps` emits argv from a fixed flag set; only
   the target folder is free text and it's validated to be an existing directory;
   numeric knobs are parsed and clamped.
-- **Single analysis job.** One `AnalysisJob` at a time (`server.CURRENT_JOB`),
-  streamed to the browser over SSE with full replay so a late/reconnecting client
-  still gets the whole log.
+- **Single active task.** Long-running web operations share the SQLite-backed
+  task ledger (`tasks.py`). One task runs at a time; events are replayable over
+  SSE so refreshes/reconnects can recover progress.
+- **Trash, not immediate deletion.** `del` decisions move originals into
+  `<library>/_trash/`; Restore moves them back, and Empty Trash is the explicit
+  irreversible deletion step.
 - **No models in the server.** Keeps the web process light and lets the heavy
   path run/scale separately.
 
@@ -149,7 +161,7 @@ typecheck` runs it standalone.
   Close unwinds the whole overlay in one `history.go(-(depth+1))`. That unwind
   assumes a plain-list entry sits beneath the overlay — true when opened from
   the list, but **not** when the app loads straight into an overlay (deep link /
-  reload / new tab). So on mount `App.jsx` plants a list entry beneath a
+  reload / new tab). So on mount `App.tsx` plants a list entry beneath a
   deep-linked overlay; without it, Close had nothing to unwind onto and silently
   did nothing (regression-guarded in `e2e/flows.spec.js`).
 - The filmstrip review (`GroupReview`) is **selection-driven**: arrow keys move
@@ -182,9 +194,9 @@ sift/web/schemas.py (Pydantic response_model)
 Run `npm run codegen` after any backend response change. It dumps the schema via
 `python -m sift.web.openapi_schema` and regenerates `src/api/schema.d.ts`. The
 intermediate `frontend/openapi.json` is gitignored; **the committed artifact is
-`schema.d.ts`** so the frontend builds without a running backend. Caveat: codegen
-is run manually (not yet wired into CI), so the guarantee holds only as long as
-someone regenerates after touching a `response_model`.
+`schema.d.ts`** so the frontend builds without a running backend. CI regenerates
+the schema and fails on drift, so changing a `response_model` without committing
+updated generated types is caught.
 
 - **Styling** lives in one `styles.css` fronted by a `:root` **design-token
   layer**: the palette plus semantic tokens — `--accent/keep/del` (+ `*-rgb`
