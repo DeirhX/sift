@@ -7,10 +7,11 @@ scene grouping that the duplicate groups nest inside.
 from datetime import datetime
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import ImageOps
 from tqdm import tqdm
 
 from .clip_common import iter_image_batches, load_openclip_b32
+from .imaging import load_rgb
 
 
 # ── Perceptual hashing / duplicate detection ──────────────────────────────────
@@ -29,7 +30,7 @@ def compute_phashes(paths: list) -> tuple[dict, dict]:
     sizes:  dict = {}
     for p in tqdm(paths, desc="Perceptual hashing"):
         try:
-            im = Image.open(p)
+            im = load_rgb(p)
             sizes[p] = im.size
             hashes[p] = imagehash.phash(ImageOps.exif_transpose(im))
         except Exception as e:
@@ -265,7 +266,7 @@ def read_capture_time(path) -> float | None:
     then DateTimeDigitized, then the IFD0 DateTime. Returns None when absent or
     unparseable, so callers can fall back to filesystem mtime."""
     try:
-        with Image.open(path) as im:
+        with load_rgb(path) as im:
             exif = im.getexif()
             if not exif:
                 return None

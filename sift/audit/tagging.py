@@ -6,13 +6,15 @@ does not hallucinate absent subjects the way zero-shot CLIP did.
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
+from .imaging import load_rgb
+
 
 def _open_upright(p) -> Image.Image:
     """Open an image as RGB with EXIF orientation applied. Both the caption and
     the tag path go through this so a rotated photo is never read sideways by
     one model and upright by the other (they used to disagree: only Qwen
     transposed, BLIP read raw pixels)."""
-    return ImageOps.exif_transpose(Image.open(p).convert("RGB"))
+    return ImageOps.exif_transpose(load_rgb(p).convert("RGB"))
 
 
 # ── Keyword tags (Qwen3-VL-8B-Instruct, 4-bit NF4) ───────────────────────────

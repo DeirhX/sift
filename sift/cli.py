@@ -16,6 +16,7 @@ commands:
   analyze   run the analysis pipeline on a photo folder -> audit_report.json
   index     ingest an audit_report.json -> photos.db + WebP thumbnails
   serve     launch the FastAPI review web app
+  backup    snapshot / list / restore the library database
 
 Run `sift <command> --help` for command-specific options.
 """
@@ -34,6 +35,8 @@ def main(argv=None) -> int:
         from sift.web.build_db import main as run
     elif cmd == "serve":
         from sift.web.server import main as run
+    elif cmd == "backup":
+        from sift.web.backup import main as run
     else:
         sys.stderr.write(f"sift: unknown command {cmd!r}\n\n{_USAGE}")
         return 2

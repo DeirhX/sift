@@ -12,7 +12,8 @@ license = { text = "MIT" }
 
 # Core: the classical analysis path (sharpness + perceptual-hash/scene grouping),
 # the SQLite ingest/thumbnailer, and the web server. No multi-GB ML weights — a
-# web-only or classical-only install needs nothing heavier than OpenCV.
+# web-only or classical-only install needs nothing heavier than OpenCV. rawpy
+# (bundled libraw) decodes RAW embedded previews so NEF/RAF flow through too.
 dependencies = [
     "numpy",
     "pillow",
@@ -22,6 +23,7 @@ dependencies = [
     "scikit-learn",
     "fastapi",
     "uvicorn[standard]",
+    "rawpy",
 ]
 
 [project.optional-dependencies]
