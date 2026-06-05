@@ -30,7 +30,7 @@ from .tagging import (_clean_tags, run_qwen_tags, run_caption_and_tags,
 from .grouping import (compute_phashes, group_duplicates, assign_dup_groups,
                        dup_centrality, coarsen_scenes_for_dups, read_capture_time,
                        compute_clip_embeddings, group_scenes)
-from .cli import build_parser, main, IMAGE_EXTENSIONS
+from .cli import build_parser, main, IMAGE_EXTENSIONS, _discover_image_paths
 
 __all__ = [
     "iter_image_batches", "load_openclip_b32", "encode_prompt_pairs", "bipolar_score",
@@ -43,5 +43,5 @@ __all__ = [
     "compute_phashes", "group_duplicates", "assign_dup_groups", "dup_centrality",
     "coarsen_scenes_for_dups", "read_capture_time", "compute_clip_embeddings",
     "group_scenes",
-    "build_parser", "main", "IMAGE_EXTENSIONS",
+    "build_parser", "main", "IMAGE_EXTENSIONS", "_discover_image_paths",
 ]

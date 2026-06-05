@@ -118,6 +118,7 @@ export default function Sidebar(
             { v: 'all', label: 'All' },
             { v: 'keep', label: 'Keep' },
             { v: 'del', label: 'Del' },
+            { v: 'trash', label: 'Trash' },
             { v: 'unmarked', label: 'New' },
             { v: 'notdel', label: 'Hide del' },
           ]}

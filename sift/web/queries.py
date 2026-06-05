@@ -16,6 +16,8 @@ import os
 # keep/del state joins on it the same way. One definition so the join key can't
 # drift across the half-dozen queries that use it.
 DEC_ON = "decisions d ON d.hash = i.content_hash"
+TRASH_ON = ("trash_moves tm ON tm.image_id = i.id "
+            "AND tm.state IN ('trashed', 'emptied', 'missing')")
 
 # Whitelisted sort columns for /api/images. Keys are the public API values;
 # values are the SQL expressions (aliased to `i`, the images table).
@@ -118,12 +120,21 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
         where.append("d.decision = 'keep'")
     elif decision == "del":
         where.append("d.decision = 'del'")
+        where.append("tm.id IS NULL")
+    elif decision == "trash":
+        where.append("tm.state = 'trashed'")
     elif decision == "unmarked":
         where.append("d.decision IS NULL")
+        where.append("tm.id IS NULL")
     elif decision == "notdel":
         # "Hide deletions": everything still in the running (kept + undecided).
         # Lets the user whittle a scene/grid down to keepers as they cull.
         where.append("(d.decision IS NULL OR d.decision != 'del')")
+        where.append("tm.id IS NULL")
+    else:
+        # Normal views show the active library. Trash is recoverable but should
+        # not keep appearing in the grid/groups like a zombie JPEG.
+        where.append("tm.id IS NULL")
 
     if q:
         if has_fts(conn):
@@ -181,6 +192,9 @@ def rows_to_items(conn, rows) -> list[dict]:
             "face_sharp": d.get("face_sharp"), "face_expr": d.get("face_expr"),
             "portrait": d.get("portrait"),
             "decision": d.get("decision"),
+            "trash_state": d.get("trash_state"),
+            "original_path": d.get("original_path"),
+            "trashed_at": d.get("trashed_at"),
             "faces": faces_by_img.get(d["id"], []),
             "tags": tags_by_img.get(d["id"], []),
         })
@@ -203,7 +217,7 @@ def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
 
     # Groups with at least one member passing the filters.
     qual = (f"SELECT DISTINCT i.{group_col} FROM images i "
-            f"LEFT JOIN {DEC_ON} WHERE {where_sql}")
+            f"LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON} WHERE {where_sql}")
     total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
 
     grp_rows = conn.execute(
@@ -220,13 +234,15 @@ def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
     if page_gids:
         ph = ",".join("?" * len(page_gids))
         match_ids = {r[0] for r in conn.execute(
-            f"SELECT i.id FROM images i LEFT JOIN {DEC_ON} "
+            f"SELECT i.id FROM images i LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON} "
             f"WHERE {where_sql} AND i.{group_col} IN ({ph})", params + page_gids)}
 
     page = []
     for gr in grp_rows:
         members = conn.execute(
-            f"""SELECT i.*, d.decision FROM images i LEFT JOIN {DEC_ON}
+            f"""SELECT i.*, d.decision, tm.state AS trash_state,
+                       tm.from_path AS original_path, tm.trashed_at
+                FROM images i LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON}
                 WHERE i.{group_col} = ? ORDER BY i.combined DESC, i.id ASC""",
             (gr[group_col],),
         ).fetchall()
