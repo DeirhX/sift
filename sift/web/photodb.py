@@ -134,6 +134,27 @@ CREATE TABLE IF NOT EXISTS photo_roots (
 );
 """
 
+# App-managed recycle bin. Each row is file-level (image_id/path), not just
+# content-hash-level, so exact byte-identical copies can be trashed/restored
+# independently once the UI supports per-copy actions.
+TRASH_DDL = """
+CREATE TABLE IF NOT EXISTS trash_moves (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_id     INTEGER,
+    hash         TEXT,
+    from_path    TEXT NOT NULL,
+    trash_path   TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'trashed', -- trashed | restored | emptied | missing
+    trashed_at   TEXT,
+    restored_at  TEXT,
+    emptied_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trash_state ON trash_moves(state);
+CREATE INDEX IF NOT EXISTS idx_trash_image ON trash_moves(image_id);
+CREATE INDEX IF NOT EXISTS idx_trash_hash ON trash_moves(hash);
+"""
+
 # Long-running web operations (analyze, index, apply, etc.) share one persisted
 # task ledger so progress survives browser reconnects and recent history is
 # visible after a panel closes. The process itself is not resumable after a
@@ -234,6 +255,7 @@ def ensure_schema(conn) -> None:
             conn.execute(f"ALTER TABLE faces ADD COLUMN {col} {decl}")
     ensure_overrides(conn)
     conn.executescript(PHOTO_ROOTS_DDL)
+    conn.executescript(TRASH_DDL)
     conn.executescript(TASKS_DDL)
     ensure_anchors(conn)
     # Created after the ALTERs so legacy tables don't index a missing column.

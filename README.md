@@ -102,9 +102,14 @@ sift serve --db "E:\Photos\photos.db"
 
 ```bash
 # Development: API on :8000 + Vite dev server on :5173 (proxies /api, /thumb, /img)
-sift serve --db "E:\Photos\photos.db"
+sift serve --db "E:\Photos\photos.db" --reload
 cd frontend && npm run dev
 ```
+
+With `--reload`, backend Python/API changes restart the FastAPI process
+automatically. Frontend React/CSS changes hot-reload through Vite. If you change
+API response models, still run `cd frontend && npm run codegen`; type generation
+is intentionally explicit so generated files do not churn behind your back.
 
 `sift serve` finds the built frontend at `frontend/dist` (editable install). To
 serve a build from elsewhere, pass `--frontend-dist <dir>` or set

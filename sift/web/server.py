@@ -34,7 +34,7 @@ import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -45,14 +45,14 @@ from sift.web import photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
-from sift.web.queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
+from sift.web.queries import (DEC_ON, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
     MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-    ApplyResponse, UndoResponse, AnalyzeStatus, TaskStartRequest, TaskSnapshot,
-    TaskListResponse)
+    ApplyResponse, UndoResponse, TrashStatusResponse, TrashListResponse,
+    AnalyzeStatus, TaskStartRequest, TaskSnapshot, TaskListResponse)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -65,8 +65,16 @@ FRONTEND_DIST: Path | None = None
 # photo_roots table whenever it changes.
 PHOTO_ROOT_DIRS: list[str] = []
 PHOTO_ROOTS: list[str] = []
+_RUNTIME_INITIALIZED = False
+_FRONTEND_MOUNTED = False
 
-app = FastAPI(title="Photo Audit")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _startup_from_reload_env()
+    yield
+
+
+app = FastAPI(title="Photo Audit", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # local single-user tool
@@ -227,13 +235,15 @@ def get_images(
         base = f"""
             FROM images i
             LEFT JOIN {DEC_ON}
+            LEFT JOIN {TRASH_ON}
             WHERE {where_sql}
         """
 
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
 
         rows = conn.execute(
-            f"""SELECT i.*, d.decision {base}
+            f"""SELECT i.*, d.decision, tm.state AS trash_state,
+                       tm.from_path AS original_path, tm.trashed_at {base}
                 ORDER BY {sort_col} {sort_dir}, i.id ASC
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
@@ -849,45 +859,94 @@ def _rejected_dir(conn) -> Path:
     return Path(root["value"]) / "_rejected"
 
 
+def _trash_dir(conn) -> Path:
+    root = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+    if not root:
+        raise HTTPException(500, "library folder unknown")
+    return Path(root["value"]) / "_trash"
+
+
+def _ensure_trash_table(conn):
+    photodb.ensure_schema(conn)
+
+
+def _trash_counts(conn, trash: Path) -> dict:
+    _ensure_trash_table(conn)
+    trash_str = str(trash)
+    pending = 0
+    for r in conn.execute(
+        f"""SELECT i.path FROM images i
+           JOIN {DEC_ON}
+           LEFT JOIN trash_moves tm ON tm.image_id=i.id AND tm.state='trashed'
+           WHERE d.decision='del' AND tm.id IS NULL"""):
+        if not str(r["path"]).startswith(trash_str):
+            pending += 1
+    trashed = conn.execute(
+        "SELECT COUNT(*) FROM trash_moves WHERE state='trashed'").fetchone()[0]
+    emptied = conn.execute(
+        "SELECT COUNT(*) FROM trash_moves WHERE state='emptied'").fetchone()[0]
+    return {"pending": pending, "trashed": trashed, "emptied": emptied}
+
+
 @app.get("/api/apply/status", response_model=ApplyStatusResponse)
 def apply_status():
     with db() as conn:
-        _ensure_moves_table(conn)
-        rej = _rejected_dir(conn)
-        rej_str = str(rej)
-        # Files marked 'del' that still live outside _rejected = movable.
-        pending = 0
-        for r in conn.execute(
-            f"""SELECT i.path FROM images i
-               JOIN {DEC_ON}
-               WHERE d.decision='del'"""):
-            if not str(r["path"]).startswith(rej_str):
-                pending += 1
-        applied = conn.execute("SELECT COUNT(*) FROM applied_moves").fetchone()[0]
-    return {"pending": pending, "applied": applied, "rejected_dir": rej_str}
+        trash = _trash_dir(conn)
+        counts = _trash_counts(conn, trash)
+        trash_str = str(trash)
+    return {"pending": counts["pending"], "applied": counts["trashed"],
+            "trashed": counts["trashed"], "trash_dir": trash_str,
+            "rejected_dir": trash_str}
+
+
+@app.get("/api/trash/status", response_model=TrashStatusResponse)
+def trash_status():
+    with db() as conn:
+        trash = _trash_dir(conn)
+        counts = _trash_counts(conn, trash)
+    return {**counts, "trash_dir": str(trash)}
+
+
+@app.get("/api/trash", response_model=TrashListResponse)
+def trash_list():
+    with db() as conn:
+        _ensure_trash_table(conn)
+        rows = conn.execute(
+            """SELECT id, image_id, hash, from_path, trash_path, state, trashed_at
+               FROM trash_moves WHERE state='trashed' ORDER BY trashed_at DESC, id DESC"""
+        ).fetchall()
+    items = [{
+        "id": r["id"], "image_id": r["image_id"],
+        "filename": Path(r["trash_path"]).name,
+        "hash": r["hash"], "original_path": r["from_path"],
+        "trash_path": r["trash_path"], "state": r["state"],
+        "trashed_at": r["trashed_at"],
+    } for r in rows]
+    return {"total": len(items), "items": items}
 
 
 @app.post("/api/apply", response_model=ApplyResponse)
 def apply_decisions():
-    """Move every 'del'-marked file into <library>/_rejected/. Updates each
-    image's stored path and logs the move so it can be undone. Never deletes."""
+    """Move every 'del'-marked file into <library>/_trash/. Updates each
+    image's stored path and logs the move so it can be restored. Never deletes."""
     moved, skipped = 0, 0
     with db() as conn:
-        _ensure_moves_table(conn)
-        rej = _rejected_dir(conn)
-        rej_str = str(rej)
+        _ensure_trash_table(conn)
+        trash = _trash_dir(conn)
+        trash_str = str(trash)
         rows = conn.execute(
-            f"""SELECT i.id, i.path FROM images i
+            f"""SELECT i.id, i.path, i.content_hash FROM images i
                JOIN {DEC_ON}
-               WHERE d.decision='del'""").fetchall()
+               LEFT JOIN trash_moves tm ON tm.image_id=i.id AND tm.state='trashed'
+               WHERE d.decision='del' AND tm.id IS NULL""").fetchall()
         if rows:
-            rej.mkdir(parents=True, exist_ok=True)
+            trash.mkdir(parents=True, exist_ok=True)
         for r in rows:
             src = Path(r["path"])
-            if str(src).startswith(rej_str) or not src.exists():
+            if str(src).startswith(trash_str) or not src.exists():
                 skipped += 1
                 continue
-            dest = _unique_dest(rej, src.name)
+            dest = _unique_dest(trash, src.name)
             try:
                 shutil.move(str(src), str(dest))
             except OSError:
@@ -896,27 +955,34 @@ def apply_decisions():
             # Only the path moves; the decision stays attached via content hash.
             conn.execute("UPDATE images SET path=? WHERE id=?", (str(dest), r["id"]))
             conn.execute(
-                "INSERT INTO applied_moves (image_id, from_path, to_path, ts) VALUES (?,?,?,?)",
-                (r["id"], str(src), str(dest), datetime.now().isoformat(timespec="seconds")))
+                """INSERT INTO trash_moves
+                   (image_id, hash, from_path, trash_path, state, trashed_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (r["id"], r["content_hash"], str(src), str(dest), "trashed",
+                 datetime.now().isoformat(timespec="seconds")))
             moved += 1
         conn.commit()
-    return {"moved": moved, "skipped": skipped, "rejected_dir": rej_str}
+    return {"moved": moved, "skipped": skipped,
+            "trash_dir": trash_str, "rejected_dir": trash_str}
 
 
 @app.post("/api/apply/undo", response_model=UndoResponse)
 def undo_apply():
-    """Move every logged file back to its original location and clear the log."""
+    """Restore every trashed file back to its original location."""
     restored, skipped = 0, 0
     with db() as conn:
-        _ensure_moves_table(conn)
+        _ensure_trash_table(conn)
         rows = conn.execute(
-            "SELECT id, image_id, from_path, to_path FROM applied_moves ORDER BY id DESC"
+            """SELECT id, image_id, from_path, trash_path
+               FROM trash_moves WHERE state='trashed' ORDER BY id DESC"""
         ).fetchall()
         for r in rows:
-            src = Path(r["to_path"])
+            src = Path(r["trash_path"])
             dst = Path(r["from_path"])
-            if src.exists() and not dst.exists():
+            if src.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    dst = _unique_dest(dst.parent, dst.name)
                 try:
                     shutil.move(str(src), str(dst))
                 except OSError:
@@ -926,7 +992,9 @@ def undo_apply():
                 restored += 1
             else:
                 skipped += 1
-            conn.execute("DELETE FROM applied_moves WHERE id=?", (r["id"],))
+            conn.execute(
+                "UPDATE trash_moves SET state=?, restored_at=? WHERE id=?",
+                ("restored", datetime.now().isoformat(timespec="seconds"), r["id"]))
         conn.commit()
     return {"restored": restored, "skipped": skipped}
 
@@ -1065,8 +1133,12 @@ async def analyze_stream():
 # Mounted last so it doesn't shadow /api routes. Only if a build exists.
 
 def _mount_frontend():
+    global _FRONTEND_MOUNTED
+    if _FRONTEND_MOUNTED:
+        return
     if FRONTEND_DIST and FRONTEND_DIST.exists():
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+        _FRONTEND_MOUNTED = True
         print(f"  Serving frontend build from {FRONTEND_DIST}")
     else:
         print("  No frontend build found — run Vite dev server (npm run dev) on :5173")
@@ -1084,6 +1156,42 @@ def _resolve_frontend_dist(override: str | None) -> Path:
     return Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
+def _runtime_env_photo_roots() -> list[str] | None:
+    raw = os.environ.get("SIFT_PHOTO_ROOTS")
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def _init_runtime(db_path: Path, thumb_dir: Path, frontend_dist: Path | None,
+                  photo_roots: list[str] | None) -> None:
+    global DB_PATH, THUMB_DIR, FRONTEND_DIST, _RUNTIME_INITIALIZED
+    DB_PATH = db_path
+    THUMB_DIR = thumb_dir
+    FRONTEND_DIST = frontend_dist
+    if _RUNTIME_INITIALIZED:
+        return
+    print(f"DB:     {DB_PATH}")
+    print(f"Thumbs: {THUMB_DIR}")
+    _ensure_schema()
+    _configure_tasks()
+    tasks.MANAGER.abandon_running()
+    _init_photo_roots(photo_roots)
+    _mount_frontend()
+    _RUNTIME_INITIALIZED = True
+
+
+def _startup_from_reload_env() -> None:
+    db_env = os.environ.get("SIFT_DB_PATH")
+    if not db_env:
+        return
+    db_path = Path(db_env)
+    thumb_dir = Path(os.environ["SIFT_THUMB_DIR"])
+    frontend_env = os.environ.get("SIFT_RUNTIME_FRONTEND_DIST")
+    frontend_dist = Path(frontend_env) if frontend_env else None
+    _init_runtime(db_path, thumb_dir, frontend_dist, _runtime_env_photo_roots())
+
+
 def main() -> None:
     global DB_PATH, THUMB_DIR, FRONTEND_DIST
     ap = argparse.ArgumentParser()
@@ -1097,24 +1205,32 @@ def main() -> None:
     ap.add_argument("--frontend-dist", default=None, metavar="DIR",
                     help="Built React app to serve (default: $SIFT_FRONTEND_DIST, "
                          "else the repo's frontend/dist for editable installs).")
+    ap.add_argument("--reload", action="store_true",
+                    help="Restart the API server automatically when Python files change. "
+                         "Use with the Vite dev server for near-immediate web/API updates.")
     args = ap.parse_args()
 
-    DB_PATH = Path(args.db)
-    if not DB_PATH.exists():
-        print(f"Error: DB {DB_PATH} not found — run `sift index` first"); sys.exit(1)
-    THUMB_DIR = Path(args.thumbs) if args.thumbs else DB_PATH.parent / ".thumbs"
-    FRONTEND_DIST = _resolve_frontend_dist(args.frontend_dist)
-
-    print(f"DB:     {DB_PATH}")
-    print(f"Thumbs: {THUMB_DIR}")
-    _ensure_schema()
-    _configure_tasks()
-    tasks.MANAGER.abandon_running()
-    _init_photo_roots(args.photo_root)
-    _mount_frontend()
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"Error: DB {db_path} not found — run `sift index` first"); sys.exit(1)
+    thumb_dir = Path(args.thumbs) if args.thumbs else db_path.parent / ".thumbs"
+    frontend_dist = _resolve_frontend_dist(args.frontend_dist)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.reload:
+        os.environ["SIFT_DB_PATH"] = str(db_path)
+        os.environ["SIFT_THUMB_DIR"] = str(thumb_dir)
+        os.environ["SIFT_RUNTIME_FRONTEND_DIST"] = str(frontend_dist)
+        if args.photo_root:
+            os.environ["SIFT_PHOTO_ROOTS"] = json.dumps(args.photo_root)
+        else:
+            os.environ.pop("SIFT_PHOTO_ROOTS", None)
+        repo_root = Path(__file__).resolve().parents[2]
+        uvicorn.run("sift.web.server:app", host=args.host, port=args.port,
+                    reload=True, reload_dirs=[str(repo_root / "sift")])
+    else:
+        _init_runtime(db_path, thumb_dir, frontend_dist, args.photo_root)
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

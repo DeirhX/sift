@@ -23,8 +23,11 @@ const SCENE_PAGE = 30
 const TASK_LABELS: Record<string, string> = {
   analyze_library: 'Analyze',
   index_library: 'Index',
-  apply_decisions: 'Apply',
-  undo_apply: 'Undo',
+  apply_decisions: 'Trash',
+  trash_decisions: 'Trash',
+  undo_apply: 'Restore',
+  restore_trash: 'Restore',
+  empty_trash: 'Empty Trash',
   autocull_duplicates: 'Auto-cull',
 }
 
@@ -224,7 +227,10 @@ export default function App() {
       case 'analyze_library':
       case 'index_library':
       case 'apply_decisions':
+      case 'trash_decisions':
       case 'undo_apply':
+      case 'restore_trash':
+      case 'empty_trash':
         allLists()
         break
       case 'autocull_duplicates':

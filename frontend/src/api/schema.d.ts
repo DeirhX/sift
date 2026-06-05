@@ -369,6 +369,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/trash/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trash Status */
+        get: operations["trash_status_api_trash_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/trash": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trash List */
+        get: operations["trash_list_api_trash_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/apply": {
         parameters: {
             query?: never;
@@ -380,8 +414,8 @@ export interface paths {
         put?: never;
         /**
          * Apply Decisions
-         * @description Move every 'del'-marked file into <library>/_rejected/. Updates each
-         *     image's stored path and logs the move so it can be undone. Never deletes.
+         * @description Move every 'del'-marked file into <library>/_trash/. Updates each
+         *     image's stored path and logs the move so it can be restored. Never deletes.
          */
         post: operations["apply_decisions_api_apply_post"];
         delete?: never;
@@ -401,7 +435,7 @@ export interface paths {
         put?: never;
         /**
          * Undo Apply
-         * @description Move every logged file back to its original location and clear the log.
+         * @description Restore every trashed file back to its original location.
          */
         post: operations["undo_apply_api_apply_undo_post"];
         delete?: never;
@@ -585,6 +619,8 @@ export interface components {
             skipped: number;
             /** Rejected Dir */
             rejected_dir: string;
+            /** Trash Dir */
+            trash_dir?: string | null;
         };
         /** ApplyStatusResponse */
         ApplyStatusResponse: {
@@ -594,6 +630,13 @@ export interface components {
             applied: number;
             /** Rejected Dir */
             rejected_dir: string;
+            /** Trash Dir */
+            trash_dir?: string | null;
+            /**
+             * Trashed
+             * @default 0
+             */
+            trashed: number;
         };
         /** AssignFaceResponse */
         AssignFaceResponse: {
@@ -729,6 +772,12 @@ export interface components {
             portrait?: number | null;
             /** Decision */
             decision?: string | null;
+            /** Trash State */
+            trash_state?: string | null;
+            /** Original Path */
+            original_path?: string | null;
+            /** Trashed At */
+            trashed_at?: string | null;
             /**
              * Faces
              * @default []
@@ -810,6 +859,12 @@ export interface components {
             portrait?: number | null;
             /** Decision */
             decision?: string | null;
+            /** Trash State */
+            trash_state?: string | null;
+            /** Original Path */
+            original_path?: string | null;
+            /** Trashed At */
+            trashed_at?: string | null;
             /**
              * Faces
              * @default []
@@ -988,6 +1043,43 @@ export interface components {
             params?: {
                 [key: string]: unknown;
             };
+        };
+        /** TrashItem */
+        TrashItem: {
+            /** Id */
+            id: number;
+            /** Image Id */
+            image_id?: number | null;
+            /** Filename */
+            filename: string;
+            /** Hash */
+            hash?: string | null;
+            /** Original Path */
+            original_path: string;
+            /** Trash Path */
+            trash_path: string;
+            /** State */
+            state: string;
+            /** Trashed At */
+            trashed_at?: string | null;
+        };
+        /** TrashListResponse */
+        TrashListResponse: {
+            /** Total */
+            total: number;
+            /** Items */
+            items: components["schemas"]["TrashItem"][];
+        };
+        /** TrashStatusResponse */
+        TrashStatusResponse: {
+            /** Pending */
+            pending: number;
+            /** Trashed */
+            trashed: number;
+            /** Emptied */
+            emptied: number;
+            /** Trash Dir */
+            trash_dir: string;
         };
         /** UndoResponse */
         UndoResponse: {
@@ -1663,6 +1755,46 @@ export interface operations {
             };
         };
     };
+    trash_status_api_trash_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrashStatusResponse"];
+                };
+            };
+        };
+    };
+    trash_list_api_trash_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrashListResponse"];
+                };
+            };
+        };
+    };
     apply_decisions_api_apply_post: {
         parameters: {
             query?: never;
@@ -1831,7 +1963,9 @@ export interface operations {
     };
     task_stream_api_tasks__task_id__stream_get: {
         parameters: {
-            query?: never;
+            query?: {
+                after?: number;
+            };
             header?: never;
             path: {
                 task_id: string;

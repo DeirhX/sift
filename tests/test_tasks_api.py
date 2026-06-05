@@ -36,9 +36,10 @@ def test_apply_task_moves_files(real_library):
 
     assert done["state"] == "done"
     assert done["result"]["moved"] == 1
-    assert (env.lib / "_rejected" / "y.jpg").exists()
+    assert (env.lib / "_trash" / "y.jpg").exists()
     assert not (env.lib / "y.jpg").exists()
-    assert Path(items_by_name(env.client)["y.jpg"]["path"]) == env.lib / "_rejected" / "y.jpg"
+    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    assert Path(trash_items["y.jpg"]["path"]) == env.lib / "_trash" / "y.jpg"
 
 
 def test_task_stream_replays_completed_task(real_library):
@@ -51,6 +52,26 @@ def test_task_stream_replays_completed_task(real_library):
     assert "event: snapshot" in body
     assert "event: progress" in body
     assert "event: end" in body
+
+
+def test_trash_task_can_move_one_exact_duplicate_copy(real_library):
+    env = real_library([("copy-a.jpg", 0.80, None, "same"),
+                        ("copy-b.jpg", 0.70, None, "same")])
+    items = items_by_name(env.client)
+    assert items["copy-a.jpg"]["hash"] == items["copy-b.jpg"]["hash"]
+
+    start = env.client.post("/api/tasks", json={
+        "type": "trash_decisions",
+        "params": {"image_ids": [items["copy-b.jpg"]["id"]]},
+    }).json()
+    done = _wait_done(env.client, start["id"])
+
+    assert done["state"] == "done"
+    assert done["result"]["moved"] == 1
+    assert (env.lib / "copy-a.jpg").exists()
+    assert not (env.lib / "copy-b.jpg").exists()
+    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    assert list(trash_items) == ["copy-b.jpg"]
 
 
 def test_running_task_conflicts(env):

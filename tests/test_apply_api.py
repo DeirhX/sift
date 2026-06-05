@@ -1,5 +1,5 @@
-"""Coverage for the reversible apply flow: moving 'del' files into _rejected/,
-status accounting, and undo. Uses real files on disk."""
+"""Coverage for the reversible Trash flow: moving 'del' files into _trash/,
+status accounting, restore, and emptying. Uses real files on disk."""
 from pathlib import Path
 
 from conftest import items_by_name
@@ -22,7 +22,7 @@ def test_apply_status_counts_pending(real_library):
     _mark(env, "y.jpg", "del")
     status = env.client.get("/api/apply/status").json()
     assert status["pending"] == 1 and status["applied"] == 0
-    assert status["rejected_dir"].endswith("_rejected")
+    assert status["trash_dir"].endswith("_trash")
 
 
 def test_apply_moves_del_files(real_library):
@@ -31,16 +31,19 @@ def test_apply_moves_del_files(real_library):
     r = env.client.post("/api/apply").json()
     assert r["moved"] == 1 and r["skipped"] == 0
 
-    rejected = env.lib / "_rejected"
-    assert (rejected / "y.jpg").exists()
+    trash = env.lib / "_trash"
+    assert (trash / "y.jpg").exists()
     assert not (env.lib / "y.jpg").exists()
     # The DB path follows the file; the decision is unchanged (hash-keyed).
-    moved = items_by_name(env.client)["y.jpg"]
-    assert Path(moved["path"]) == rejected / "y.jpg"
+    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    moved = trash_items["y.jpg"]
+    assert Path(moved["path"]) == trash / "y.jpg"
     assert moved["decision"] == "del"
+    assert moved["trash_state"] == "trashed"
     # Status reflects the applied move.
     status = env.client.get("/api/apply/status").json()
     assert status["pending"] == 0 and status["applied"] == 1
+    assert "y.jpg" not in items_by_name(env.client)
 
 
 def test_apply_undo_restores(real_library):
@@ -50,10 +53,28 @@ def test_apply_undo_restores(real_library):
     r = env.client.post("/api/apply/undo").json()
     assert r["restored"] == 1
     assert (env.lib / "y.jpg").exists()
-    assert not (env.lib / "_rejected" / "y.jpg").exists()
+    assert not (env.lib / "_trash" / "y.jpg").exists()
     assert items_by_name(env.client)["y.jpg"]["path"] == str(env.lib / "y.jpg")
     # Log cleared, so nothing is left to undo.
     assert env.client.get("/api/apply/status").json()["applied"] == 0
+
+
+def test_apply_empty_trash_deletes(real_library):
+    env = real_library(SPECS)
+    _mark(env, "y.jpg", "del")
+    env.client.post("/api/apply")
+    start = env.client.post("/api/tasks", json={"type": "empty_trash", "params": {}}).json()
+    import time
+    for _ in range(100):
+        done = env.client.get(f"/api/tasks/{start['id']}").json()
+        if done["state"] != "running":
+            break
+        time.sleep(0.05)
+    assert done["state"] == "done"
+    assert done["result"]["deleted"] == 1
+    assert not (env.lib / "_trash" / "y.jpg").exists()
+    assert env.client.get("/api/trash/status").json()["trashed"] == 0
+    assert "y.jpg" not in items_by_name(env.client)
 
 
 def test_apply_skips_missing_source(real_library):

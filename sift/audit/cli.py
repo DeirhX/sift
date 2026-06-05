@@ -139,6 +139,14 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _discover_image_paths(folder: Path, recurse: bool) -> list[Path]:
+    glob = "**/*" if recurse else "*"
+    excluded_dirs = {"_trash", "_rejected"}
+    return [p for p in folder.glob(glob)
+            if p.suffix.lower() in IMAGE_EXTENSIONS and p.is_file()
+            and excluded_dirs.isdisjoint(part.lower() for part in p.relative_to(folder).parts[:-1])]
+
+
 def main():
     args = build_parser().parse_args()
 
@@ -155,9 +163,7 @@ def main():
     if not folder.exists():
         print(f"Error: {folder} does not exist"); sys.exit(1)
 
-    glob = "**/*" if args.recurse else "*"
-    paths = [p for p in folder.glob(glob)
-             if p.suffix.lower() in IMAGE_EXTENSIONS and p.is_file()]
+    paths = _discover_image_paths(folder, args.recurse)
     print(f"Found {len(paths)} images in {folder}")
     emit_progress("scan", 0.03, f"Found {len(paths)} images", 0, len(paths))
     if not paths:

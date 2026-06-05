@@ -5,7 +5,8 @@ import type {
   MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
   LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
   MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-  ApplyResponse, UndoResponse, AnalyzeStatus, TaskSnapshot, TaskListResponse,
+  ApplyResponse, UndoResponse, TrashStatusResponse, TrashListResponse,
+  AnalyzeStatus, TaskSnapshot, TaskListResponse,
 } from './api/types'
 
 // Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
@@ -134,6 +135,14 @@ export function autocullGroups(): Promise<AutocullResponse> {
 
 export function fetchApplyStatus(): Promise<ApplyStatusResponse> {
   return jsonFetch<ApplyStatusResponse>('/api/apply/status')
+}
+
+export function fetchTrashStatus(): Promise<TrashStatusResponse> {
+  return jsonFetch<TrashStatusResponse>('/api/trash/status')
+}
+
+export function fetchTrash(): Promise<TrashListResponse> {
+  return jsonFetch<TrashListResponse>('/api/trash')
 }
 
 export function applyDecisions(): Promise<ApplyResponse> {
