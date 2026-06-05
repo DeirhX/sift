@@ -79,8 +79,11 @@ from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
 from .faces import run_faces
 from .hashing import content_hash as compute_content_hash
 from .embed_store import EmbedStore
+from .imaging import RAW_EXTENSIONS
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'}
+# Ordinary raster formats Pillow opens directly, plus the RAW formats decoded via
+# their embedded preview (see sift/audit/imaging.py — the single source).
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'} | RAW_EXTENSIONS
 
 
 def build_parser() -> argparse.ArgumentParser:

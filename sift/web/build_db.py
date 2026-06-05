@@ -46,6 +46,7 @@ from tqdm import tqdm
 
 from sift.web import photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate
+from sift.audit.imaging import load_rgb
 
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 
@@ -83,7 +84,7 @@ def process_image(args: tuple) -> tuple:
         if not skip_thumbs:
             dst = thumb_dir / f"{content_hash}.webp"
             if force or not dst.exists():
-                with Image.open(src_path) as im:
+                with load_rgb(src_path) as im:
                     raw_size = im.size                      # pre-transpose (w, h)
                     out = ImageOps.exif_transpose(im)       # honour camera rotation
                     out = out.convert("RGB")

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 from .clip_common import iter_image_batches, encode_prompt_pairs, bipolar_score
+from .imaging import load_gray_u8
 
 # ── CLIP-IQA bipolar prompt pairs ────────────────────────────────────────────
 QUALITY_PAIRS = [
@@ -25,7 +26,7 @@ PARA_KEYS = ["aesthetic", "quality", "composition", "light", "color", "dof", "co
 # ── Sharpness ────────────────────────────────────────────────────────────────
 
 def laplacian_variance(path) -> float:
-    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    img = load_gray_u8(path)
     if img is None:
         return 0.0
     h, w = img.shape
