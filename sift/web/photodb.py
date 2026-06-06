@@ -230,11 +230,19 @@ def connect(path, *, timeout_ms: int = 5000) -> sqlite3.Connection:
       - foreign_keys: enforce the faces->images ON DELETE CASCADE so a delete
         can't leave orphaned faces behind.
 
-    Pragmas are per-connection (except WAL, which is persistent), so they must be
-    set on every open; doing it here means no caller can forget."""
+    busy_timeout / synchronous / foreign_keys are per-connection and set on every
+    open. journal_mode is NOT — WAL is a persistent property of the file, so we
+    only switch it when the file isn't already in WAL. Re-issuing
+    `PRAGMA journal_mode=WAL` on every connect takes a momentary EXCLUSIVE lock;
+    under high-frequency connection churn (e.g. the server's per-poll SSE
+    connections) that exclusive grab starves behind the constant readers and can
+    block for seconds — wedging the event loop and starving a concurrent
+    `sift index`. Reading the mode first is a cheap, lock-free pragma."""
     conn = sqlite3.connect(path, timeout=timeout_ms / 1000)
     conn.execute(f"PRAGMA busy_timeout = {int(timeout_ms)}")
-    conn.execute("PRAGMA journal_mode = WAL")
+    row = conn.execute("PRAGMA journal_mode").fetchone()
+    if not row or str(row[0]).lower() != "wal":
+        conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

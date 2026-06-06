@@ -62,9 +62,11 @@ def expand_box(pil_img, box, margin: float = 0.4):
     return pil_img.crop((x1, y1, x2, y2))
 
 
-def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
+def run_face_expression(crops: list, device: str, batch_size: int = 32,
+                        progress=None) -> list:
     """Score a list of (expanded) face crops for expression quality (0-1, higher
-    = more flattering) via zero-shot CLIP ViT-B/32. Returns one float per crop."""
+    = more flattering) via zero-shot CLIP ViT-B/32. Returns one float per crop.
+    progress(done, total) is called after each batch, if given."""
     import torch
 
     print(f"\nScoring portrait expression on {len(crops)} faces (CLIP ViT-B/32)...")
@@ -72,8 +74,9 @@ def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
     pf, nf = encode_prompt_pairs(model, tok, EXPRESSION_PAIRS, device)
 
     scores: list = []
+    n = len(crops)
     # crops are already-decoded PIL images, so this can't use iter_image_batches.
-    for i in tqdm(range(0, len(crops), batch_size), desc="Expression"):
+    for i in tqdm(range(0, n, batch_size), desc="Expression"):
         batch = crops[i:i + batch_size]
         t = torch.stack([prep(c.convert("RGB")) for c in batch]).to(device)
         with torch.no_grad(), torch.amp.autocast(device):
@@ -81,6 +84,8 @@ def run_face_expression(crops: list, device: str, batch_size: int = 32) -> list:
             feats = feats / feats.norm(dim=-1, keepdim=True)
         for fe in feats:
             scores.append(round(bipolar_score(fe, pf, nf), 4))
+        if progress is not None:
+            progress(min(i + batch_size, n), n)
 
     del model
     return scores
@@ -178,10 +183,17 @@ def run_faces(paths, device: str,
     img_sizes: dict = {}
     n_filtered_rel = 0
 
+    # progress(frac, message): frac is 0..1 of the whole faces stage. Detection +
+    # embedding is the bulk, so it owns 0.00–0.60; the later stages report into the
+    # remainder so the message tracks what's actually running (the clustering /
+    # expression steps used to run silently and looked hung).
+    def _p(frac: float, message: str) -> None:
+        if progress is not None:
+            progress(max(0.0, min(1.0, frac)), message)
+
     _n_faces = len(paths)
     for _i, p in enumerate(tqdm(paths, desc="Face detection"), 1):
-        if progress is not None:
-            progress(_i, _n_faces)
+        _p(0.60 * _i / _n_faces, f"Detecting faces {_i}/{_n_faces}")
         try:
             img     = load_rgb(p).convert("RGB")
             w, h    = img.size
@@ -232,15 +244,16 @@ def run_faces(paths, device: str,
     print(f"  Detected {len(all_faces)} face instances in {len(img_sizes)} images "
           f"(filtered out {n_filtered_rel} faces below rel-size {min_face_rel:.2f})")
 
-    # ── Phase 2: embed reference photos (model) so the shared clustering helper
-    #            can name clusters without re-loading anything ─────────────────
+    # ── Phase 2: DBSCAN on L2-normalised embeddings (cosine metric) ───────────
+    _p(0.62, f"Clustering {len(all_faces)} face identities…")
     emb_matrix = np.array([f[2] for f in all_faces])           # (M, 512)
     norms      = np.linalg.norm(emb_matrix, axis=1, keepdims=True)
     emb_norm   = emb_matrix / np.maximum(norms, 1e-8)
 
     ref_embeddings: dict = {}
     if face_refs:
-        print("  Embedding reference photos...")
+        _p(0.68, "Matching reference photos…")
+        print("  Matching reference photos to clusters...")
         for name, ref_path in face_refs.items():
             try:
                 ref_img   = load_rgb(ref_path).convert("RGB")
@@ -266,11 +279,17 @@ def run_faces(paths, device: str,
     # ── Phase 5: face-region sharpness + (optional) expression ─────────────────
     # Normalise sharpness across all detected faces so the score is a relative
     # 0-1 like the global image sharpness.
+    _p(0.72, "Scoring face quality…")
     norm_sharp = normalise_sharpness([f[5] for f in all_faces])
-    expr_scores = (run_face_expression([f[6] for f in all_faces], device)
-                   if score_expr else [None] * len(all_faces))
+    expr_scores = (
+        run_face_expression(
+            [f[6] for f in all_faces], device,
+            progress=lambda i, n: _p(0.72 + 0.22 * (i / max(1, n)),
+                                     f"Scoring expressions {i}/{n}"))
+        if score_expr else [None] * len(all_faces))
 
     # ── Phase 6: build per-image face records + embeddings ─────────────────────
+    _p(0.96, "Assembling face data…")
     face_data: dict = {}
     face_embs: dict = {}
     for idx, (p, _vi, _emb, box, prob, _sr, _ec) in enumerate(all_faces):

@@ -842,6 +842,11 @@ select:focus, input:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Never exceed the overlay's padded content box. Without this, a fixed vh
+     height (e.g. .review-panel's 96vh) plus the overlay's 14px padding overflows
+     on short viewports; align-items:center then clips equally top+bottom, eating
+     the top padding so the header sits flush against the screen edge. */
+  max-height: 100%;
 }
 .review-panel {
   border-radius: 12px;
@@ -852,11 +857,14 @@ select:focus, input:focus {
 .review-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 14px 18px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+/* The spacer (not space-between) owns the gap: title + status pack together on
+   the left, actions get pushed to the right edge. With space-between the status
+   floated to ~1/3 width, anchored to nothing. */
+.review-head .spacer { flex: 1; }
 /* Single right-aligned action group so Cancel + Close sit on one baseline with
    even spacing instead of crowding against the task panel's own header. */
 .review-head-actions {
@@ -873,7 +881,21 @@ select:focus, input:focus {
 }
 .btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .review-sub { color: var(--text-dim); }
-.review-actions { display: flex; gap: 8px; }
+/* margin-left:auto right-aligns the action group: .review-head dropped
+   justify-content:space-between (it mis-centred AnalyzePanel's status), and this
+   view has no .spacer, so without this the buttons pack against the title. */
+.review-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Conventional X dismiss — square icon button set slightly apart from the
+   functional actions (List/Group) so it reads unambiguously as "close", not as
+   another toggle. Esc still closes; this is the discoverable affordance. */
+.review-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin-left: 4px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-dim);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.review-close:hover { background: var(--bg-hover); color: var(--text); border-color: var(--text-dim); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 
@@ -955,6 +977,7 @@ select:focus, input:focus {
   pointer-events: none;
 }
 .review-filternote { color: var(--accent); }
+.review-filternote.err { color: var(--del); }
 .badge-filtered {
   position: absolute;
   top: 10px; left: 50%;
@@ -974,27 +997,45 @@ select:focus, input:focus {
   font-size: 13px;
   text-shadow: 0 0 3px #000;
 }
+/* A trashed member, only visible via "Show deleted": heavily knocked back and
+   stamped with a bin so it never gets mistaken for an in-play frame. */
+.strip-thumb.deleted img { opacity: 0.28; filter: grayscale(0.85); }
+.strip-thumb.deleted.active img { opacity: 0.6; filter: grayscale(0.4); }
+.strip-trashed {
+  position: absolute;
+  top: 2px; right: 4px;
+  font-size: 12px;
+  text-shadow: 0 0 3px #000;
+  pointer-events: none;
+}
 /* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
    structure reads at a glance. Lone-set / no-set scenes don't render this. */
 .strip-cluster {
   position: relative;
   display: flex;
-  gap: 4px;
-  padding: 3px;
+  gap: 3px;
+  padding: 4px 7px 5px;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
+  /* Accent border + tinted backing + bottom rail so the expanded set reads as
+     one cohesive unit against the dark strip — the faint grey 1px border it had
+     before dissolved into the background and the members looked unrelated. The
+     tight inner gap (3px) butts members together; the strip's 8px gap keeps
+     separate groups apart. */
+  border: 1.5px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 9px;
+  background: rgba(var(--accent-rgb), 0.13);
+  box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 /* Flat-view near-dup set: thumbs stay individually visible but share a faint
    backing plus an accent underline rail, so a run of same-group photos reads as
    one unit (Gestalt grouping) without collapsing or bracketing heavily. */
 .strip-flatgroup {
   display: flex;
-  gap: 4px;
-  padding: 3px 3px 5px;
-  border-radius: 7px;
-  background: rgba(var(--accent-rgb), 0.08);
+  gap: 3px;
+  padding: 4px 5px 5px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.11);
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
@@ -1080,7 +1121,7 @@ select:focus, input:focus {
 .strip-collapsed:has(.strip-toggle:hover) .strip-grouptile { border-color: var(--accent); }
 .strip-cluster:has(.strip-toggle:hover) {
   border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.22);
 }
 .strip-flag {
   position: absolute;
@@ -1089,6 +1130,40 @@ select:focus, input:focus {
 }
 .strip-flag.keep { background: var(--keep); }
 .strip-flag.del { background: var(--del); }
+
+/* Suggested verdict = a GHOST of the decision: a dashed, translucent bar on the
+   TOP edge, deliberately mirroring the solid committed .strip-flag on the bottom.
+   Same hue (green keep / red del) keeps the mapping intuitive; top + dashed vs
+   bottom + solid keeps "what the tool suggests" categorically distinct from "what
+   you decided", even when both are shown on one tile. Committing just lights up the
+   solid bar below — the dashed preview made real. */
+.strip-rec {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 0;
+  border-top: 3px dashed transparent;
+  pointer-events: none;
+}
+.strip-rec.keep { border-top-color: rgba(var(--keep-rgb), 0.9); }
+.strip-rec.del  { border-top-color: rgba(var(--del-rgb), 0.9); }
+
+/* A keep/delete recommendation pill (hero + list). Dashed ghost styling — never
+   filled like .badge-decision — so a *suggestion* is visually distinct from a
+   committed verdict. */
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+.rec-badge.keep { color: var(--keep); border-color: rgba(var(--keep-rgb), 0.6); }
+.rec-badge.del { color: var(--del); border-color: rgba(var(--del-rgb), 0.6); }
 
 /* Large preview of the selected member */
 .review-hero {
@@ -1148,6 +1223,9 @@ select:focus, input:focus {
 .rl-name { font-size: 13px; font-weight: 600; }
 .rl-best { font-size: 11px; color: var(--accent); }
 .rl-flt { font-size: 11px; color: var(--text-dim); }
+.rl-trashed { font-size: 11px; color: var(--del); font-weight: 600; }
+.review-list-row.deleted { opacity: 0.5; }
+.review-list-row.deleted .rl-thumb { filter: grayscale(0.8); }
 .rl-scores { font-size: 12px; color: var(--text-dim); }
 .rl-cap { font-size: 12px; color: var(--text); line-height: 1.4; }
 .rl-cap.empty { color: var(--text-dim); font-style: italic; }
@@ -1287,6 +1365,12 @@ select:focus, input:focus {
   flex: 1;
   display: grid;
   grid-template-columns: 320px 1fr;
+  /* Bound the single implicit row to the body's height. Without this the row is
+     `auto` (content height), so a long log makes the column taller than the modal
+     and the inner overflow:auto never engages — the log just spills past the
+     dialog. minmax(0,1fr) caps the row at the available height so each column
+     scrolls within itself. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 0;
   min-height: 0;
 }
@@ -1294,10 +1378,27 @@ select:focus, input:focus {
   padding: 16px;
   border-right: 1px solid var(--border);
   overflow-y: auto;
+  min-height: 0;            /* respect the bounded grid row; scroll within, don't stretch it */
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
+/* Grouped sections instead of one flat checkbox dump. Each group is a labelled
+   cluster; a divider rule separates consecutive groups so related controls read
+   as a unit. */
+.af-group { display: flex; flex-direction: column; gap: 8px; }
+.af-group + .af-group,
+.af-advanced { padding-top: 12px; border-top: 1px solid var(--border); }
+.af-group-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+/* A dependent toggle (e.g. Expression score under Detect faces) indented so the
+   parent/child relationship is visible at a glance. */
+.af-checks .af-sub { margin-left: 24px; }
 .af-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-dim); }
 .af-row input[type="text"],
 .af-row input[type="number"],
@@ -1344,7 +1445,10 @@ select:focus, input:focus {
   min-width: 0;
   min-height: 0;           /* let the open log fill (and scroll within) the column */
   padding: 16px;            /* match .analyze-form so the two columns line up */
-  overflow-y: auto;
+  /* The panel itself never scrolls — it clips, and the log (.task-term) is the
+     sole scroll container. With overflow-y:auto here, an overflowing log scrolled
+     the whole column (and bubbled to the page) instead of scrolling in place. */
+  overflow: hidden;
 }
 .task-panel.compact {
   padding: 8px;
@@ -1464,13 +1568,12 @@ select:focus, input:focus {
 }
 .task-term {
   margin-top: 8px;
-  /* Grow to fill the open <details> (which fills the column) and scroll within,
-     via .analyze-term's overflow-y:auto. A fixed min-height (not the flex default
-     of `auto`) is what lets the box size to its container and overflow instead of
-     ballooning to fit every line — so the auto-scroll-to-bottom always has
-     something to scroll and new progress lines never hide below the fold. */
+  /* Grow to fill the open <details> and scroll within, via .analyze-term's
+     overflow-y:auto. min-height:0 (not the flex default of `auto`, nor a fixed
+     floor) is what lets the box shrink to its container and scroll internally
+     instead of overflowing and pushing the scroll up to the panel/page. */
   flex: 1;
-  min-height: 180px;
+  min-height: 0;
   border-radius: 8px;
   border: 1px solid var(--border);
 }

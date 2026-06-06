@@ -107,6 +107,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Min average CLIP cosine to keep a near-duplicate "
                          "group whole; looser components are split so single-"
                          "linkage chains can't merge a whole shoot (default: 0.90)")
+    ap.add_argument("--dup-burst-gap",  type=float, default=8.0, metavar="SEC",
+                    help="Max seconds between consecutive frames in a 'burst' — a "
+                         "loose frame this close to a near-dup group (or to other "
+                         "loose frames) joins it even when mist/haze lowers cosine "
+                         "(default: 8). 0 disables the burst pass.")
+    ap.add_argument("--dup-burst-sim",  type=float, default=0.80, metavar="F",
+                    help="Min CLIP cosine between consecutive burst frames "
+                         "(default: 0.80; below dup-sim because time carries the "
+                         "weight here)")
+    ap.add_argument("--dup-burst-span", type=float, default=30.0, metavar="SEC",
+                    help="Max total span of a single burst run, so a long "
+                         "continuous shoot can't chain into one group (default: 30)")
     ap.add_argument("--no-scenes",      action="store_true",
                     help="Skip rough scene grouping (only fine near-dup groups)")
     ap.add_argument("--scene-time-gap", type=float, default=60.0, metavar="MIN",
@@ -184,13 +196,27 @@ def main():
         pct = lo + (hi - lo) * (i / max(1, n))
         emit_progress(phase, pct, f"{what} {i}/{n}", i, n)
 
+    # Same throttle, but driven by a 0..1 fraction + an explicit message — for
+    # stages (e.g. faces) that report several heterogeneous sub-steps rather than
+    # a single i/n loop.
+    def emit_frac(phase: str, lo: float, hi: float, frac: float, message: str):
+        if not args.progress_json:
+            return
+        now = _time.monotonic()
+        if frac < 1.0 and (now - _last_step[0]) < 0.3:
+            return
+        _last_step[0] = now
+        pct = lo + (hi - lo) * max(0.0, min(1.0, frac))
+        emit_progress(phase, pct, message)
+
     folder = Path(args.folder)
     if not folder.exists():
         print(f"Error: {folder} does not exist"); sys.exit(1)
 
+    emit_progress("scan", 0.01, f"Scanning {folder.name}…")
     paths = _discover_image_paths(folder, args.recurse)
     print(f"Found {len(paths)} images in {folder}")
-    emit_progress("scan", 0.03, f"Found {len(paths)} images", 0, len(paths))
+    emit_progress("scan", 0.02, f"Found {len(paths)} images", 0, len(paths))
     if not paths:
         sys.exit(0)
 
@@ -314,29 +340,38 @@ def main():
 
     # ── Sharpness (raw reused from cache; only new files read from disk) ──
     print("\nComputing sharpness (Laplacian variance)...")
+    emit_progress("sharpness", 0.02,
+                  f"Measuring sharpness ({len(to_process)} new)…", 0, len(to_process))
     raw_sharp: dict = {p: cached[p].get("raw_laplacian", 0.0) for p in cached}
     _n_proc = len(to_process)
     for _i, p in enumerate(tqdm(to_process, desc="Sharpness"), 1):
         raw_sharp[p] = laplacian_variance(p)
-        emit_step("sharpness", 0.03, 0.15, _i, _n_proc, "Sharpness")
+        emit_step("sharpness", 0.02, 0.12, _i, _n_proc, "Sharpness")
     norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
     sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
-    emit_progress("sharpness", 0.15, "Sharpness complete", len(paths), len(paths))
+    emit_progress("sharpness", 0.12, "Sharpness complete", len(paths), len(paths))
 
     # ── CLIP-IQA / PARA (new files only) ──
+    # Split the scoring band when both backends run so the bar advances through
+    # each instead of resetting to the band start for the second model.
     clip_iqa_scores: dict = {}
+    para_raw: dict = {}
+    _both = use_clip_iqa and use_para
+    if to_process and (use_clip_iqa or use_para):
+        emit_progress("scoring", 0.12, "Loading aesthetic model…", 0, len(to_process))
     if use_clip_iqa and to_process:
         print()
+        _hi = 0.23 if _both else 0.34
         clip_iqa_scores = run_clip_iqa(
             to_process, device_for(),
-            progress=lambda i, n: emit_step("scoring", 0.15, 0.35, i, n, "Aesthetic (CLIP-IQA)"))
+            progress=lambda i, n: emit_step("scoring", 0.12, _hi, i, n, "Aesthetic (CLIP-IQA)"))
 
-    para_raw: dict = {}
     if use_para and to_process:
         print()
+        _lo = 0.23 if _both else 0.12
         para_raw = run_para(
             to_process, device_for(),
-            progress=lambda i, n: emit_step("scoring", 0.15, 0.35, i, n, "Aesthetic (PARA)"))
+            progress=lambda i, n: emit_step("scoring", _lo, 0.34, i, n, "Aesthetic (PARA)"))
 
     # ── Primary aesthetic for combined score (cached or freshly computed) ──
     def primary_aes(p: Path) -> float:
@@ -349,10 +384,12 @@ def main():
         return 0.5
 
     combined = {p: 0.4 * sharpness[p] + 0.6 * primary_aes(p) for p in paths}
-    emit_progress("scoring", 0.35, "Scoring complete", len(paths), len(paths))
+    emit_progress("scoring", 0.34, "Aesthetic scoring complete", len(paths), len(paths))
 
     # ── Perceptual hashes (reused from cache; only new files hashed) ──
     print("\nComputing perceptual hashes for duplicate detection...")
+    emit_progress("duplicates", 0.34,
+                  f"Hashing for duplicates ({len(to_process)} new)…", 0, len(to_process))
     hashes: dict = {}
     for p in cached:
         try:
@@ -362,13 +399,14 @@ def main():
     new_hashes, new_sizes = (
         compute_phashes(
             to_process,
-            progress=lambda i, n: emit_step("duplicates", 0.35, 0.45, i, n, "Hashing"),
+            progress=lambda i, n: emit_step("duplicates", 0.34, 0.42, i, n, "Hashing"),
         ) if to_process else ({}, {}))
     hashes.update(new_hashes)
     img_sizes = new_sizes
-    emit_progress("duplicates", 0.45, "Perceptual hashes complete", len(paths), len(paths))
+    emit_progress("duplicates", 0.42, "Perceptual hashes complete", len(paths), len(paths))
 
     # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
+    emit_progress("capture", 0.42, "Reading capture times…", 0, len(paths))
     capture_time: dict = {}
     _n_ct = len(paths)
     for _i, p in enumerate(paths, 1):
@@ -378,7 +416,7 @@ def main():
         else:
             ct = read_capture_time(p)
             capture_time[p] = ct if ct is not None else (sigs[p][0] or 0.0)
-        emit_step("capture", 0.45, 0.50, _i, _n_ct, "Capture time")
+        emit_step("capture", 0.42, 0.46, _i, _n_ct, "Capture time")
 
     # ── Scene grouping + fine near-duplicate groups ──
     # Grouping is global (like face clustering): recomputed every run over the
@@ -398,24 +436,30 @@ def main():
         clip_new = [p for p in paths if p not in embeddings]
         if clip_new:
             print()
+            emit_progress("embeddings", 0.46,
+                          f"Computing scene embeddings ({len(clip_new)} new)…",
+                          0, len(clip_new))
             embeddings.update(compute_clip_embeddings(
                 clip_new, device_for(),
-                progress=lambda i, n: emit_step("embeddings", 0.50, 0.58, i, n, "Scene embeddings")))
+                progress=lambda i, n: emit_step("embeddings", 0.46, 0.62, i, n, "Scene embeddings")))
         print(f"  CLIP embeddings: {len(paths) - len(clip_new)} cached, "
               f"{len(clip_new)} computed")
-        emit_progress("embeddings", 0.58, "CLIP embeddings complete", len(paths), len(paths))
+        emit_progress("embeddings", 0.62, "CLIP embeddings complete", len(paths), len(paths))
 
     # 1) Near-duplicates first — the finest grain. CLIP cosine catches the
     #    "same shot, slight motion" pairs that phash (Hamming) reads as unrelated.
+    emit_progress("grouping", 0.63, "Grouping near-duplicates…")
     path_to_group, dup_groups = assign_dup_groups(
         paths, hashes, args.dup_threshold,
         embeddings=embeddings, dup_sim=args.dup_sim,
         times=capture_time, dup_window=args.dup_window * 60.0,
         dup_cohesion=args.dup_cohesion,
+        burst_gap=args.dup_burst_gap, burst_sim=args.dup_burst_sim,
+        burst_span=args.dup_burst_span,
     )
     # Centrality per member -> the UI leads each group with its medoid frame.
     dup_central = dup_centrality(dup_groups, embeddings)
-    emit_progress("duplicates", 0.68, f"Found {len(dup_groups)} duplicate groups",
+    emit_progress("grouping", 0.66, f"Found {len(dup_groups)} duplicate groups",
                   len(dup_groups), len(dup_groups))
 
     # 2) Rough scenes, then coarsen so every dup group nests inside one scene
@@ -424,6 +468,7 @@ def main():
         scene_assign: dict = {p: None for p in paths}
         scene_count = 0
     else:
+        emit_progress("scenes", 0.66, "Detecting scenes…")
         scene_assign, _ = group_scenes(
             paths, capture_time,
             embeddings=embeddings, hashes=hashes,
@@ -434,13 +479,17 @@ def main():
         scene_assign, scene_count = coarsen_scenes_for_dups(
             paths, scene_assign, dup_groups, times=capture_time,
         )
+        emit_progress("scenes", 0.70, f"Found {scene_count} scenes",
+                      scene_count, scene_count)
 
     # ── BLIP captions + Qwen3-VL keyword tags (new files only) ──
     captions: dict = {}
     if args.caption and to_process:
+        emit_progress("caption", 0.70,
+                      f"Captioning ({len(to_process)} new)…", 0, len(to_process))
         captions = run_caption_and_tags(
             to_process, device_for(), top_k=args.top_tags,
-            progress=lambda i, n: emit_step("caption", 0.68, 0.82, i, n, "Captions"))
+            progress=lambda i, n: emit_step("caption", 0.70, 0.80, i, n, "Captions"))
 
     # ── Face detection + identity clustering ──
     # Clustering is global, so any change forces a whole-folder re-detection;
@@ -456,6 +505,7 @@ def main():
                 refs[name.strip()] = Path(rpath.strip())
             else:
                 print(f"  Warning: --face-ref '{item}' ignored (expected NAME=PATH)")
+        emit_progress("faces", 0.80, "Loading face detector…", 0, len(paths))
         face_data, _, face_embs = run_faces(
             paths, device_for(),
             face_refs=refs or None,
@@ -463,8 +513,9 @@ def main():
             min_face_rel=args.face_min_rel,
             eps=args.face_eps,
             score_expr=bool(args.face_expr),
-            progress=lambda i, n: emit_step("faces", 0.82, 0.90, i, n, "Face detection"),
+            progress=lambda frac, msg: emit_frac("faces", 0.80, 0.96, frac, msg),
         )
+        emit_progress("faces", 0.96, "Face analysis complete")
 
     # ── Build report ──
     def stamp(rec: dict, p: Path) -> dict:
@@ -542,6 +593,7 @@ def main():
 
     records.sort(key=lambda r: r["combined"])
 
+    emit_progress("report", 0.96, "Writing report…", len(records), len(records))
     with open(out_path, "w", encoding="utf-8") as f:
         n_faces_images = sum(1 for r in records if r.get("faces"))
         n_clusters = (
@@ -563,13 +615,16 @@ def main():
             "dup_sim":          args.dup_sim,
             "dup_window_min":   args.dup_window,
             "dup_cohesion":     args.dup_cohesion,
+            "dup_burst_gap":    args.dup_burst_gap,
+            "dup_burst_sim":    args.dup_burst_sim,
+            "dup_burst_span":   args.dup_burst_span,
             "scene_groups":     scene_count,
             "faces_images":     n_faces_images if args.faces else None,
             "face_clusters":    n_clusters     if args.faces else None,
             "images":           records,
         }, f, indent=2, ensure_ascii=False)
     print(f"\nReport saved: {out_path}")
-    emit_progress("report", 0.90, "Report written", len(records), len(records))
+    emit_progress("report", 0.98, "Report written", len(records), len(records))
 
     # ── Persist newly computed embeddings to the content-hash-keyed cache ──────
     # CLIP scene vectors and per-face VGGFace2 vectors are pixel-invariant, so
@@ -577,6 +632,7 @@ def main():
     # face-clustering / scene-regroup steps reuse them with zero recompute. Only
     # freshly computed vectors are written (cached ones are already stored).
     if store is not None:
+        emit_progress("cache", 0.98, "Caching embeddings…")
         try:
             if embeddings and clip_new:
                 store.put_clip((chash[p], embeddings[p])

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst, applyDecisionHide, sceneKeywords } from './format'
+import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst, applyDecisionHide, isDeleted, applyTrashHide, sceneKeywords } from './format'
 
 describe('fmt', () => {
   it('formats numbers to two decimals', () => {
@@ -158,6 +158,32 @@ describe('applyDecisionHide', () => {
   it('tolerates nullish input', () => {
     expect(applyDecisionHide(undefined, 'notdel')).toEqual([])
     expect(applyDecisionHide(null, 'all')).toEqual([])
+  })
+})
+
+describe('isDeleted / applyTrashHide', () => {
+  const items = [
+    { id: 1, trash_state: null },
+    { id: 2, trash_state: 'trashed' },
+    { id: 3 },
+    { id: 4, trash_state: 'emptied' },
+  ]
+
+  it('flags any non-null trash_state as deleted', () => {
+    expect(items.filter(isDeleted).map((i) => i.id)).toEqual([2, 4])
+  })
+
+  it('drops trashed members when not showing deleted', () => {
+    expect(applyTrashHide(items, false).map((i) => i.id)).toEqual([1, 3])
+  })
+
+  it('is a no-op when showing deleted', () => {
+    expect(applyTrashHide(items, true)).toBe(items)
+  })
+
+  it('tolerates nullish input', () => {
+    expect(applyTrashHide(undefined, false)).toEqual([])
+    expect(applyTrashHide(null, true)).toEqual([])
   })
 })
 
