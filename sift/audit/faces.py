@@ -5,11 +5,11 @@ plus per-face region sharpness and the optional CLIP expression-quality score.
 """
 import cv2
 import numpy as np
-from PIL import Image
 from tqdm import tqdm
 
 from .clip_common import load_openclip_b32, encode_prompt_pairs, bipolar_score
 from .scoring import normalise_sharpness
+from .imaging import load_rgb
 
 # ── Portrait expression bipolar prompts (CLIP ViT-B/32, on face crops) ────────
 # Coarse "is this a flattering expression" signal. CLIP is weak at fine facial
@@ -134,7 +134,8 @@ def run_faces(paths, device: str,
               min_face_size: int = 80,
               min_face_rel: float = 0.04,
               eps: float = 0.50,
-              score_expr: bool = False) -> tuple[dict, dict]:
+              score_expr: bool = False,
+              progress=None) -> tuple[dict, dict]:
     """
     Detect faces, embed with InceptionResnetV1(VGGFace2), cluster with DBSCAN.
 
@@ -177,9 +178,12 @@ def run_faces(paths, device: str,
     img_sizes: dict = {}
     n_filtered_rel = 0
 
-    for p in tqdm(paths, desc="Face detection"):
+    _n_faces = len(paths)
+    for _i, p in enumerate(tqdm(paths, desc="Face detection"), 1):
+        if progress is not None:
+            progress(_i, _n_faces)
         try:
-            img     = Image.open(p).convert("RGB")
+            img     = load_rgb(p).convert("RGB")
             w, h    = img.size
             boxes, probs = mtcnn.detect(img)
             if boxes is None:
@@ -239,7 +243,7 @@ def run_faces(paths, device: str,
         print("  Embedding reference photos...")
         for name, ref_path in face_refs.items():
             try:
-                ref_img   = Image.open(ref_path).convert("RGB")
+                ref_img   = load_rgb(ref_path).convert("RGB")
                 ref_crops = mtcnn(ref_img)
                 if ref_crops is None:
                     print(f"    No face found in reference: {ref_path.name}")

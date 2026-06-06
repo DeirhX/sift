@@ -174,6 +174,20 @@ def test_parser_top_tags_defaults_to_12():
     assert photo_audit.build_parser().parse_args(["folder"]).top_tags == 12
 
 
+def test_recursive_scan_excludes_trash_and_rejected(tmp_path):
+    (tmp_path / "keep.jpg").write_bytes(b"x")
+    (tmp_path / "_trash").mkdir()
+    (tmp_path / "_trash" / "trashed.jpg").write_bytes(b"x")
+    (tmp_path / "nested").mkdir()
+    (tmp_path / "nested" / "_rejected").mkdir()
+    (tmp_path / "nested" / "_rejected" / "old.jpg").write_bytes(b"x")
+
+    found = {p.relative_to(tmp_path).as_posix()
+             for p in photo_audit._discover_image_paths(tmp_path, recurse=True)}
+
+    assert found == {"keep.jpg"}
+
+
 @pytest.mark.parametrize("flag", ["--tag-min-prob", "--tag-cap-z", "--no-caption-ground"])
 def test_parser_rejects_retired_clip_tag_flags(flag):
     # These CLIP-era knobs are gone. server.py never passed them; assert they're

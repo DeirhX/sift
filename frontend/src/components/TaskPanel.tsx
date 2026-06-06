@@ -7,12 +7,15 @@ interface TaskPanelProps {
   taskId: string | null
   title?: string
   compact?: boolean
+  // When false, the panel renders no Cancel button — used when a parent (e.g. the
+  // Library modal header) owns cancellation, so we don't show two of them.
+  showCancel?: boolean
   onDone?: (task: TaskSnapshot) => void
 }
 
 const terminalStates = new Set(['done', 'failed', 'cancelled', 'abandoned'])
 
-export default function TaskPanel({ taskId, title = 'Task', compact = false, onDone }: TaskPanelProps) {
+export default function TaskPanel({ taskId, title = 'Task', compact = false, showCancel = true, onDone }: TaskPanelProps) {
   const [cancelling, setCancelling] = useState(false)
   const termRef = useRef<HTMLDivElement>(null)
   const { task, lines, partial, progress, connected, reconnecting } = useTaskStream(taskId, onDone)
@@ -48,8 +51,8 @@ export default function TaskPanel({ taskId, title = 'Task', compact = false, onD
           {connected && running && <span className="task-live"> · live</span>}
           {reconnecting && running && <span className="task-live reconnecting"> · reconnecting</span>}
         </div>
-        {running && (
-          <button className="btn" disabled={cancelling} onClick={doCancel}>
+        {running && showCancel && (
+          <button className="btn danger" disabled={cancelling} onClick={doCancel}>
             {cancelling ? 'Cancelling…' : 'Cancel'}
           </button>
         )}

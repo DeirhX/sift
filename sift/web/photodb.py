@@ -16,6 +16,7 @@ So everything the two scripts must agree on lives here, and nowhere else:
   - the manual-cluster id range and allocator
 """
 
+import sqlite3
 from collections import Counter
 
 # Manually-created people get ids in a high range so they never collide with
@@ -134,6 +135,27 @@ CREATE TABLE IF NOT EXISTS photo_roots (
 );
 """
 
+# App-managed recycle bin. Each row is file-level (image_id/path), not just
+# content-hash-level, so exact byte-identical copies can be trashed/restored
+# independently once the UI supports per-copy actions.
+TRASH_DDL = """
+CREATE TABLE IF NOT EXISTS trash_moves (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_id     INTEGER,
+    hash         TEXT,
+    from_path    TEXT NOT NULL,
+    trash_path   TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'trashed', -- trashed | restored | emptied | missing
+    trashed_at   TEXT,
+    restored_at  TEXT,
+    emptied_at   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_trash_state ON trash_moves(state);
+CREATE INDEX IF NOT EXISTS idx_trash_image ON trash_moves(image_id);
+CREATE INDEX IF NOT EXISTS idx_trash_hash ON trash_moves(hash);
+"""
+
 # Long-running web operations (analyze, index, apply, etc.) share one persisted
 # task ledger so progress survives browser reconnects and recent history is
 # visible after a panel closes. The process itself is not resumable after a
@@ -195,6 +217,29 @@ _IMAGE_LATE_COLUMNS = (
 _FACE_LATE_COLUMNS = (("sharp", "REAL"), ("expr", "REAL"))
 
 
+def connect(path, *, timeout_ms: int = 5000) -> sqlite3.Connection:
+    """Open a *hardened* connection to the library DB — the single chokepoint
+    every entry point (server, ingest, backup, CLI) uses so they all treat the
+    one shared SQLite file identically:
+
+      - WAL + synchronous=NORMAL: crash-consistent (a power loss can lose the
+        last uncommitted txn but not corrupt the file) without the full-fsync tax.
+      - busy_timeout: wait out a concurrent writer instead of instantly raising
+        'database is locked' — the server and a CLI `sift index` can legitimately
+        touch the same DB at once.
+      - foreign_keys: enforce the faces->images ON DELETE CASCADE so a delete
+        can't leave orphaned faces behind.
+
+    Pragmas are per-connection (except WAL, which is persistent), so they must be
+    set on every open; doing it here means no caller can forget."""
+    conn = sqlite3.connect(path, timeout=timeout_ms / 1000)
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout_ms)}")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
 def _table_columns(conn, table: str) -> set[str]:
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
 
@@ -234,6 +279,7 @@ def ensure_schema(conn) -> None:
             conn.execute(f"ALTER TABLE faces ADD COLUMN {col} {decl}")
     ensure_overrides(conn)
     conn.executescript(PHOTO_ROOTS_DDL)
+    conn.executescript(TRASH_DDL)
     conn.executescript(TASKS_DDL)
     ensure_anchors(conn)
     # Created after the ALTERs so legacy tables don't index a missing column.

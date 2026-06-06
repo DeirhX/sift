@@ -9,20 +9,18 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import HTTPException
 
+from sift.web import library_ops
 from sift.web.analysis import REPO_ROOT, build_analyze_steps
-from sift.web.queries import DEC_ON
 
 TaskParams = dict[str, Any]
 DbFactory = Callable[[], Any]
@@ -383,9 +381,15 @@ class TaskManager:
         if task_type == "index_library":
             return self._build_index(params)
         if task_type == "apply_decisions":
-            return self._build_apply(params)
+            return self._build_trash(params)
+        if task_type == "trash_decisions":
+            return self._build_trash(params)
         if task_type == "undo_apply":
-            return self._build_undo(params)
+            return self._build_restore(params)
+        if task_type == "restore_trash":
+            return self._build_restore(params)
+        if task_type == "empty_trash":
+            return self._build_empty_trash(params)
         if task_type == "autocull_duplicates":
             return self._build_autocull(params)
         raise HTTPException(400, f"unknown task type: {task_type!r}")
@@ -429,154 +433,90 @@ class TaskManager:
             return ctx.run_commands(steps)
         return body, [command_string(argv)]
 
-    def _build_apply(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
-        return self._run_apply, ["apply decisions"]
+    def _build_trash(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
+        return self._run_trash_decisions, ["move marked photos to trash"]
 
-    def _build_undo(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
-        return self._run_undo, ["undo apply"]
+    def _build_restore(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
+        return self._run_restore_trash, ["restore trash"]
+
+    def _build_empty_trash(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
+        return self._run_empty_trash, ["empty trash"]
 
     def _build_autocull(self, _params: TaskParams) -> tuple[TaskBody, list[str]]:
         return self._run_autocull, ["autocull duplicate groups"]
 
-    def _rejected_dir(self, conn) -> Path:
-        root = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-        if not root:
-            raise RuntimeError("library folder unknown")
-        return Path(root["value"]) / "_rejected"
-
-    @staticmethod
-    def _unique_dest(dest_dir: Path, name: str) -> Path:
-        dest = dest_dir / name
-        if not dest.exists():
-            return dest
-        stem, suf = Path(name).stem, Path(name).suffix
-        k = 1
-        while (dest_dir / f"{stem}_{k}{suf}").exists():
-            k += 1
-        return dest_dir / f"{stem}_{k}{suf}"
-
-    @staticmethod
-    def _ensure_moves_table(conn) -> None:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS applied_moves (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                image_id  INTEGER,
-                from_path TEXT,
-                to_path   TEXT,
-                ts        TEXT
-            )""")
-
     def _run_autocull(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
         ctx.progress(phase="autocull", pct=0.0, message="Loading duplicate groups")
         with self._db() as conn:
-            gids = [r["dup_group"] for r in conn.execute(
-                "SELECT DISTINCT dup_group FROM images WHERE dup_group IS NOT NULL")]
-            kept = deleted = 0
-            total = max(1, len(gids))
-            for idx, gid in enumerate(gids):
-                if ctx.cancelled:
-                    raise TaskCancelled()
-                members = conn.execute(
-                    """SELECT content_hash FROM images WHERE dup_group=?
-                       ORDER BY combined DESC, id ASC""", (gid,)).fetchall()
-                for i, m in enumerate(members):
-                    if not m["content_hash"]:
-                        continue
-                    dec = "keep" if i == 0 else "del"
-                    conn.execute(
-                        "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                        (m["content_hash"], dec))
-                    kept += (i == 0)
-                    deleted += (i != 0)
-                conn.commit()
-                ctx.progress(phase="autocull", pct=(idx + 1) / total,
-                             message=f"Culled group {idx + 1}/{len(gids)}",
-                             current=idx + 1, total=len(gids))
-        ctx.line(f"Autoculled {len(gids)} groups: kept {kept}, deleted {deleted}")
-        return {"groups": len(gids), "kept": kept, "deleted": deleted}
+            try:
+                result = library_ops.autocull_duplicates(
+                    conn,
+                    progress=lambda current, total, message: ctx.progress(
+                        phase="autocull",
+                        pct=(current / total if total else 1.0),
+                        message=message, current=current, total=total),
+                    cancelled=lambda: ctx.cancelled,
+                )
+            except library_ops.OperationCancelled:
+                raise TaskCancelled()
+        ctx.line(
+            f"Autoculled {result['groups']} groups: kept {result['kept']}, "
+            f"deleted {result['deleted']}")
+        return result
 
-    def _run_apply(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
-        moved = skipped = 0
+    def _run_trash_decisions(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
         with self._db() as conn:
-            self._ensure_moves_table(conn)
-            rej = self._rejected_dir(conn)
-            rej_str = str(rej)
-            rows = conn.execute(
-                f"""SELECT i.id, i.path FROM images i
-                   JOIN {DEC_ON}
-                   WHERE d.decision='del'""").fetchall()
-            total = len(rows)
-            if rows:
-                rej.mkdir(parents=True, exist_ok=True)
-            ctx.progress(phase="apply", pct=0.0,
-                         message=f"Moving {total} rejected files",
-                         current=0, total=total)
-            for idx, r in enumerate(rows):
-                if ctx.cancelled:
-                    raise TaskCancelled()
-                src = Path(r["path"])
-                if str(src).startswith(rej_str) or not src.exists():
-                    skipped += 1
-                else:
-                    dest = self._unique_dest(rej, src.name)
-                    try:
-                        shutil.move(str(src), str(dest))
-                    except OSError as e:
-                        skipped += 1
-                        ctx.line(f"[skip] {src}: {e}")
-                    else:
-                        conn.execute("UPDATE images SET path=? WHERE id=?",
-                                     (str(dest), r["id"]))
-                        conn.execute(
-                            "INSERT INTO applied_moves (image_id, from_path, to_path, ts) "
-                            "VALUES (?,?,?,?)",
-                            (r["id"], str(src), str(dest),
-                             datetime.now().isoformat(timespec="seconds")))
-                        moved += 1
-                conn.commit()
-                ctx.progress(phase="apply", pct=((idx + 1) / total if total else 1.0),
-                             message=f"Moved {moved}, skipped {skipped}",
-                             current=idx + 1, total=total)
-        ctx.line(f"Apply complete: moved {moved}, skipped {skipped}")
-        return {"moved": moved, "skipped": skipped,
-                "rejected_dir": rej_str if 'rej_str' in locals() else ""}
+            try:
+                result = library_ops.trash_decisions(
+                    conn,
+                    image_ids=_params.get("image_ids"),
+                    progress=lambda current, total, message: ctx.progress(
+                        phase="apply",
+                        pct=(current / total if total else 1.0),
+                        message=message, current=current, total=total),
+                    cancelled=lambda: ctx.cancelled,
+                    log=ctx.line,
+                )
+            except library_ops.OperationCancelled:
+                raise TaskCancelled()
+        ctx.line(f"Trash complete: moved {result['moved']}, skipped {result['skipped']}")
+        return result
 
-    def _run_undo(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
-        restored = skipped = 0
+    def _run_restore_trash(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
         with self._db() as conn:
-            self._ensure_moves_table(conn)
-            rows = conn.execute(
-                "SELECT id, image_id, from_path, to_path FROM applied_moves ORDER BY id DESC"
-            ).fetchall()
-            total = len(rows)
-            ctx.progress(phase="undo", pct=0.0,
-                         message=f"Restoring {total} files",
-                         current=0, total=total)
-            for idx, r in enumerate(rows):
-                if ctx.cancelled:
-                    raise TaskCancelled()
-                src = Path(r["to_path"])
-                dst = Path(r["from_path"])
-                if src.exists() and not dst.exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        shutil.move(str(src), str(dst))
-                    except OSError as e:
-                        skipped += 1
-                        ctx.line(f"[skip] {src}: {e}")
-                        continue
-                    conn.execute("UPDATE images SET path=? WHERE id=?",
-                                 (str(dst), r["image_id"]))
-                    restored += 1
-                else:
-                    skipped += 1
-                conn.execute("DELETE FROM applied_moves WHERE id=?", (r["id"],))
-                conn.commit()
-                ctx.progress(phase="undo", pct=((idx + 1) / total if total else 1.0),
-                             message=f"Restored {restored}, skipped {skipped}",
-                             current=idx + 1, total=total)
-        ctx.line(f"Undo complete: restored {restored}, skipped {skipped}")
-        return {"restored": restored, "skipped": skipped}
+            try:
+                result = library_ops.restore_trash(
+                    conn,
+                    progress=lambda current, total, message: ctx.progress(
+                        phase="undo",
+                        pct=(current / total if total else 1.0),
+                        message=message, current=current, total=total),
+                    cancelled=lambda: ctx.cancelled,
+                    log=ctx.line,
+                )
+            except library_ops.OperationCancelled:
+                raise TaskCancelled()
+        ctx.line(f"Undo complete: restored {result['restored']}, skipped {result['skipped']}")
+        return result
+
+    def _run_empty_trash(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:
+        with self._db() as conn:
+            try:
+                result = library_ops.empty_trash(
+                    conn,
+                    progress=lambda current, total, message: ctx.progress(
+                        phase="empty-trash",
+                        pct=(current / total if total else 1.0),
+                        message=message, current=current, total=total),
+                    cancelled=lambda: ctx.cancelled,
+                    log=ctx.line,
+                )
+            except library_ops.OperationCancelled:
+                raise TaskCancelled()
+        ctx.line(
+            f"Empty Trash complete: deleted {result['deleted']}, "
+            f"skipped {result['skipped']}")
+        return result
 
 
 MANAGER = TaskManager()

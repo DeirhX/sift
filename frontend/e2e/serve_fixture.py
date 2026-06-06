@@ -12,6 +12,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent                 # frontend/e2e
 FRONTEND = HERE.parent                                  # frontend
+REPO_ROOT = FRONTEND.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 from sift.web import build_db, server                  # noqa: E402
 from PIL import Image                                   # noqa: E402
@@ -84,11 +86,7 @@ def seed():
 
 def main():
     seed()
-    server.DB_PATH = DB
-    server.THUMB_DIR = THUMBS
-    server.FRONTEND_DIST = FRONTEND / "dist"
-    server._ensure_schema()
-    server._mount_frontend()
+    server._init_runtime(DB, THUMBS, FRONTEND / "dist", None)
     import uvicorn
     print(f"e2e fixture server on http://127.0.0.1:{PORT}  (db={DB})")
     uvicorn.run(server.app, host="127.0.0.1", port=PORT, log_level="warning")

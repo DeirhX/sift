@@ -1,12 +1,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, fetchTasks, setDecision as apiSetDecision } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
 import { applyDecisionHide, hideDelInReview } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
+import { useDecisions } from './hooks/useDecisions'
+import { useTaskInvalidation } from './hooks/useTaskInvalidation'
+import { invalidateRoots, PHOTO_DATA_QUERY_ROOTS } from './queryKeys'
 import type { Filters, View } from './urlState'
-import type { ImageItem, TaskSnapshot } from './api/types'
-import type { Decision, BulkDecision, SetLightboxIndex } from './types'
+import type { SetLightboxIndex } from './types'
 import Sidebar from './components/Sidebar'
 import PhotoGrid from './components/PhotoGrid'
 import GroupView from './components/GroupView'
@@ -23,20 +25,12 @@ const SCENE_PAGE = 30
 const TASK_LABELS: Record<string, string> = {
   analyze_library: 'Analyze',
   index_library: 'Index',
-  apply_decisions: 'Apply',
-  undo_apply: 'Undo',
+  apply_decisions: 'Trash',
+  trash_decisions: 'Trash',
+  undo_apply: 'Restore',
+  restore_trash: 'Restore',
+  empty_trash: 'Empty Trash',
   autocull_duplicates: 'Auto-cull',
-}
-
-// One page of any list query, loosely typed for the optimistic cache patcher
-// (which walks images/groups/scenes pages uniformly).
-interface CachePage {
-  items?: ImageItem[]
-  groups?: { items: ImageItem[] }[]
-  scenes?: { items: ImageItem[] }[]
-}
-interface CacheData {
-  pages: CachePage[]
 }
 
 // Hydrate initial state from the URL so reloads/shared links restore the view.
@@ -49,6 +43,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
   const searchRef = useRef<HTMLInputElement>(null)
+  const { setDecision, setDecisionsBulk } = useDecisions()
+  const { activeTask, invalidateAfterTask } = useTaskInvalidation()
 
   const focusGrid = useCallback(() => {
     document.querySelector<HTMLElement>('.grid-scroll')?.focus()
@@ -151,16 +147,9 @@ export default function App() {
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
 
-  // Refetch the photo/group/scene list queries (roll back a failed decision).
-  const invalidateLists = useCallback(() => {
-    qc.invalidateQueries({ predicate: (q) => ['images', 'groups', 'scenes'].includes(q.queryKey[0] as string) })
-  }, [qc])
-
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
-    qc.invalidateQueries({
-      predicate: (q) => ['images', 'groups', 'scenes', 'meta'].includes(q.queryKey[0] as string),
-    })
+    invalidateRoots(qc, PHOTO_DATA_QUERY_ROOTS)
   }, [qc])
 
   const toggleInList = useCallback((key: 'tags' | 'people', value: string) => {
@@ -170,95 +159,6 @@ export default function App() {
       return { ...f, [key]: nextList } as Filters
     })
   }, [])
-
-  // Optimistically patch a photo's decision in every cached query that holds
-  // it — works for both the flat images cache and the nested groups cache.
-  const patchDecision = useCallback((id: number, decision: string | null) => {
-    qc.setQueriesData<CacheData>(
-      { predicate: (q) => ['images', 'groups', 'scenes'].includes(q.queryKey[0] as string) },
-      (data) => {
-        if (!data?.pages) return data
-        const patchItems = (arr?: ImageItem[]) => arr?.map((it) => (it.id === id ? { ...it, decision } : it))
-        return {
-          ...data,
-          pages: data.pages.map((pg) => ({
-            ...pg,
-            items: patchItems(pg.items),
-            groups: pg.groups?.map((g) => ({ ...g, items: patchItems(g.items) ?? [] })),
-            scenes: pg.scenes?.map((s) => ({ ...s, items: patchItems(s.items) ?? [] })),
-          })),
-        }
-      },
-    )
-  }, [qc])
-
-  // Single toggle: clicking the current decision clears it.
-  const setDecision = useCallback(async (item: ImageItem, decision: Decision) => {
-    const next = item.decision === decision ? null : decision
-    patchDecision(item.id, next)
-    if (item.hash == null) return
-    try {
-      await apiSetDecision(item.hash, next)
-    } catch {
-      invalidateLists()
-    }
-  }, [patchDecision, invalidateLists])
-
-  // Bulk apply (e.g. "keep best, delete rest"). updates: [{id, hash, decision}]
-  const setDecisionsBulk = useCallback(async (updates: BulkDecision[]) => {
-    updates.forEach((u) => patchDecision(u.id, u.decision))
-    try {
-      await Promise.all(updates
-        .filter((u): u is BulkDecision & { hash: string } => u.hash != null)
-        .map((u) => apiSetDecision(u.hash, u.decision)))
-    } catch {
-      invalidateLists()
-    }
-  }, [patchDecision, invalidateLists])
-
-  const invalidateAfterTask = useCallback((task: TaskSnapshot) => {
-    const allLists = () => qc.invalidateQueries({
-      predicate: (q) => ['images', 'groups', 'scenes', 'meta', 'applyStatus'].includes(q.queryKey[0] as string),
-    })
-    switch (task.type) {
-      case 'analyze_library':
-      case 'index_library':
-      case 'apply_decisions':
-      case 'undo_apply':
-        allLists()
-        break
-      case 'autocull_duplicates':
-        qc.invalidateQueries({
-          predicate: (q) => ['images', 'groups', 'scenes', 'applyStatus'].includes(q.queryKey[0] as string),
-        })
-        break
-      default:
-        invalidateLists()
-    }
-  }, [qc, invalidateLists])
-
-  const taskList = useQuery({
-    queryKey: ['tasks'],
-    queryFn: () => fetchTasks(5),
-    refetchInterval: 1000,
-  })
-  const activeTask = taskList.data?.current ?? null
-  const lastRunningTaskId = useRef<string | null>(null)
-  const completedTaskIds = useRef<Set<string>>(new Set())
-
-  useEffect(() => {
-    if (activeTask?.state === 'running') {
-      lastRunningTaskId.current = activeTask.id
-      return
-    }
-    const latest = taskList.data?.tasks?.[0]
-    if (!latest || latest.state === 'running') return
-    if (latest.id !== lastRunningTaskId.current) return
-    if (completedTaskIds.current.has(latest.id)) return
-    completedTaskIds.current.add(latest.id)
-    lastRunningTaskId.current = null
-    invalidateAfterTask(latest)
-  }, [activeTask, taskList.data?.tasks, invalidateAfterTask])
 
   const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal : groupTotal
   const headerLabel = view === 'grid' ? 'photos'
@@ -328,7 +228,16 @@ export default function App() {
           images.isLoading ? (
             <div className="spinner">Loading…</div>
           ) : items.length === 0 ? (
-            <div className="empty">No photos match these filters.</div>
+            !meta.data?.meta?.folder ? (
+              <div className="empty empty-cold">
+                <p>No library yet — nothing has been analyzed.</p>
+                <button className="btn primary" onClick={() => setShowAnalyze(true)}>
+                  Analyze your first folder
+                </button>
+              </div>
+            ) : (
+              <div className="empty">No photos match these filters.</div>
+            )
           ) : (
             <PhotoGrid
               items={items}

@@ -5,7 +5,7 @@ import fs from 'fs'
 
 // REAL end-to-end: drive the actual analysis pipeline (photo_audit + build_db)
 // from the Re-analyze panel against a copy of a real library, then exercise the
-// reorganization (apply -> move del-marked files into <lib>/_rejected/, undo).
+// reorganization (trash -> move del-marked files into <lib>/_trash/, restore).
 // Verifies file moves on disk via Node fs. Opt-in: see playwright.real.config.js.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -15,9 +15,24 @@ const ANALYZE_TIMEOUT = Number(process.env.E2E_ANALYZE_TIMEOUT || 900_000)
 const libPath = () => fs.readFileSync(LIBPATH_FILE, 'utf8').trim()
 const isFile = (dir, f) => fs.statSync(path.join(dir, f)).isFile()
 const rootFileCount = (lib) => fs.readdirSync(lib).filter((f) => isFile(lib, f)).length
-const rejectedCount = (lib) => {
-  const rej = path.join(lib, '_rejected')
-  return fs.existsSync(rej) ? fs.readdirSync(rej).filter((f) => isFile(rej, f)).length : 0
+const trashCount = (lib) => {
+  const trash = path.join(lib, '_trash')
+  return fs.existsSync(trash) ? fs.readdirSync(trash).filter((f) => isFile(trash, f)).length : 0
+}
+
+async function taskAndWait(page, action) {
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) =>
+      r.url().includes('/api/tasks') && r.request().method() === 'POST'),
+    action(),
+  ])
+  expect(resp.ok()).toBeTruthy()
+  const task = await resp.json()
+  await expect.poll(async () => {
+    const status = await page.request.get(`/api/tasks/${task.id}`)
+    expect(status.ok()).toBeTruthy()
+    return (await status.json()).state
+  }).toBe('done')
 }
 
 test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ page }) => {
@@ -60,7 +75,7 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   page.on('dialog', (d) => d.accept())
 
   const beforeRoot = rootFileCount(lib)
-  expect(rejectedCount(lib)).toBe(0)
+  expect(trashCount(lib)).toBe(0)
 
   const first = page.locator('.card').first()
   await Promise.all([
@@ -72,24 +87,18 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   // Apply status is queried independently; reload so it sees the pending mark.
   await page.reload()
   const apply = page.locator('.apply-panel')
-  await Promise.all([
-    page.waitForResponse((r) => r.url().includes('/api/apply') && r.request().method() === 'POST'),
-    apply.getByRole('button', { name: /Move \d+ to _rejected/ }).click(),
-  ])
-  await expect(apply.getByRole('button', { name: /Undo \(\d+ moved\)/ })).toBeVisible()
+  await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
+  await expect(apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ })).toBeVisible()
 
-  // One file physically moved into _rejected/.
-  expect(rejectedCount(lib)).toBe(1)
+  // One file physically moved into _trash/.
+  expect(trashCount(lib)).toBe(1)
   expect(rootFileCount(lib)).toBe(beforeRoot - 1)
 
-  // ── Undo restores it ────────────────────────────────────────────────────────
-  await Promise.all([
-    page.waitForResponse((r) => r.url().includes('/api/apply/undo') && r.request().method() === 'POST'),
-    apply.getByRole('button', { name: /Undo \(\d+ moved\)/ }).click(),
-  ])
-  await expect(apply.getByRole('button', { name: /Move \d+ to _rejected/ })).toBeVisible()
+  // ── Restore moves it back ──────────────────────────────────────────────────
+  await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ }).click())
+  await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 
-  expect(rejectedCount(lib)).toBe(0)
+  expect(trashCount(lib)).toBe(0)
   expect(rootFileCount(lib)).toBe(beforeRoot)
 })
 

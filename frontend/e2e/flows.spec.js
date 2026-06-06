@@ -21,6 +21,21 @@ async function decideAndWait(page, action) {
   expect(resp.ok()).toBeTruthy()
 }
 
+async function taskAndWait(page, action) {
+  const [resp] = await Promise.all([
+    page.waitForResponse((r) =>
+      r.url().includes('/api/tasks') && r.request().method() === 'POST'),
+    action(),
+  ])
+  expect(resp.ok()).toBeTruthy()
+  const task = await resp.json()
+  await expect.poll(async () => {
+    const status = await page.request.get(`/api/tasks/${task.id}`)
+    expect(status.ok()).toBeTruthy()
+    return (await status.json()).state
+  }).toBe('done')
+}
+
 const sidebar = (page) => page.locator('.sidebar')
 const cards = (page) => page.locator('.card')
 
@@ -397,7 +412,7 @@ test.describe('re-analyze panel', () => {
 })
 
 test.describe('apply / undo', () => {
-  test('move del-marked files to _rejected and undo', async ({ page }) => {
+  test('move del-marked files to Trash and restore', async ({ page }) => {
     await page.goto('/')
     const first = cards(page).first()
     await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
@@ -405,13 +420,13 @@ test.describe('apply / undo', () => {
     // Apply status is queried independently; reload so it sees the pending mark.
     await page.reload()
     const apply = page.locator('.apply-panel')
-    await apply.getByRole('button', { name: /Move \d+ to _rejected/ }).click()
-    await expect(apply.getByRole('button', { name: /Undo \(\d+ moved\)/ })).toBeVisible()
+    await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
+    await expect(apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ })).toBeVisible()
 
-    await apply.getByRole('button', { name: /Undo \(\d+ moved\)/ }).click()
-    await expect(apply.getByRole('button', { name: /Move \d+ to _rejected/ })).toBeVisible()
+    await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ }).click())
+    await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 
-    // cleanup: clear the mark and reset apply status
+    // cleanup: clear the restored del mark.
     await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Delete' }).click())
   })
 })

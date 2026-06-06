@@ -1,12 +1,14 @@
 """Shared CLIP / image-batching primitives.
 
-The lowest layer of the analysis package: the open/convert/skip/stack batching
-loop and the OpenCLIP ViT-B/32 helpers that the scoring, grouping and face
-modules all build on. No intra-package dependencies.
+A low layer of the analysis package: the open/convert/skip/stack batching loop
+and the OpenCLIP ViT-B/32 helpers that the scoring, grouping and face modules all
+build on. Depends only on `imaging` (the image-loading leaf).
 """
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import ImageOps
 from tqdm import tqdm
+
+from .imaging import load_rgb
 
 
 def iter_image_batches(paths, preprocess, device, batch_size, desc):
@@ -27,7 +29,7 @@ def iter_image_batches(paths, preprocess, device, batch_size, desc):
         tensors, bpaths = [], []
         for p in paths[i:i + batch_size]:
             try:
-                tensors.append(preprocess(ImageOps.exif_transpose(Image.open(p)).convert("RGB")))
+                tensors.append(preprocess(ImageOps.exif_transpose(load_rgb(p)).convert("RGB")))
                 bpaths.append(p)
             except Exception as e:
                 print(f"  skip {getattr(p, 'name', p)}: {e}")

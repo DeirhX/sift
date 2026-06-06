@@ -57,6 +57,9 @@ class ImageItem(BaseModel):
     face_expr: float | None = None
     portrait: float | None = None
     decision: str | None = None
+    trash_state: str | None = None
+    original_path: str | None = None
+    trashed_at: str | None = None
     faces: list[Face] = []
     tags: list[str] = []
 
@@ -202,17 +205,43 @@ class ApplyStatusResponse(BaseModel):
     pending: int
     applied: int
     rejected_dir: str
+    trash_dir: str | None = None
+    trashed: int = 0
 
 
 class ApplyResponse(BaseModel):
     moved: int
     skipped: int
     rejected_dir: str
+    trash_dir: str | None = None
 
 
 class UndoResponse(BaseModel):
     restored: int
     skipped: int
+
+
+class TrashStatusResponse(BaseModel):
+    pending: int
+    trashed: int
+    emptied: int
+    trash_dir: str
+
+
+class TrashItem(BaseModel):
+    id: int
+    image_id: int | None = None
+    filename: str
+    hash: str | None = None
+    original_path: str
+    trash_path: str
+    state: str
+    trashed_at: str | None = None
+
+
+class TrashListResponse(BaseModel):
+    total: int
+    items: list[TrashItem]
 
 
 class TaskStartRequest(BaseModel):

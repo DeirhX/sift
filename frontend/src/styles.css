@@ -857,6 +857,21 @@ select:focus, input:focus {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+/* Single right-aligned action group so Cancel + Close sit on one baseline with
+   even spacing instead of crowding against the task panel's own header. */
+.review-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Quiet dismiss: present but never competing with the real action. Cancel uses
+   .btn.danger (flagged red); Close stays muted so the hierarchy is obvious. */
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+.btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .review-sub { color: var(--text-dim); }
 .review-actions { display: flex; gap: 8px; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
@@ -1327,6 +1342,9 @@ select:focus, input:focus {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  min-height: 0;           /* let the open log fill (and scroll within) the column */
+  padding: 16px;            /* match .analyze-form so the two columns line up */
+  overflow-y: auto;
 }
 .task-panel.compact {
   padding: 8px;
@@ -1403,6 +1421,15 @@ select:focus, input:focus {
   color: var(--text-dim);
   font-size: 12px;
 }
+/* When expanded, grow to fill the rest of the column so the log uses the modal's
+   full height instead of a fixed box with dead space below it. Collapsed, it
+   stays its natural (summary-only) size. */
+.task-details[open] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .task-details summary {
   cursor: pointer;
   user-select: none;
@@ -1437,6 +1464,12 @@ select:focus, input:focus {
 }
 .task-term {
   margin-top: 8px;
+  /* Grow to fill the open <details> (which fills the column) and scroll within,
+     via .analyze-term's overflow-y:auto. A fixed min-height (not the flex default
+     of `auto`) is what lets the box size to its container and overflow instead of
+     ballooning to fit every line — so the auto-scroll-to-bottom always has
+     something to scroll and new progress lines never hide below the fold. */
+  flex: 1;
   min-height: 180px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -1675,3 +1708,46 @@ select:focus, input:focus {
 .scene-loose.is-del  { border-color: var(--del); }
 .scene-loose.is-keep { border-color: var(--keep); }
 .scene-loose:hover { border-color: var(--accent); }
+
+/* ── Folder path autocomplete (FolderInput) ───────────────────────────── */
+.folder-input { position: relative; }
+.folder-input input[type="text"] { width: 100%; }
+
+.folder-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-pop);
+  z-index: 20;
+}
+
+.folder-suggest li {
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.folder-suggest li.active,
+.folder-suggest li:hover { background: var(--bg-hover); }
+
+.folder-suggest-more {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default;
+}
+.folder-suggest-more:hover { background: transparent !important; }

@@ -46,6 +46,7 @@ from tqdm import tqdm
 
 from sift.web import photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate
+from sift.audit.imaging import load_rgb
 
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 
@@ -83,7 +84,7 @@ def process_image(args: tuple) -> tuple:
         if not skip_thumbs:
             dst = thumb_dir / f"{content_hash}.webp"
             if force or not dst.exists():
-                with Image.open(src_path) as im:
+                with load_rgb(src_path) as im:
                     raw_size = im.size                      # pre-transpose (w, h)
                     out = ImageOps.exif_transpose(im)       # honour camera rotation
                     out = out.convert("RGB")
@@ -120,8 +121,17 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     emit_progress("load", 0.05, f"Loaded {len(images)} image records", 0, len(images))
 
     thumb_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
+
+    # Snapshot the existing library before we wipe and rebuild its tables. The
+    # rebuild is one big transaction (a crash rolls back), but a pre-rebuild copy
+    # is cheap insurance against a bug or file-level corruption taking the
+    # irreplaceable bits (decisions, names, face overrides) with it.
+    from sift.web import backup
+    snap = backup.snapshot(db_path, label="prebuild")
+    if snap:
+        print(f"  Backup before rebuild: {snap}")
+
+    conn = photodb.connect(db_path)
     photodb.create_base_schema(conn)
     has_fts = True
     try:
@@ -134,6 +144,12 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     # the overrides table, and the indexes that depend on those columns, so an
     # older photos.db is upgraded in place rather than needing a full rebuild.
     photodb.ensure_schema(conn)
+    # Release the schema-setup write lock immediately. Everything until the final
+    # wipe+insert is read-only or pure file I/O (thumbnails), and we must NOT hold
+    # a write transaction across the slow thumbnail phase: this DB also stores the
+    # server's task ledger, and a held write lock there deadlocks the progress
+    # pump (which then stops draining our stdout, blocking us on a full pipe).
+    conn.commit()
 
     # ── Snapshot prior state before wiping ───────────────────────────────────
     prev_names = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
@@ -156,14 +172,10 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     print(f"  Preserving {len(prev_decisions)} decisions ({dec_key}-keyed), "
           f"{len(prev_names)} cluster names")
 
-    # ── Wipe rebuildable tables ──────────────────────────────────────────────
-    conn.execute("DELETE FROM images")
-    conn.execute("DELETE FROM faces")
-    conn.execute("DELETE FROM image_tags")
-    if has_fts:
-        conn.execute("DELETE FROM images_fts")
-
     # ── Pass 1: resolve content hashes + (re)generate thumbnails ─────────────
+    # Runs with NO open write transaction (see the conn.commit() above): pure file
+    # I/O plus reads, so the server can keep recording task progress to this same
+    # DB meanwhile. The wipe+insert transaction is opened only afterwards.
     # Reuse the prior hash when a file's (mtime, size) is unchanged; otherwise
     # the worker hashes it. Workers also (re)build any missing thumbnail.
     jobs: list[tuple] = []
@@ -213,7 +225,16 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                                   f"Processed {done}/{len(jobs)} images",
                                   done, len(jobs))
 
-    # ── Insert image records ─────────────────────────────────────────────────
+    # ── Wipe + insert in a single transaction ────────────────────────────────
+    # Opened now (not before the thumbnail phase) so the write lock — and the
+    # task-ledger contention it causes — is held only for this fast rebuild, which
+    # is atomic: a crash mid-insert rolls back to the prior table contents.
+    conn.execute("DELETE FROM images")
+    conn.execute("DELETE FROM faces")
+    conn.execute("DELETE FROM image_tags")
+    if has_fts:
+        conn.execute("DELETE FROM images_fts")
+
     cluster_ids_seen: set[int] = set()
 
     for idx, im in enumerate(images):

@@ -3,8 +3,8 @@
 A local, single-user toolkit for **auditing and culling a photo library**. It
 scores every image for sharpness and aesthetic quality, groups near-duplicates,
 optionally captions/tags photos and detects faces, then gives you a fast web UI
-to review, mark keep/delete, and **reversibly move** rejects into a `_rejected/`
-folder. Nothing is ever hard-deleted.
+to review, mark keep/delete, and **reversibly move** rejects into a `_trash/`
+folder. Nothing is hard-deleted unless you explicitly empty Trash.
 
 Everything runs on your machine. There is no cloud, no auth, no telemetry.
 
@@ -28,7 +28,7 @@ sift analyze ──► audit_report.json ──► sift index ──► photos.d
                                                             │
                                                 sift serve (FastAPI) ──► React UI
                                                             │
-                                            originals  ◄────┴────►  _rejected/
+                                            originals  ◄────┴────►  _trash/
 ```
 
 ## Install
@@ -102,9 +102,14 @@ sift serve --db "E:\Photos\photos.db"
 
 ```bash
 # Development: API on :8000 + Vite dev server on :5173 (proxies /api, /thumb, /img)
-sift serve --db "E:\Photos\photos.db"
+sift serve --db "E:\Photos\photos.db" --reload
 cd frontend && npm run dev
 ```
+
+With `--reload`, backend Python/API changes restart the FastAPI process
+automatically. Frontend React/CSS changes hot-reload through Vite. If you change
+API response models, still run `cd frontend && npm run codegen`; type generation
+is intentionally explicit so generated files do not churn behind your back.
 
 `sift serve` finds the built frontend at `frontend/dist` (editable install). To
 serve a build from elsewhere, pass `--frontend-dist <dir>` or set
@@ -121,8 +126,8 @@ npm run typecheck                # tsc --noEmit; also runs as part of `npm run b
 
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
 captions; review duplicate groups; auto-cull (keep the best of each group);
-and finally **Apply** to move every `del`-marked file into `<library>/_rejected/`.
-Apply is logged and **undoable**.
+and finally move every `del`-marked file into `<library>/_trash/`. Trash is
+recoverable via Restore; permanent deletion happens only when you Empty Trash.
 
 **Face editing** (sidebar "manage" + clicking a face box on a tile): rename or
 merge people, reassign a face to another/new person, or delete a false-positive

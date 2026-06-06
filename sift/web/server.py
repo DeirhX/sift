@@ -34,25 +34,25 @@ import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from sift.web import photodb
+from sift.web import library_ops, photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
-from sift.web.queries import (DEC_ON, SORT_COLUMNS, histogram, image_where,
+from sift.web.queries import (DEC_ON, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
+from sift.web.routes.trash import create_router as create_trash_router
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
-    MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
-    ApplyResponse, UndoResponse, AnalyzeStatus, TaskStartRequest, TaskSnapshot,
-    TaskListResponse)
+    MergeResponse, AssignFaceResponse, AutocullResponse, AnalyzeStatus,
+    TaskStartRequest, TaskSnapshot, TaskListResponse)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -65,8 +65,16 @@ FRONTEND_DIST: Path | None = None
 # photo_roots table whenever it changes.
 PHOTO_ROOT_DIRS: list[str] = []
 PHOTO_ROOTS: list[str] = []
+_RUNTIME_INITIALIZED = False
+_FRONTEND_MOUNTED = False
 
-app = FastAPI(title="Photo Audit")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _startup_from_reload_env()
+    yield
+
+
+app = FastAPI(title="Photo Audit", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],          # local single-user tool
@@ -77,7 +85,7 @@ app.add_middleware(
 
 @contextmanager
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = photodb.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -86,10 +94,20 @@ def db():
 
 
 def _ensure_schema():
-    """Run the shared migration authority so the server works against an older
-    photos.db without a rebuild. New score columns stay NULL until the next
-    build_db ingest populates them."""
+    """Bring the served DB fully up to schema, creating it from scratch if needed.
+
+    Creates the base tables (so a cold/empty photos.db is usable — the whole
+    point of starting the server before anything is analyzed), then runs the
+    shared migration authority so an older DB also works without a rebuild. Every
+    statement is idempotent (CREATE/columns guarded), so this is safe on first
+    boot, on an existing library, and on every restart alike."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db() as conn:
+        photodb.create_base_schema(conn)
+        try:
+            conn.executescript(photodb.FTS_SCHEMA)
+        except sqlite3.OperationalError:
+            pass                                   # SQLite built without FTS5
         photodb.ensure_schema(conn)
         conn.commit()
 
@@ -99,6 +117,9 @@ def _configure_tasks():
     Tests patch these globals directly, so routes call this defensively instead
     of assuming `main()` was the only initializer."""
     tasks.MANAGER.configure(db_path=DB_PATH, thumb_dir=THUMB_DIR, db_factory=db)
+
+
+app.include_router(create_trash_router(db))
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -227,13 +248,15 @@ def get_images(
         base = f"""
             FROM images i
             LEFT JOIN {DEC_ON}
+            LEFT JOIN {TRASH_ON}
             WHERE {where_sql}
         """
 
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
 
         rows = conn.execute(
-            f"""SELECT i.*, d.decision {base}
+            f"""SELECT i.*, d.decision, tm.state AS trash_state,
+                       tm.from_path AS original_path, tm.trashed_at {base}
                 ORDER BY {sort_col} {sort_dir}, i.id ASC
                 LIMIT ? OFFSET ?""",
             params + [limit, offset],
@@ -798,137 +821,7 @@ def autocull_groups():
     rest 'del'. Overwrites existing marks within groups. Marks only — files
     are not touched until /api/apply."""
     with db() as conn:
-        gids = [r["dup_group"] for r in conn.execute(
-            "SELECT DISTINCT dup_group FROM images WHERE dup_group IS NOT NULL")]
-        kept = deleted = 0
-        for gid in gids:
-            members = conn.execute(
-                """SELECT content_hash FROM images WHERE dup_group=?
-                   ORDER BY combined DESC, id ASC""", (gid,)).fetchall()
-            for i, m in enumerate(members):
-                if not m["content_hash"]:
-                    continue
-                dec = "keep" if i == 0 else "del"
-                conn.execute(
-                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                    (m["content_hash"], dec))
-                kept += (i == 0)
-                deleted += (i != 0)
-        conn.commit()
-    return {"groups": len(gids), "kept": kept, "deleted": deleted}
-
-
-# ── Apply decisions: move 'del' files to a _rejected/ folder (reversible) ──────
-
-def _ensure_moves_table(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS applied_moves (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            image_id  INTEGER,
-            from_path TEXT,
-            to_path   TEXT,
-            ts        TEXT
-        )""")
-
-
-def _unique_dest(dest_dir: Path, name: str) -> Path:
-    dest = dest_dir / name
-    if not dest.exists():
-        return dest
-    stem, suf = Path(name).stem, Path(name).suffix
-    k = 1
-    while (dest_dir / f"{stem}_{k}{suf}").exists():
-        k += 1
-    return dest_dir / f"{stem}_{k}{suf}"
-
-
-def _rejected_dir(conn) -> Path:
-    root = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-    if not root:
-        raise HTTPException(500, "library folder unknown")
-    return Path(root["value"]) / "_rejected"
-
-
-@app.get("/api/apply/status", response_model=ApplyStatusResponse)
-def apply_status():
-    with db() as conn:
-        _ensure_moves_table(conn)
-        rej = _rejected_dir(conn)
-        rej_str = str(rej)
-        # Files marked 'del' that still live outside _rejected = movable.
-        pending = 0
-        for r in conn.execute(
-            f"""SELECT i.path FROM images i
-               JOIN {DEC_ON}
-               WHERE d.decision='del'"""):
-            if not str(r["path"]).startswith(rej_str):
-                pending += 1
-        applied = conn.execute("SELECT COUNT(*) FROM applied_moves").fetchone()[0]
-    return {"pending": pending, "applied": applied, "rejected_dir": rej_str}
-
-
-@app.post("/api/apply", response_model=ApplyResponse)
-def apply_decisions():
-    """Move every 'del'-marked file into <library>/_rejected/. Updates each
-    image's stored path and logs the move so it can be undone. Never deletes."""
-    moved, skipped = 0, 0
-    with db() as conn:
-        _ensure_moves_table(conn)
-        rej = _rejected_dir(conn)
-        rej_str = str(rej)
-        rows = conn.execute(
-            f"""SELECT i.id, i.path FROM images i
-               JOIN {DEC_ON}
-               WHERE d.decision='del'""").fetchall()
-        if rows:
-            rej.mkdir(parents=True, exist_ok=True)
-        for r in rows:
-            src = Path(r["path"])
-            if str(src).startswith(rej_str) or not src.exists():
-                skipped += 1
-                continue
-            dest = _unique_dest(rej, src.name)
-            try:
-                shutil.move(str(src), str(dest))
-            except OSError:
-                skipped += 1
-                continue
-            # Only the path moves; the decision stays attached via content hash.
-            conn.execute("UPDATE images SET path=? WHERE id=?", (str(dest), r["id"]))
-            conn.execute(
-                "INSERT INTO applied_moves (image_id, from_path, to_path, ts) VALUES (?,?,?,?)",
-                (r["id"], str(src), str(dest), datetime.now().isoformat(timespec="seconds")))
-            moved += 1
-        conn.commit()
-    return {"moved": moved, "skipped": skipped, "rejected_dir": rej_str}
-
-
-@app.post("/api/apply/undo", response_model=UndoResponse)
-def undo_apply():
-    """Move every logged file back to its original location and clear the log."""
-    restored, skipped = 0, 0
-    with db() as conn:
-        _ensure_moves_table(conn)
-        rows = conn.execute(
-            "SELECT id, image_id, from_path, to_path FROM applied_moves ORDER BY id DESC"
-        ).fetchall()
-        for r in rows:
-            src = Path(r["to_path"])
-            dst = Path(r["from_path"])
-            if src.exists() and not dst.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    shutil.move(str(src), str(dst))
-                except OSError:
-                    skipped += 1
-                    continue
-                conn.execute("UPDATE images SET path=? WHERE id=?", (str(dst), r["image_id"]))
-                restored += 1
-            else:
-                skipped += 1
-            conn.execute("DELETE FROM applied_moves WHERE id=?", (r["id"],))
-        conn.commit()
-    return {"restored": restored, "skipped": skipped}
+        return library_ops.autocull_duplicates(conn)
 
 
 # ── Generic web tasks (analyze, index, apply, undo, autocull) ─────────────────
@@ -1065,8 +958,12 @@ async def analyze_stream():
 # Mounted last so it doesn't shadow /api routes. Only if a build exists.
 
 def _mount_frontend():
+    global _FRONTEND_MOUNTED
+    if _FRONTEND_MOUNTED:
+        return
     if FRONTEND_DIST and FRONTEND_DIST.exists():
         app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
+        _FRONTEND_MOUNTED = True
         print(f"  Serving frontend build from {FRONTEND_DIST}")
     else:
         print("  No frontend build found — run Vite dev server (npm run dev) on :5173")
@@ -1084,10 +981,80 @@ def _resolve_frontend_dist(override: str | None) -> Path:
     return Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
+def _runtime_env_photo_roots() -> list[str] | None:
+    raw = os.environ.get("SIFT_PHOTO_ROOTS")
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def _init_runtime(db_path: Path, thumb_dir: Path, frontend_dist: Path | None,
+                  photo_roots: list[str] | None) -> None:
+    global DB_PATH, THUMB_DIR, FRONTEND_DIST, _RUNTIME_INITIALIZED
+    DB_PATH = db_path
+    THUMB_DIR = thumb_dir
+    FRONTEND_DIST = frontend_dist
+    if _RUNTIME_INITIALIZED:
+        return
+    print(f"DB:     {DB_PATH}")
+    print(f"Thumbs: {THUMB_DIR}")
+    from sift.web import backup
+    if not backup.quick_check(DB_PATH):
+        print(f"WARNING: integrity check FAILED on {DB_PATH} — the library may be "
+              f"corrupt. Restore a snapshot with `sift backup restore` "
+              f"(see `sift backup list`).")
+    _ensure_schema()
+    # Throttled safety snapshot: guarantees a recent copy of accumulating
+    # decisions/names exists, without spamming on reload restarts.
+    try:
+        snap = backup.snapshot_if_stale(DB_PATH)
+        if snap:
+            print(f"Backup: {snap}")
+    except Exception as e:                          # never block startup on this
+        print(f"Backup: skipped ({e})")
+    _configure_tasks()
+    tasks.MANAGER.abandon_running()
+    _init_photo_roots(photo_roots)
+    _mount_frontend()
+    _RUNTIME_INITIALIZED = True
+
+
+def _startup_from_reload_env() -> None:
+    db_env = os.environ.get("SIFT_DB_PATH")
+    if not db_env:
+        return
+    db_path = Path(db_env)
+    thumb_dir = Path(os.environ["SIFT_THUMB_DIR"])
+    frontend_env = os.environ.get("SIFT_RUNTIME_FRONTEND_DIST")
+    frontend_dist = Path(frontend_env) if frontend_env else None
+    _init_runtime(db_path, thumb_dir, frontend_dist, _runtime_env_photo_roots())
+
+
+def _default_db_path() -> Path:
+    """Where the library lives when --db is omitted: a per-user app-data dir, so
+    `sift serve` works cold with zero arguments and the first folder can be
+    analyzed entirely from the web UI.
+
+    The DB, its thumbnail cache (.thumbs) and the analyze report (audit_report.json)
+    all colocate here, deliberately keeping the user's photo folders pristine —
+    no photos.db / .thumbs / audit_report.json scattered among the originals.
+    (Rejected/trashed files still move next to their originals, not here.)"""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "PhotoOrganizer" / "photos.db"
+
+
 def main() -> None:
     global DB_PATH, THUMB_DIR, FRONTEND_DIST
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db",     required=True)
+    ap.add_argument("--db", default=None,
+                    help="SQLite library path. Defaults to a per-user app-data "
+                         "location, created empty on first run so you can analyze "
+                         "your first folder entirely from the web UI.")
     ap.add_argument("--thumbs", default=None)
     ap.add_argument("--host",   default="127.0.0.1")
     ap.add_argument("--port",   type=int, default=8000)
@@ -1097,24 +1064,34 @@ def main() -> None:
     ap.add_argument("--frontend-dist", default=None, metavar="DIR",
                     help="Built React app to serve (default: $SIFT_FRONTEND_DIST, "
                          "else the repo's frontend/dist for editable installs).")
+    ap.add_argument("--reload", action="store_true",
+                    help="Restart the API server automatically when Python files change. "
+                         "Use with the Vite dev server for near-immediate web/API updates.")
     args = ap.parse_args()
 
-    DB_PATH = Path(args.db)
-    if not DB_PATH.exists():
-        print(f"Error: DB {DB_PATH} not found — run `sift index` first"); sys.exit(1)
-    THUMB_DIR = Path(args.thumbs) if args.thumbs else DB_PATH.parent / ".thumbs"
-    FRONTEND_DIST = _resolve_frontend_dist(args.frontend_dist)
-
-    print(f"DB:     {DB_PATH}")
-    print(f"Thumbs: {THUMB_DIR}")
-    _ensure_schema()
-    _configure_tasks()
-    tasks.MANAGER.abandon_running()
-    _init_photo_roots(args.photo_root)
-    _mount_frontend()
+    db_path = Path(args.db) if args.db else _default_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if not db_path.exists():
+        print(f"No library at {db_path} — starting empty. Open the web UI and use "
+              f"'Library operations' to analyze your first folder.")
+    thumb_dir = Path(args.thumbs) if args.thumbs else db_path.parent / ".thumbs"
+    frontend_dist = _resolve_frontend_dist(args.frontend_dist)
 
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.reload:
+        os.environ["SIFT_DB_PATH"] = str(db_path)
+        os.environ["SIFT_THUMB_DIR"] = str(thumb_dir)
+        os.environ["SIFT_RUNTIME_FRONTEND_DIST"] = str(frontend_dist)
+        if args.photo_root:
+            os.environ["SIFT_PHOTO_ROOTS"] = json.dumps(args.photo_root)
+        else:
+            os.environ.pop("SIFT_PHOTO_ROOTS", None)
+        repo_root = Path(__file__).resolve().parents[2]
+        uvicorn.run("sift.web.server:app", host=args.host, port=args.port,
+                    reload=True, reload_dirs=[str(repo_root / "sift")])
+    else:
+        _init_runtime(db_path, thumb_dir, frontend_dist, args.photo_root)
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
