@@ -158,10 +158,16 @@ class TaskContext:
     def _consume_progress_line(self, text: str, label: str,
                                step_idx: int, total_steps: int) -> bool:
         marker = "SIFT_PROGRESS "
-        if not text.startswith(marker):
+        # tqdm renders its bar to the merged stream with a bare \r (no newline),
+        # so a progress print can arrive appended to a leftover bar fragment on
+        # the same line (e.g. "Sharpness: 5%|… ?it/s]SIFT_PROGRESS {…}"). Match the
+        # marker anywhere and parse the JSON tail; the bar prefix is transient
+        # noise we drop (the live progress bar already conveys it).
+        idx = text.find(marker)
+        if idx == -1:
             return False
         try:
-            payload = json.loads(text[len(marker):])
+            payload = json.loads(text[idx + len(marker):])
         except Exception:
             return False
         phase_pct = payload.get("pct")
