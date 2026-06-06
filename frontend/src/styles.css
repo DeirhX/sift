@@ -1290,6 +1290,12 @@ select:focus, input:focus {
   flex: 1;
   display: grid;
   grid-template-columns: 320px 1fr;
+  /* Bound the single implicit row to the body's height. Without this the row is
+     `auto` (content height), so a long log makes the column taller than the modal
+     and the inner overflow:auto never engages — the log just spills past the
+     dialog. minmax(0,1fr) caps the row at the available height so each column
+     scrolls within itself. */
+  grid-template-rows: minmax(0, 1fr);
   gap: 0;
   min-height: 0;
 }
@@ -1297,6 +1303,7 @@ select:focus, input:focus {
   padding: 16px;
   border-right: 1px solid var(--border);
   overflow-y: auto;
+  min-height: 0;            /* respect the bounded grid row; scroll within, don't stretch it */
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1363,7 +1370,10 @@ select:focus, input:focus {
   min-width: 0;
   min-height: 0;           /* let the open log fill (and scroll within) the column */
   padding: 16px;            /* match .analyze-form so the two columns line up */
-  overflow-y: auto;
+  /* The panel itself never scrolls — it clips, and the log (.task-term) is the
+     sole scroll container. With overflow-y:auto here, an overflowing log scrolled
+     the whole column (and bubbled to the page) instead of scrolling in place. */
+  overflow: hidden;
 }
 .task-panel.compact {
   padding: 8px;
@@ -1483,13 +1493,12 @@ select:focus, input:focus {
 }
 .task-term {
   margin-top: 8px;
-  /* Grow to fill the open <details> (which fills the column) and scroll within,
-     via .analyze-term's overflow-y:auto. A fixed min-height (not the flex default
-     of `auto`) is what lets the box size to its container and overflow instead of
-     ballooning to fit every line — so the auto-scroll-to-bottom always has
-     something to scroll and new progress lines never hide below the fold. */
+  /* Grow to fill the open <details> and scroll within, via .analyze-term's
+     overflow-y:auto. min-height:0 (not the flex default of `auto`, nor a fixed
+     floor) is what lets the box shrink to its container and scroll internally
+     instead of overflowing and pushing the scroll up to the panel/page. */
   flex: 1;
-  min-height: 180px;
+  min-height: 0;
   border-radius: 8px;
   border: 1px solid var(--border);
 }
