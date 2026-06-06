@@ -102,6 +102,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Min average CLIP cosine to keep a near-duplicate "
                          "group whole; looser components are split so single-"
                          "linkage chains can't merge a whole shoot (default: 0.90)")
+    ap.add_argument("--dup-burst-gap",  type=float, default=8.0, metavar="SEC",
+                    help="Max seconds between consecutive frames in a 'burst' — a "
+                         "loose frame this close to a near-dup group (or to other "
+                         "loose frames) joins it even when mist/haze lowers cosine "
+                         "(default: 8). 0 disables the burst pass.")
+    ap.add_argument("--dup-burst-sim",  type=float, default=0.80, metavar="F",
+                    help="Min CLIP cosine between consecutive burst frames "
+                         "(default: 0.80; below dup-sim because time carries the "
+                         "weight here)")
+    ap.add_argument("--dup-burst-span", type=float, default=30.0, metavar="SEC",
+                    help="Max total span of a single burst run, so a long "
+                         "continuous shoot can't chain into one group (default: 30)")
     ap.add_argument("--no-scenes",      action="store_true",
                     help="Skip rough scene grouping (only fine near-dup groups)")
     ap.add_argument("--scene-time-gap", type=float, default=60.0, metavar="MIN",
@@ -433,6 +445,8 @@ def main():
         embeddings=embeddings, dup_sim=args.dup_sim,
         times=capture_time, dup_window=args.dup_window * 60.0,
         dup_cohesion=args.dup_cohesion,
+        burst_gap=args.dup_burst_gap, burst_sim=args.dup_burst_sim,
+        burst_span=args.dup_burst_span,
     )
     # Centrality per member -> the UI leads each group with its medoid frame.
     dup_central = dup_centrality(dup_groups, embeddings)
@@ -592,6 +606,9 @@ def main():
             "dup_sim":          args.dup_sim,
             "dup_window_min":   args.dup_window,
             "dup_cohesion":     args.dup_cohesion,
+            "dup_burst_gap":    args.dup_burst_gap,
+            "dup_burst_sim":    args.dup_burst_sim,
+            "dup_burst_span":   args.dup_burst_span,
             "scene_groups":     scene_count,
             "faces_images":     n_faces_images if args.faces else None,
             "face_clusters":    n_clusters     if args.faces else None,

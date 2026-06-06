@@ -8,6 +8,7 @@ import type { DecisionFn, BulkDecisionFn, SetLightboxIndex } from '../types'
 import Lightbox from './Lightbox'
 import DecisionBadge from './DecisionBadge'
 import DecideButtons from './DecideButtons'
+import RecBadge from './RecBadge'
 
 // A group or scene for review: only the member list and an optional id label
 // are needed (Group carries dup_group, Scene carries scene_group).
@@ -30,6 +31,9 @@ interface GroupReviewProps {
   zoom?: boolean
   onSelect: (id: number) => void
   onZoom: (open: boolean) => void
+  // Immediately move this set's del-marked photos to Trash (recoverable). When
+  // provided, a "Delete N now" button appears whenever members are marked del.
+  onApplyDeletes?: (ids: number[]) => Promise<void>
 }
 
 // Review a set of photos: a filmstrip of members up top, a large preview of the
@@ -52,7 +56,7 @@ interface GroupReviewProps {
 export default function GroupReview({
   group, onClose, onDecision, onDecisionsBulk,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
-  selId = null, zoom = false, onSelect, onZoom,
+  selId = null, zoom = false, onSelect, onZoom, onApplyDeletes,
 }: GroupReviewProps) {
   const items = group.items
 
@@ -87,6 +91,21 @@ export default function GroupReview({
   )
   const idIndex = useMemo(() => new Map(view.map((it, i) => [it.id, i] as const)), [view])
 
+  // Per-photo keep/delete *recommendation* (a hint, never auto-applied). The
+  // logic mirrors "keep best · delete rest": the representative (the ★ medoid)
+  // is the suggested keep, its peers the suggested deletes. In scene mode this is
+  // scoped PER near-duplicate set — a scene's loose, one-off shots aren't
+  // redundant, so they get no recommendation at all.
+  const recById = useMemo(() => {
+    const m = new Map<number, 'keep' | 'del'>()
+    if (mode === 'scene') {
+      for (const s of sets) s.items.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+    } else {
+      view.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+    }
+    return m
+  }, [mode, sets, view])
+
   // Selection + zoom are controlled by the app (so they live in the URL and
   // browser history). `selId` null → show the default hero (view[0], the
   // medoid). `full` mirrors the `zoom` prop. Helpers translate the existing
@@ -101,6 +120,24 @@ export default function GroupReview({
     onSelect(view[i].id)
   }
   const [showList, setShowList] = useState(false)
+  // Ids in this set currently marked del — the candidates for an immediate Trash.
+  const delIds = useMemo(
+    () => items.filter((it) => it.decision === 'del').map((it) => it.id),
+    [items])
+  const [applying, setApplying] = useState(false)
+  const [applyErr, setApplyErr] = useState<string | null>(null)
+  const applyDeletes = async () => {
+    if (!onApplyDeletes || !delIds.length || applying) return
+    setApplying(true)
+    setApplyErr(null)
+    try {
+      await onApplyDeletes(delIds)
+    } catch (e) {
+      setApplyErr(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setApplying(false)
+    }
+  }
   // Scene strip is grouped by default (near-dup sets collapsed to ×N tiles);
   // `expanded` tracks which collapsed sets are opened inline. For non-scene
   // callers canGroup is false, so this is inert.
@@ -205,6 +242,7 @@ export default function GroupReview({
 
   const renderThumb = (it: GroupedImageItem) => {
     const i = idIndex.get(it.id)
+    const rec = recById.get(it.id)
     return (
       <button
         key={it.id}
@@ -219,6 +257,8 @@ export default function GroupReview({
         <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
         {bestIds.has(it.id) && <span className="strip-best">★</span>}
         {it.matches === false && <span className="strip-filtered">⊘</span>}
+        {/* Suggested verdict glyph (hint only); sits above the solid decision bar. */}
+        {rec && <span className={'strip-rec ' + rec}>{rec === 'keep' ? '✓' : '✕'}</span>}
         {it.decision && <span className={'strip-flag ' + it.decision} />}
       </button>
     )
@@ -266,8 +306,19 @@ export default function GroupReview({
             {someFiltered && (
               <span className="review-filternote"> · {matchCount}/{view.length} match filter</span>
             )}
+            {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
           </div>
           <div className="review-actions">
+            {onApplyDeletes && delIds.length > 0 && (
+              <button
+                className="btn danger"
+                onClick={applyDeletes}
+                disabled={applying}
+                title="Move this scene's photos marked Del to Trash now (recoverable)"
+              >
+                {applying ? 'Deleting…' : `Delete ${delIds.length} now`}
+              </button>
+            )}
             {showGroupBulk && (
               <>
                 <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
@@ -286,7 +337,7 @@ export default function GroupReview({
             <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
               {showList ? 'Preview' : 'List'}
             </button>
-            <button className="btn" onClick={onClose}>Close</button>
+            <button className="review-close" onClick={onClose} aria-label="Close" title="Close (Esc)">✕</button>
           </div>
         </div>
 
@@ -359,6 +410,7 @@ export default function GroupReview({
                     <div className="rl-top">
                       <span className="rl-name">{it.filename}</span>
                       {bestIds.has(it.id) && <span className="rl-best">★ best</span>}
+                      <RecBadge rec={recById.get(it.id)} />
                       {it.matches === false && <span className="rl-flt">outside filter</span>}
                       <DecisionBadge decision={it.decision} />
                     </div>
@@ -407,6 +459,7 @@ export default function GroupReview({
             </div>
           </div>
           <div className="herobar-btns">
+            <RecBadge rec={recById.get(cur.id)} />
             {mode === 'scene' && dupSiblings.length > 1 && (
               <button
                 className="btn"

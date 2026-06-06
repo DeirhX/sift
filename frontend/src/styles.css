@@ -842,6 +842,11 @@ select:focus, input:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Never exceed the overlay's padded content box. Without this, a fixed vh
+     height (e.g. .review-panel's 96vh) plus the overlay's 14px padding overflows
+     on short viewports; align-items:center then clips equally top+bottom, eating
+     the top padding so the header sits flush against the screen edge. */
+  max-height: 100%;
 }
 .review-panel {
   border-radius: 12px;
@@ -876,7 +881,21 @@ select:focus, input:focus {
 }
 .btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .review-sub { color: var(--text-dim); }
-.review-actions { display: flex; gap: 8px; }
+/* margin-left:auto right-aligns the action group: .review-head dropped
+   justify-content:space-between (it mis-centred AnalyzePanel's status), and this
+   view has no .spacer, so without this the buttons pack against the title. */
+.review-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Conventional X dismiss — square icon button set slightly apart from the
+   functional actions (List/Group) so it reads unambiguously as "close", not as
+   another toggle. Esc still closes; this is the discoverable affordance. */
+.review-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin-left: 4px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-dim);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.review-close:hover { background: var(--bg-hover); color: var(--text); border-color: var(--text-dim); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 
@@ -958,6 +977,7 @@ select:focus, input:focus {
   pointer-events: none;
 }
 .review-filternote { color: var(--accent); }
+.review-filternote.err { color: var(--del); }
 .badge-filtered {
   position: absolute;
   top: 10px; left: 50%;
@@ -982,22 +1002,29 @@ select:focus, input:focus {
 .strip-cluster {
   position: relative;
   display: flex;
-  gap: 4px;
-  padding: 3px;
+  gap: 3px;
+  padding: 4px 7px 5px;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
+  /* Accent border + tinted backing + bottom rail so the expanded set reads as
+     one cohesive unit against the dark strip — the faint grey 1px border it had
+     before dissolved into the background and the members looked unrelated. The
+     tight inner gap (3px) butts members together; the strip's 8px gap keeps
+     separate groups apart. */
+  border: 1.5px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 9px;
+  background: rgba(var(--accent-rgb), 0.13);
+  box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 /* Flat-view near-dup set: thumbs stay individually visible but share a faint
    backing plus an accent underline rail, so a run of same-group photos reads as
    one unit (Gestalt grouping) without collapsing or bracketing heavily. */
 .strip-flatgroup {
   display: flex;
-  gap: 4px;
-  padding: 3px 3px 5px;
-  border-radius: 7px;
-  background: rgba(var(--accent-rgb), 0.08);
+  gap: 3px;
+  padding: 4px 5px 5px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.11);
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
@@ -1083,7 +1110,7 @@ select:focus, input:focus {
 .strip-collapsed:has(.strip-toggle:hover) .strip-grouptile { border-color: var(--accent); }
 .strip-cluster:has(.strip-toggle:hover) {
   border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.22);
 }
 .strip-flag {
   position: absolute;
@@ -1092,6 +1119,38 @@ select:focus, input:focus {
 }
 .strip-flag.keep { background: var(--keep); }
 .strip-flag.del { background: var(--del); }
+
+/* Suggested-verdict glyph on a strip tile (hint, not a decision). Bottom-right,
+   above the 4px solid .strip-flag bar so a committed decision still reads. */
+.strip-rec {
+  position: absolute;
+  bottom: 5px; right: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 0 3px #000, 0 0 2px #000;
+  pointer-events: none;
+}
+.strip-rec.keep { color: var(--keep); }
+.strip-rec.del { color: var(--del); }
+
+/* A keep/delete recommendation pill (hero + list). Dashed ghost styling — never
+   filled like .badge-decision — so a *suggestion* is visually distinct from a
+   committed verdict. */
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+.rec-badge.keep { color: var(--keep); border-color: rgba(var(--keep-rgb), 0.6); }
+.rec-badge.del { color: var(--del); border-color: rgba(var(--del-rgb), 0.6); }
 
 /* Large preview of the selected member */
 .review-hero {

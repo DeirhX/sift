@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
 import { applyDecisionHide, hideDelInReview } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
@@ -146,6 +146,21 @@ export default function App() {
   }, [])
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
+
+  // Immediate, scoped Trash from inside a scene: move just the named (del-marked)
+  // photos to Trash, then refetch so they leave the filmstrip. Polls the task to
+  // completion rather than trusting the 1s task poll, since a few-file trash can
+  // finish between polls and otherwise skip invalidation.
+  const applyDeletes = useCallback(async (ids: number[]) => {
+    if (!ids.length) return
+    const started = await startTask('trash_decisions', { image_ids: ids })
+    let snap = started
+    for (let i = 0; i < 150 && snap.state === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 400))
+      snap = await fetchTask(started.id)
+    }
+    invalidateAfterTask(snap)
+  }, [invalidateAfterTask])
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
@@ -302,6 +317,7 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
+          onApplyDeletes={applyDeletes}
         />
       )}
 

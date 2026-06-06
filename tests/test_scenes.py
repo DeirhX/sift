@@ -202,9 +202,13 @@ def test_cohesion_splits_a_chain_into_tight_pairs():
               p[2]: imagehash.hex_to_hash("0000ffff00000000"),
               p[3]: imagehash.hex_to_hash("00000000ffff0000")}
     times = {x: 0.0 for x in p}
+    # burst_gap=0 disables the temporal burst pass: this is a pure cohesion-split
+    # test, and the placeholder identical times would otherwise read as one
+    # instantaneous burst and pin the chain whole (burst rescue is covered in
+    # test_photo_audit). The cos-0.94 chain here still forms via dup_sim.
     path_to_group, groups = photo_audit.assign_dup_groups(
         p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
-        times=times, dup_window=600.0, dup_cohesion=0.90)
+        times=times, dup_window=600.0, dup_cohesion=0.90, burst_gap=0.0)
     # The chain shatters into two cohesive pairs; the dissimilar ends never share.
     assert len(groups) == 2
     assert path_to_group[p[0]] == path_to_group[p[1]]
@@ -221,9 +225,11 @@ def test_cohesion_keeps_a_tight_burst_whole():
               p[1]: imagehash.hex_to_hash("ffff000000000000"),
               p[2]: imagehash.hex_to_hash("0000ffff00000000")}
     times = {x: 0.0 for x in p}
+    # burst_gap=0: isolate cohesion (see the chain test above) — here cohesion
+    # alone must keep the tight 6-deg burst whole, not the temporal burst pin.
     _, groups = photo_audit.assign_dup_groups(
         p, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
-        times=times, dup_window=600.0, dup_cohesion=0.90)
+        times=times, dup_window=600.0, dup_cohesion=0.90, burst_gap=0.0)
     assert len(groups) == 1
     assert len(groups[0]) == 3
 
