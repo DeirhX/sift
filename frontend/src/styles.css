@@ -997,6 +997,17 @@ select:focus, input:focus {
   font-size: 13px;
   text-shadow: 0 0 3px #000;
 }
+/* A trashed member, only visible via "Show deleted": heavily knocked back and
+   stamped with a bin so it never gets mistaken for an in-play frame. */
+.strip-thumb.deleted img { opacity: 0.28; filter: grayscale(0.85); }
+.strip-thumb.deleted.active img { opacity: 0.6; filter: grayscale(0.4); }
+.strip-trashed {
+  position: absolute;
+  top: 2px; right: 4px;
+  font-size: 12px;
+  text-shadow: 0 0 3px #000;
+  pointer-events: none;
+}
 /* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
    structure reads at a glance. Lone-set / no-set scenes don't render this. */
 .strip-cluster {
@@ -1120,19 +1131,21 @@ select:focus, input:focus {
 .strip-flag.keep { background: var(--keep); }
 .strip-flag.del { background: var(--del); }
 
-/* Suggested-verdict glyph on a strip tile (hint, not a decision). Bottom-right,
-   above the 4px solid .strip-flag bar so a committed decision still reads. */
+/* Suggested verdict = a GHOST of the decision: a dashed, translucent bar on the
+   TOP edge, deliberately mirroring the solid committed .strip-flag on the bottom.
+   Same hue (green keep / red del) keeps the mapping intuitive; top + dashed vs
+   bottom + solid keeps "what the tool suggests" categorically distinct from "what
+   you decided", even when both are shown on one tile. Committing just lights up the
+   solid bar below — the dashed preview made real. */
 .strip-rec {
   position: absolute;
-  bottom: 5px; right: 4px;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  text-shadow: 0 0 3px #000, 0 0 2px #000;
+  top: 0; left: 0; right: 0;
+  height: 0;
+  border-top: 3px dashed transparent;
   pointer-events: none;
 }
-.strip-rec.keep { color: var(--keep); }
-.strip-rec.del { color: var(--del); }
+.strip-rec.keep { border-top-color: rgba(var(--keep-rgb), 0.9); }
+.strip-rec.del  { border-top-color: rgba(var(--del-rgb), 0.9); }
 
 /* A keep/delete recommendation pill (hero + list). Dashed ghost styling — never
    filled like .badge-decision — so a *suggestion* is visually distinct from a
@@ -1210,6 +1223,9 @@ select:focus, input:focus {
 .rl-name { font-size: 13px; font-weight: 600; }
 .rl-best { font-size: 11px; color: var(--accent); }
 .rl-flt { font-size: 11px; color: var(--text-dim); }
+.rl-trashed { font-size: 11px; color: var(--del); font-weight: 600; }
+.review-list-row.deleted { opacity: 0.5; }
+.review-list-row.deleted .rl-thumb { filter: grayscale(0.8); }
 .rl-scores { font-size: 12px; color: var(--text-dim); }
 .rl-cap { font-size: 12px; color: var(--text); line-height: 1.4; }
 .rl-cap.empty { color: var(--text-dim); font-style: italic; }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchApplyStatus, fetchTasks, startTask } from '../api'
+import { useDecisions } from '../hooks/useDecisions'
 import TaskPanel from './TaskPanel'
 import type { TaskSnapshot } from '../api/types'
 
@@ -12,6 +13,7 @@ interface ApplyPanelProps {
 // folder, restores them, or permanently empties Trash on demand.
 export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
   const qc = useQueryClient()
+  const { patchTrashedDel } = useDecisions()
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [taskId, setTaskId] = useState<string | null>(null)
@@ -43,6 +45,9 @@ export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
       `Move ${s.pending} photo(s) marked Del into Trash:\n${s.trash_dir ?? s.rejected_dir}\n\n` +
       `Nothing is permanently deleted until you empty Trash.`)) return
     setBusy(true); setMsg(null)
+    // Drop the del-marked photos from every list right away; the task + refetch
+    // reconcile. (Only loaded pages are patched, which is all that's on screen.)
+    patchTrashedDel()
     try {
       const task = await startTask('trash_decisions')
       setTaskId(task.id)
