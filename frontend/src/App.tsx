@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
-import { applyDecisionHide, hideDelInReview } from './format'
+import { applyDecisionHide, applyTrashHide, hideDelInReview } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
 import { useDecisions } from './hooks/useDecisions'
 import { useTaskInvalidation } from './hooks/useTaskInvalidation'
@@ -43,7 +43,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
   const searchRef = useRef<HTMLInputElement>(null)
-  const { setDecision, setDecisionsBulk } = useDecisions()
+  const { setDecision, setDecisionsBulk, patchTrashed } = useDecisions()
   const { activeTask, invalidateAfterTask } = useTaskInvalidation()
 
   const focusGrid = useCallback(() => {
@@ -110,8 +110,12 @@ export default function App() {
   // "Hide deletions" (decision='notdel') also hides photos you mark del *live*:
   // the server already excludes them on fetch, but optimistic patches don't
   // refetch, so a freshly-deleted photo is dropped here on the next render.
-  const items = applyDecisionHide(
-    images.data?.pages.flatMap((p) => p.items) ?? [], filters.decision)
+  // applyTrashHide does the same for *trashed* photos (optimistically patched the
+  // instant a trash starts) — except on the Trash filter, which is there to show
+  // them.
+  const items = applyTrashHide(
+    applyDecisionHide(images.data?.pages.flatMap((p) => p.items) ?? [], filters.decision),
+    filters.decision === 'trash')
   const total = images.data?.pages[0]?.total ?? 0
   const groupTotal = groups.data?.pages[0]?.total ?? 0
   const sceneTotal = scenes.data?.pages[0]?.total ?? 0
@@ -146,6 +150,23 @@ export default function App() {
   }, [])
 
   const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), [])
+
+  // Immediate, scoped Trash from inside a scene: move just the named (del-marked)
+  // photos to Trash. The optimistic patchTrashed drops them from the filmstrip
+  // (and every other list) right away; we then poll the task to completion —
+  // rather than trusting the 1s task poll, since a few-file trash can finish
+  // between polls — and invalidate to reconcile against the server.
+  const applyDeletes = useCallback(async (ids: number[]) => {
+    if (!ids.length) return
+    patchTrashed(ids)
+    const started = await startTask('trash_decisions', { image_ids: ids })
+    let snap = started
+    for (let i = 0; i < 150 && snap.state === 'running'; i++) {
+      await new Promise((r) => setTimeout(r, 400))
+      snap = await fetchTask(started.id)
+    }
+    invalidateAfterTask(snap)
+  }, [invalidateAfterTask, patchTrashed])
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
@@ -289,6 +310,7 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
+          defaultShowDeleted={filters.decision === 'trash'}
         />
       )}
 
@@ -302,6 +324,8 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
+          onApplyDeletes={applyDeletes}
+          defaultShowDeleted={filters.decision === 'trash'}
         />
       )}
 

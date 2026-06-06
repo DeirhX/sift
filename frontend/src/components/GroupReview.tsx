@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { thumbUrl, fullUrl } from '../api'
-import { fmt, aestheticScore, groupByDup, repFirst } from '../format'
+import { fmt, aestheticScore, groupByDup, repFirst, isDeleted, applyTrashHide } from '../format'
 import type { DupSet } from '../format'
 import type { GroupedImageItem } from '../api/types'
 import type { DecisionFn, BulkDecisionFn, SetLightboxIndex } from '../types'
 import Lightbox from './Lightbox'
 import DecisionBadge from './DecisionBadge'
 import DecideButtons from './DecideButtons'
+import RecBadge from './RecBadge'
 
 // A group or scene for review: only the member list and an optional id label
 // are needed (Group carries dup_group, Scene carries scene_group).
@@ -30,6 +31,12 @@ interface GroupReviewProps {
   zoom?: boolean
   onSelect: (id: number) => void
   onZoom: (open: boolean) => void
+  // Immediately move this set's del-marked photos to Trash (recoverable). When
+  // provided, a "Delete N now" button appears whenever members are marked del.
+  onApplyDeletes?: (ids: number[]) => Promise<void>
+  // Start with trashed members visible — used when the app's global filter is set
+  // to Trash, so an opened set shows the deleted photos it qualified on.
+  defaultShowDeleted?: boolean
 }
 
 // Review a set of photos: a filmstrip of members up top, a large preview of the
@@ -52,9 +59,21 @@ interface GroupReviewProps {
 export default function GroupReview({
   group, onClose, onDecision, onDecisionsBulk,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
-  selId = null, zoom = false, onSelect, onZoom,
+  selId = null, zoom = false, onSelect, onZoom, onApplyDeletes,
+  defaultShowDeleted = false,
 }: GroupReviewProps) {
-  const items = group.items
+  // Trashed members come back from the server as ordinary set members (flagged
+  // trash_state + matches=false), and an optimistic trash patch marks them the
+  // instant "Delete N now" fires. Hide them by default so a deleted photo leaves
+  // the strip immediately; a "Show deleted" toggle brings them back for review.
+  const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
+  const deletedCount = useMemo(() => group.items.filter(isDeleted).length, [group.items])
+  // Hide trashed members, but never render a blank panel: if hiding would empty
+  // the set (e.g. every member was just trashed), fall back to showing them.
+  const items = useMemo(() => {
+    const visible = applyTrashHide(group.items, showDeleted)
+    return visible.length ? visible : group.items
+  }, [group.items, showDeleted])
 
   // Scene mode arranges the strip as a tree: sets first (each contiguous), then
   // loose photos. `view` is that flattened order so the hero, arrows and zoom
@@ -87,6 +106,21 @@ export default function GroupReview({
   )
   const idIndex = useMemo(() => new Map(view.map((it, i) => [it.id, i] as const)), [view])
 
+  // Per-photo keep/delete *recommendation* (a hint, never auto-applied). The
+  // logic mirrors "keep best · delete rest": the representative (the ★ medoid)
+  // is the suggested keep, its peers the suggested deletes. In scene mode this is
+  // scoped PER near-duplicate set — a scene's loose, one-off shots aren't
+  // redundant, so they get no recommendation at all.
+  const recById = useMemo(() => {
+    const m = new Map<number, 'keep' | 'del'>()
+    if (mode === 'scene') {
+      for (const s of sets) s.items.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+    } else {
+      view.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+    }
+    return m
+  }, [mode, sets, view])
+
   // Selection + zoom are controlled by the app (so they live in the URL and
   // browser history). `selId` null → show the default hero (view[0], the
   // medoid). `full` mirrors the `zoom` prop. Helpers translate the existing
@@ -101,6 +135,26 @@ export default function GroupReview({
     onSelect(view[i].id)
   }
   const [showList, setShowList] = useState(false)
+  // Ids in this set marked del but NOT yet trashed — the candidates for an
+  // immediate Trash (a member already in Trash, visible via "Show deleted", must
+  // not be re-trashed).
+  const delIds = useMemo(
+    () => items.filter((it) => it.decision === 'del' && !isDeleted(it)).map((it) => it.id),
+    [items])
+  const [applying, setApplying] = useState(false)
+  const [applyErr, setApplyErr] = useState<string | null>(null)
+  const applyDeletes = async () => {
+    if (!onApplyDeletes || !delIds.length || applying) return
+    setApplying(true)
+    setApplyErr(null)
+    try {
+      await onApplyDeletes(delIds)
+    } catch (e) {
+      setApplyErr(e instanceof Error ? e.message : 'Delete failed')
+    } finally {
+      setApplying(false)
+    }
+  }
   // Scene strip is grouped by default (near-dup sets collapsed to ×N tiles);
   // `expanded` tracks which collapsed sets are opened inline. For non-scene
   // callers canGroup is false, so this is inert.
@@ -205,20 +259,29 @@ export default function GroupReview({
 
   const renderThumb = (it: GroupedImageItem) => {
     const i = idIndex.get(it.id)
+    const rec = recById.get(it.id)
     return (
       <button
         key={it.id}
         className={'strip-thumb'
           + (i === sel ? ' active' : '')
           + (it.matches === false ? ' filtered' : '')
+          + (isDeleted(it) ? ' deleted' : '')
           + (it.decision === 'del' ? ' is-del' : '')
           + (it.decision === 'keep' ? ' is-keep' : '')}
         onClick={() => selectIdx(i)}
-        title={describe(it)}
+        title={isDeleted(it) ? it.filename + '\n(in Trash)' : describe(it)}
       >
         <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
         {bestIds.has(it.id) && <span className="strip-best">★</span>}
-        {it.matches === false && <span className="strip-filtered">⊘</span>}
+        {isDeleted(it)
+          ? <span className="strip-trashed" title="In Trash">🗑</span>
+          : it.matches === false && <span className="strip-filtered">⊘</span>}
+        {/* Suggestion = a dashed "ghost" verdict bar on the TOP edge, mirroring the
+            solid committed bar on the bottom. Same hue, opposite edge + dashed, so a
+            suggestion can never be mistaken for a decision — even when both show at
+            once (red-dashed top over green-solid bottom = "suggested delete, you kept"). */}
+        {rec && <span className={'strip-rec ' + rec} aria-hidden />}
         {it.decision && <span className={'strip-flag ' + it.decision} />}
       </button>
     )
@@ -266,8 +329,19 @@ export default function GroupReview({
             {someFiltered && (
               <span className="review-filternote"> · {matchCount}/{view.length} match filter</span>
             )}
+            {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
           </div>
           <div className="review-actions">
+            {onApplyDeletes && delIds.length > 0 && (
+              <button
+                className="btn danger"
+                onClick={applyDeletes}
+                disabled={applying}
+                title="Move this scene's photos marked Del to Trash now (recoverable)"
+              >
+                {applying ? 'Deleting…' : `Delete ${delIds.length} now`}
+              </button>
+            )}
             {showGroupBulk && (
               <>
                 <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
@@ -283,10 +357,21 @@ export default function GroupReview({
                 {grouped ? `Ungroup (${view.length})` : `Group dups (${sets.length})`}
               </button>
             )}
+            {deletedCount > 0 && (
+              <button
+                className={'btn' + (showDeleted ? ' active' : '')}
+                onClick={() => setShowDeleted((v) => !v)}
+                title={showDeleted
+                  ? 'Hide photos that are in Trash'
+                  : 'Show this set\u2019s photos that have been moved to Trash'}
+              >
+                {showDeleted ? 'Hide deleted' : `Show deleted (${deletedCount})`}
+              </button>
+            )}
             <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
               {showList ? 'Preview' : 'List'}
             </button>
-            <button className="btn" onClick={onClose}>Close</button>
+            <button className="review-close" onClick={onClose} aria-label="Close" title="Close (Esc)">✕</button>
           </div>
         </div>
 
@@ -350,6 +435,7 @@ export default function GroupReview({
                   className={'review-list-row'
                     + (i === sel ? ' active' : '')
                     + (it.matches === false ? ' filtered' : '')
+                    + (isDeleted(it) ? ' deleted' : '')
                     + (it.decision ? ' dec-' + it.decision : '')}
                   onClick={() => { selectIdx(i); setShowList(false) }}
                   title="Show in preview"
@@ -359,7 +445,10 @@ export default function GroupReview({
                     <div className="rl-top">
                       <span className="rl-name">{it.filename}</span>
                       {bestIds.has(it.id) && <span className="rl-best">★ best</span>}
-                      {it.matches === false && <span className="rl-flt">outside filter</span>}
+                      <RecBadge rec={recById.get(it.id)} />
+                      {isDeleted(it)
+                        ? <span className="rl-trashed">🗑 in Trash</span>
+                        : it.matches === false && <span className="rl-flt">outside filter</span>}
                       <DecisionBadge decision={it.decision} />
                     </div>
                     <div className="rl-scores">
@@ -407,6 +496,7 @@ export default function GroupReview({
             </div>
           </div>
           <div className="herobar-btns">
+            <RecBadge rec={recById.get(cur.id)} />
             {mode === 'scene' && dupSiblings.length > 1 && (
               <button
                 className="btn"

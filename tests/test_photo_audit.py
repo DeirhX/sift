@@ -63,6 +63,79 @@ def test_threshold_controls_grouping():
     assert photo_audit.group_duplicates(_hashes(pair), threshold=2) == []
 
 
+# ── assign_dup_groups: burst rescue (mist-confused near-duplicates) ───────────
+
+def _spread_embeddings(paths, shared=1.0, unique=0.42):
+    """Unit vectors sharing one axis plus a per-image orthogonal axis, so every
+    pairwise cosine is shared^2/(shared^2+unique^2). 1.0/0.42 -> ~0.85: below
+    dup_sim (0.92) but above burst_sim (0.80), i.e. the misty-burst regime where
+    only the temporal signal can group them."""
+    np = pytest.importorskip("numpy")
+    embs = {}
+    for k, p in enumerate(paths):
+        v = np.zeros(len(paths) + 1, dtype="float32")
+        v[0] = shared
+        v[k + 1] = unique
+        embs[p] = v / np.linalg.norm(v)
+    return embs
+
+
+def test_burst_rescues_mist_confused_run():
+    # Four frames, all phash-far-apart (mist kills phash) and pairwise cosine
+    # ~0.85 (< dup_sim, so the normal CLIP link never fires), but a 6s burst.
+    paths = [Path(f"f{i}.jpg") for i in range(4)]
+    hashes = _hashes({"f0.jpg": "0" * 16, "f1.jpg": "f" * 16,
+                      "f2.jpg": "0f" * 8, "f3.jpg": "f0" * 8})
+    embs = _spread_embeddings(paths)
+    times = {p: t for p, t in zip(paths, [0.0, 2.0, 4.0, 6.0])}
+
+    # Without the burst pass (disabled via gap=0): nothing groups.
+    p2g, groups = photo_audit.assign_dup_groups(
+        paths, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, burst_gap=0.0)
+    assert groups == []
+
+    # With the burst pass on: all four become one group.
+    p2g, groups = photo_audit.assign_dup_groups(
+        paths, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, burst_gap=5.0, burst_sim=0.80, burst_span=30.0)
+    assert len(groups) == 1
+    assert {p.name for p in groups[0]} == {"f0.jpg", "f1.jpg", "f2.jpg", "f3.jpg"}
+
+
+def test_burst_never_fuses_two_existing_groups():
+    # Two phash-identical pairs (each a real baseline group) sit a few seconds
+    # apart with cross-cosine ~0.85 — tight enough that a naive burst would bridge
+    # them. The additive pass must only attach LOOSE frames, never fuse two
+    # existing groups, so the two pairs stay distinct.
+    paths = [Path(f"h{i}.jpg") for i in range(4)]
+    hashes = _hashes({"h0.jpg": "f" * 16, "h1.jpg": "f" * 16,      # group A
+                      "h2.jpg": "0" * 16, "h3.jpg": "0" * 16})     # group B (phash-far)
+    embs = _spread_embeddings(paths)                                # all pairs ~0.85
+    times = {p: t for p, t in zip(paths, [0.0, 1.0, 3.0, 4.0])}
+    _, groups = photo_audit.assign_dup_groups(
+        paths, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, burst_gap=8.0, burst_sim=0.80, burst_span=30.0)
+    assert len(groups) == 2
+    assert {frozenset(p.name for p in g) for g in groups} == {
+        frozenset({"h0.jpg", "h1.jpg"}), frozenset({"h2.jpg", "h3.jpg"})}
+
+
+def test_burst_span_cap_breaks_long_chain():
+    # Same low-cosine frames but spread 60s apart end-to-end: consecutive gaps
+    # are tight, yet the 30s span cap must stop them chaining into one blob.
+    paths = [Path(f"g{i}.jpg") for i in range(4)]
+    hashes = _hashes({"g0.jpg": "0" * 16, "g1.jpg": "f" * 16,
+                      "g2.jpg": "0f" * 8, "g3.jpg": "f0" * 8})
+    embs = _spread_embeddings(paths)
+    times = {p: t for p, t in zip(paths, [0.0, 20.0, 40.0, 60.0])}  # 20s steps
+    p2g, groups = photo_audit.assign_dup_groups(
+        paths, hashes, threshold=6, embeddings=embs, dup_sim=0.92,
+        times=times, burst_gap=25.0, burst_sim=0.80, burst_span=30.0)
+    # No single group may span the whole 60s run.
+    assert all(len(g) < 4 for g in groups)
+
+
 # ── _clean_tags (Qwen3-VL keyword post-processing) ───────────────────────────
 # The model's raw output is a free-form comma list; _clean_tags is the only pure
 # logic on the tagging path (the model call itself can't be unit-tested without

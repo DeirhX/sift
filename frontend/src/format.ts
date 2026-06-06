@@ -139,6 +139,27 @@ export function applyDecisionHide<T extends { decision?: string | null }>(
   return items.filter((it) => it.decision !== 'del')
 }
 
+// A photo is "deleted" once it's been moved to Trash — any trash_moves state
+// (trashed/emptied/missing) sets trash_state. This is distinct from a 'del'
+// *decision*, which is just a reversible mark that hasn't touched the file yet.
+export function isDeleted<T extends { trash_state?: string | null }>(it: T): boolean {
+  return it.trash_state != null
+}
+
+// Drop trashed photos from a list unless `showDeleted`. Mirrors applyDecisionHide:
+// the server already excludes trashed rows from default views, but an optimistic
+// trash patch lands in the cache before any refetch, so this render-time filter is
+// what makes a just-trashed photo leave the list IMMEDIATELY (rather than lingering
+// greyed-out until the task finishes and the query refetches). A no-op when showing
+// deleted (e.g. the Trash filter, or a scene's "Show deleted" toggle).
+export function applyTrashHide<T extends { trash_state?: string | null }>(
+  items: T[] | null | undefined,
+  showDeleted: boolean,
+): T[] {
+  if (showDeleted || !items) return items ?? []
+  return items.filter((it) => it.trash_state == null)
+}
+
 // "Hide deletions" applied to a LIST of containers (scenes / duplicate groups):
 // cull each container's del-marked members, then drop any container left empty
 // so the overview shrinks as you cull. A no-op for every non-'notdel' decision.

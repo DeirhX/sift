@@ -12,6 +12,8 @@ interface ScenePanelProps {
   onClose: () => void
   onDecision: DecisionFn
   onDecisionsBulk: BulkDecisionFn
+  onApplyDeletes?: (ids: number[]) => Promise<void>
+  defaultShowDeleted?: boolean
 }
 
 // Opening a scene reuses the exact duplicate-group review (hero + filmstrip),
@@ -22,6 +24,7 @@ interface ScenePanelProps {
 // hidden, since a scene's members aren't all duplicates of each other.
 export default function ScenePanel({
   scene, selId, zoom, onSelect, onZoom, onClose, onDecision, onDecisionsBulk,
+  onApplyDeletes, defaultShowDeleted,
 }: ScenePanelProps) {
   const when = fmtTimeRange(scene.time_start, scene.time_end)
   return (
@@ -38,6 +41,8 @@ export default function ScenePanel({
       onClose={onClose}
       onDecision={onDecision}
       onDecisionsBulk={onDecisionsBulk}
+      onApplyDeletes={onApplyDeletes}
+      defaultShowDeleted={defaultShowDeleted}
     />
   )
 }

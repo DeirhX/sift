@@ -110,10 +110,89 @@ def _cohesion_split(members: list, embeddings: dict, hashes: dict,
     return [[members[i] for i in c] for c in clusters if len(c) >= 2]
 
 
+def _burst_merge(items: list, groups: list, embeddings: dict, times: dict,
+                 burst_gap: float, burst_sim: float, burst_span: float) -> list:
+    """Strictly-additive burst merge. Treats `groups` (the cohesion result) and
+    every still-loose frame as indivisible atoms, segments the time-ordered
+    frames into bursts (consecutive gap <= burst_gap, run span <= burst_span,
+    consecutive cosine >= burst_sim), and unions the atoms whose members share a
+    burst. Returns the new >=2-member groups.
+
+    Because it only ever merges whole atoms, an existing group can only grow —
+    never lose a member. This is the key difference from pinning inside the
+    cohesion split, which re-clusters enlarged components and can non-monotonically
+    eject a previously-settled frame.
+
+    Two PRE-EXISTING multi-member groups are never fused with each other: a single
+    tight pair bridging two time-spread groups would otherwise drag both whole
+    atoms (and their full, possibly multi-minute spans) into one blob, which the
+    per-run span cap can't bound. So the pass only ATTACHES loose frames — to a
+    group or to each other — which is exactly the burst-rescue case (a misty frame
+    the cohesion floor left stranded) at zero risk to what already grouped."""
+    from collections import defaultdict
+    atom: dict = {}
+    for gi, g in enumerate(groups):
+        for p in g:
+            atom[p] = gi
+    nxt = len(groups)
+    for p in items:                      # loose frames become singleton atoms
+        if p not in atom:
+            atom[p] = nxt
+            nxt += 1
+
+    aparent: dict = {a: a for a in range(nxt)}
+    # A component is "real" once it contains an original (>=2-member) group; two
+    # real components must never merge (see docstring).
+    real: list = [a < len(groups) for a in range(nxt)]
+
+    def afind(x):
+        while aparent[x] != x:
+            aparent[x] = aparent[aparent[x]]
+            x = aparent[x]
+        return x
+
+    def aunion(x, y):
+        rx, ry = afind(x), afind(y)
+        if rx == ry or (real[rx] and real[ry]):
+            return
+        aparent[ry] = rx
+        real[rx] = real[rx] or real[ry]
+
+    timed = sorted((p for p in items
+                    if p in embeddings and times.get(p) is not None),
+                   key=lambda p: times[p])
+    run: list = []
+
+    def flush(r: list) -> None:
+        for q in r[1:]:
+            aunion(atom[r[0]], atom[q])
+
+    for p in timed:
+        if not run:
+            run = [p]
+            continue
+        prev = run[-1]
+        if (times[p] - times[prev] <= burst_gap
+                and times[p] - times[run[0]] <= burst_span
+                and float(np.dot(embeddings[prev], embeddings[p])) >= burst_sim):
+            run.append(p)
+        else:
+            flush(run)
+            run = [p]
+    flush(run)
+
+    merged: dict = defaultdict(list)
+    for p in items:
+        merged[afind(atom[p])].append(p)
+    return [m for m in merged.values() if len(m) > 1]
+
+
 def assign_dup_groups(paths: list, hashes: dict, threshold: int,
                       embeddings: dict | None = None, dup_sim: float = 0.92,
                       times: dict | None = None, dup_window: float = 600.0,
-                      dup_cohesion: float = 0.90
+                      dup_cohesion: float = 0.90,
+                      burst_gap: float = 8.0, burst_sim: float = 0.80,
+                      burst_span: float = 30.0
                       ) -> tuple[dict, list]:
     """Assign fine near-duplicate group ids. First a similarity graph joins two
     images when EITHER their perceptual hashes are within `threshold` Hamming
@@ -131,6 +210,17 @@ def assign_dup_groups(paths: list, hashes: dict, threshold: int,
     mutually cohesive (average cosine below `dup_cohesion`) is broken up. This
     keeps the loose-but-genuine pair (linked at, say, cos 0.93) together while
     shattering the 50-frame chains the segmenter used to emit.
+
+    Finally a *strictly additive* burst pass runs (`_burst_merge`): it treats the
+    cohesion result as fixed atoms — each near-dup group and each still-loose
+    frame — and only ever MERGES whole atoms that fall in the same tight temporal
+    run (consecutive gap <= `burst_gap`s, run span <= `burst_span`s, consecutive
+    cosine >= `burst_sim`). It never re-clusters or ejects, so an existing group
+    can grow or two can merge, but nothing that was grouped is ever broken. This
+    rescues bursts whose CLIP cosine is dragged under `dup_sim` by drifting
+    mist/haze (time compensating for the weakened visual signal) without the
+    non-monotonic churn that re-running cohesion on enlarged components causes.
+    Disabled when `burst_gap` <= 0 or times/embeddings are absent.
 
     Returns ({path: group_id}, [groups]); only multi-member groups are kept and
     ids/members are ordered by earliest capture time for determinism."""
@@ -180,6 +270,13 @@ def assign_dup_groups(paths: list, hashes: dict, threshold: int,
         else:
             groups.append(comp)
     groups = [m for m in groups if len(m) > 1]
+
+    # Strictly-additive burst merge over the settled cohesion result.
+    if (has_emb and times is not None and burst_gap and burst_gap > 0
+            and burst_sim is not None):
+        groups = _burst_merge(items, groups, embeddings, times,
+                              burst_gap, burst_sim, burst_span)
+
     groups.sort(key=lambda m: (min(t(p) for p in m), str(min(m, key=str))))
 
     path_to_group: dict = {}

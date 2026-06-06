@@ -842,6 +842,11 @@ select:focus, input:focus {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Never exceed the overlay's padded content box. Without this, a fixed vh
+     height (e.g. .review-panel's 96vh) plus the overlay's 14px padding overflows
+     on short viewports; align-items:center then clips equally top+bottom, eating
+     the top padding so the header sits flush against the screen edge. */
+  max-height: 100%;
 }
 .review-panel {
   border-radius: 12px;
@@ -876,7 +881,21 @@ select:focus, input:focus {
 }
 .btn.ghost:hover { background: var(--bg-hover); color: var(--text); }
 .review-sub { color: var(--text-dim); }
-.review-actions { display: flex; gap: 8px; }
+/* margin-left:auto right-aligns the action group: .review-head dropped
+   justify-content:space-between (it mis-centred AnalyzePanel's status), and this
+   view has no .spacer, so without this the buttons pack against the title. */
+.review-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Conventional X dismiss — square icon button set slightly apart from the
+   functional actions (List/Group) so it reads unambiguously as "close", not as
+   another toggle. Esc still closes; this is the discoverable affordance. */
+.review-close {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; margin-left: 4px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--text-dim);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.review-close:hover { background: var(--bg-hover); color: var(--text); border-color: var(--text-dim); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 
@@ -958,6 +977,7 @@ select:focus, input:focus {
   pointer-events: none;
 }
 .review-filternote { color: var(--accent); }
+.review-filternote.err { color: var(--del); }
 .badge-filtered {
   position: absolute;
   top: 10px; left: 50%;
@@ -977,27 +997,45 @@ select:focus, input:focus {
   font-size: 13px;
   text-shadow: 0 0 3px #000;
 }
+/* A trashed member, only visible via "Show deleted": heavily knocked back and
+   stamped with a bin so it never gets mistaken for an in-play frame. */
+.strip-thumb.deleted img { opacity: 0.28; filter: grayscale(0.85); }
+.strip-thumb.deleted.active img { opacity: 0.6; filter: grayscale(0.4); }
+.strip-trashed {
+  position: absolute;
+  top: 2px; right: 4px;
+  font-size: 12px;
+  text-shadow: 0 0 3px #000;
+  pointer-events: none;
+}
 /* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
    structure reads at a glance. Lone-set / no-set scenes don't render this. */
 .strip-cluster {
   position: relative;
   display: flex;
-  gap: 4px;
-  padding: 3px;
+  gap: 3px;
+  padding: 4px 7px 5px;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
+  /* Accent border + tinted backing + bottom rail so the expanded set reads as
+     one cohesive unit against the dark strip — the faint grey 1px border it had
+     before dissolved into the background and the members looked unrelated. The
+     tight inner gap (3px) butts members together; the strip's 8px gap keeps
+     separate groups apart. */
+  border: 1.5px solid rgba(var(--accent-rgb), 0.6);
+  border-radius: 9px;
+  background: rgba(var(--accent-rgb), 0.13);
+  box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 /* Flat-view near-dup set: thumbs stay individually visible but share a faint
    backing plus an accent underline rail, so a run of same-group photos reads as
    one unit (Gestalt grouping) without collapsing or bracketing heavily. */
 .strip-flatgroup {
   display: flex;
-  gap: 4px;
-  padding: 3px 3px 5px;
-  border-radius: 7px;
-  background: rgba(var(--accent-rgb), 0.08);
+  gap: 3px;
+  padding: 4px 5px 5px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.11);
   box-shadow: inset 0 -3px 0 -1px var(--accent);
 }
 
@@ -1083,7 +1121,7 @@ select:focus, input:focus {
 .strip-collapsed:has(.strip-toggle:hover) .strip-grouptile { border-color: var(--accent); }
 .strip-cluster:has(.strip-toggle:hover) {
   border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(var(--accent-rgb), 0.22);
 }
 .strip-flag {
   position: absolute;
@@ -1092,6 +1130,40 @@ select:focus, input:focus {
 }
 .strip-flag.keep { background: var(--keep); }
 .strip-flag.del { background: var(--del); }
+
+/* Suggested verdict = a GHOST of the decision: a dashed, translucent bar on the
+   TOP edge, deliberately mirroring the solid committed .strip-flag on the bottom.
+   Same hue (green keep / red del) keeps the mapping intuitive; top + dashed vs
+   bottom + solid keeps "what the tool suggests" categorically distinct from "what
+   you decided", even when both are shown on one tile. Committing just lights up the
+   solid bar below — the dashed preview made real. */
+.strip-rec {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 0;
+  border-top: 3px dashed transparent;
+  pointer-events: none;
+}
+.strip-rec.keep { border-top-color: rgba(var(--keep-rgb), 0.9); }
+.strip-rec.del  { border-top-color: rgba(var(--del-rgb), 0.9); }
+
+/* A keep/delete recommendation pill (hero + list). Dashed ghost styling — never
+   filled like .badge-decision — so a *suggestion* is visually distinct from a
+   committed verdict. */
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+.rec-badge.keep { color: var(--keep); border-color: rgba(var(--keep-rgb), 0.6); }
+.rec-badge.del { color: var(--del); border-color: rgba(var(--del-rgb), 0.6); }
 
 /* Large preview of the selected member */
 .review-hero {
@@ -1151,6 +1223,9 @@ select:focus, input:focus {
 .rl-name { font-size: 13px; font-weight: 600; }
 .rl-best { font-size: 11px; color: var(--accent); }
 .rl-flt { font-size: 11px; color: var(--text-dim); }
+.rl-trashed { font-size: 11px; color: var(--del); font-weight: 600; }
+.review-list-row.deleted { opacity: 0.5; }
+.review-list-row.deleted .rl-thumb { filter: grayscale(0.8); }
 .rl-scores { font-size: 12px; color: var(--text-dim); }
 .rl-cap { font-size: 12px; color: var(--text); line-height: 1.4; }
 .rl-cap.empty { color: var(--text-dim); font-style: italic; }
