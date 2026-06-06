@@ -162,6 +162,23 @@ def main():
             "current": current, "total": total,
         }), flush=True)
 
+    # Per-file loops below read every image from disk; over a cloud-synced drive
+    # (e.g. Google Drive's virtual filesystem) each open hydrates the file, so a
+    # phase can run for minutes. Emit progress *within* the loop — throttled so we
+    # don't flood the task ledger — mapping i/n into the phase's [lo, hi] band.
+    import time as _time
+    _last_step = [0.0]
+
+    def emit_step(phase: str, lo: float, hi: float, i: int, n: int, what: str):
+        if not args.progress_json:
+            return
+        now = _time.monotonic()
+        if i < n and (now - _last_step[0]) < 0.3:
+            return
+        _last_step[0] = now
+        pct = lo + (hi - lo) * (i / max(1, n))
+        emit_progress(phase, pct, f"{what} {i}/{n}", i, n)
+
     folder = Path(args.folder)
     if not folder.exists():
         print(f"Error: {folder} does not exist"); sys.exit(1)
@@ -289,8 +306,10 @@ def main():
     # ── Sharpness (raw reused from cache; only new files read from disk) ──
     print("\nComputing sharpness (Laplacian variance)...")
     raw_sharp: dict = {p: cached[p].get("raw_laplacian", 0.0) for p in cached}
-    for p in tqdm(to_process, desc="Sharpness"):
+    _n_proc = len(to_process)
+    for _i, p in enumerate(tqdm(to_process, desc="Sharpness"), 1):
         raw_sharp[p] = laplacian_variance(p)
+        emit_step("sharpness", 0.03, 0.15, _i, _n_proc, "Sharpness")
     norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
     sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
     emit_progress("sharpness", 0.15, "Sharpness complete", len(paths), len(paths))
@@ -299,12 +318,16 @@ def main():
     clip_iqa_scores: dict = {}
     if use_clip_iqa and to_process:
         print()
-        clip_iqa_scores = run_clip_iqa(to_process, device_for())
+        clip_iqa_scores = run_clip_iqa(
+            to_process, device_for(),
+            progress=lambda i, n: emit_step("scoring", 0.15, 0.35, i, n, "Aesthetic (CLIP-IQA)"))
 
     para_raw: dict = {}
     if use_para and to_process:
         print()
-        para_raw = run_para(to_process, device_for())
+        para_raw = run_para(
+            to_process, device_for(),
+            progress=lambda i, n: emit_step("scoring", 0.15, 0.35, i, n, "Aesthetic (PARA)"))
 
     # ── Primary aesthetic for combined score (cached or freshly computed) ──
     def primary_aes(p: Path) -> float:
@@ -327,20 +350,26 @@ def main():
             hashes[p] = imagehash.hex_to_hash(cached[p]["phash"])
         except Exception:
             pass
-    new_hashes, new_sizes = compute_phashes(to_process) if to_process else ({}, {})
+    new_hashes, new_sizes = (
+        compute_phashes(
+            to_process,
+            progress=lambda i, n: emit_step("duplicates", 0.35, 0.45, i, n, "Hashing"),
+        ) if to_process else ({}, {}))
     hashes.update(new_hashes)
     img_sizes = new_sizes
     emit_progress("duplicates", 0.45, "Perceptual hashes complete", len(paths), len(paths))
 
     # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
     capture_time: dict = {}
-    for p in paths:
+    _n_ct = len(paths)
+    for _i, p in enumerate(paths, 1):
         prev = cached.get(p)
         if prev is not None and prev.get("capture_time") is not None:
             capture_time[p] = prev["capture_time"]
-            continue
-        ct = read_capture_time(p)
-        capture_time[p] = ct if ct is not None else (sigs[p][0] or 0.0)
+        else:
+            ct = read_capture_time(p)
+            capture_time[p] = ct if ct is not None else (sigs[p][0] or 0.0)
+        emit_step("capture", 0.45, 0.50, _i, _n_ct, "Capture time")
 
     # ── Scene grouping + fine near-duplicate groups ──
     # Grouping is global (like face clustering): recomputed every run over the
@@ -360,7 +389,9 @@ def main():
         clip_new = [p for p in paths if p not in embeddings]
         if clip_new:
             print()
-            embeddings.update(compute_clip_embeddings(clip_new, device_for()))
+            embeddings.update(compute_clip_embeddings(
+                clip_new, device_for(),
+                progress=lambda i, n: emit_step("embeddings", 0.50, 0.58, i, n, "Scene embeddings")))
         print(f"  CLIP embeddings: {len(paths) - len(clip_new)} cached, "
               f"{len(clip_new)} computed")
         emit_progress("embeddings", 0.58, "CLIP embeddings complete", len(paths), len(paths))
@@ -398,8 +429,9 @@ def main():
     # ── BLIP captions + Qwen3-VL keyword tags (new files only) ──
     captions: dict = {}
     if args.caption and to_process:
-        captions = run_caption_and_tags(to_process, device_for(),
-                                         top_k=args.top_tags)
+        captions = run_caption_and_tags(
+            to_process, device_for(), top_k=args.top_tags,
+            progress=lambda i, n: emit_step("caption", 0.68, 0.82, i, n, "Captions"))
 
     # ── Face detection + identity clustering ──
     # Clustering is global, so any change forces a whole-folder re-detection;
@@ -422,6 +454,7 @@ def main():
             min_face_rel=args.face_min_rel,
             eps=args.face_eps,
             score_expr=bool(args.face_expr),
+            progress=lambda i, n: emit_step("faces", 0.82, 0.90, i, n, "Face detection"),
         )
 
     # ── Build report ──

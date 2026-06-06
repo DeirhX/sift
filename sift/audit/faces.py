@@ -92,7 +92,8 @@ def run_faces(paths, device: str,
               min_face_size: int = 80,
               min_face_rel: float = 0.04,
               eps: float = 0.50,
-              score_expr: bool = False) -> tuple[dict, dict]:
+              score_expr: bool = False,
+              progress=None) -> tuple[dict, dict]:
     """
     Detect faces, embed with InceptionResnetV1(VGGFace2), cluster with DBSCAN.
 
@@ -136,7 +137,10 @@ def run_faces(paths, device: str,
     img_sizes: dict = {}
     n_filtered_rel = 0
 
-    for p in tqdm(paths, desc="Face detection"):
+    _n_faces = len(paths)
+    for _i, p in enumerate(tqdm(paths, desc="Face detection"), 1):
+        if progress is not None:
+            progress(_i, _n_faces)
         try:
             img     = load_rgb(p).convert("RGB")
             w, h    = img.size

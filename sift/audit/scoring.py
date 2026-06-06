@@ -57,7 +57,7 @@ def load_clip_iqa(device: str):
     return model, preprocess, tokenizer
 
 
-def run_clip_iqa(paths, device, batch_size=32):
+def run_clip_iqa(paths, device, batch_size=32, progress=None):
     import torch
     from sklearn.preprocessing import normalize
 
@@ -65,12 +65,16 @@ def run_clip_iqa(paths, device, batch_size=32):
     pos_feats, neg_feats = encode_prompt_pairs(model, tokenizer, QUALITY_PAIRS, device)
 
     embeddings, valid = [], []
+    done, n = 0, len(paths)
     for t, bpaths in iter_image_batches(paths, preprocess, device,
                                         batch_size, "CLIP-IQA embed"):
         with torch.no_grad(), torch.amp.autocast(device):
             f = model.encode_image(t).cpu().float().numpy()
         embeddings.extend(f)
         valid.extend(bpaths)
+        done += len(bpaths)
+        if progress is not None:
+            progress(done, n)
 
     embs = normalize(np.array(embeddings))
     scores = {}
@@ -88,8 +92,14 @@ def run_clip_iqa(paths, device, batch_size=32):
 def load_para_scorer(device: str):
     import torch
     from transformers import CLIPVisionModel, CLIPProcessor
+    from transformers.utils import logging as hf_logging
     from huggingface_hub import hf_hub_download
     from sift.audit.aesthetic_scorer import AestheticScorer
+
+    # We deliberately load a full CLIP checkpoint into a vision-only model, so the
+    # text_model.* keys are "unexpected" by design. Silence transformers' multi-
+    # line LOAD REPORT — it's pure noise here and floods the live task log.
+    hf_logging.set_verbosity_error()
 
     print(f"Loading PARA aesthetic scorer (ViT-B/32) on {device}...")
     model_path = hf_hub_download("rsinema/aesthetic-scorer", "model.pt")
@@ -112,7 +122,7 @@ def load_para_scorer(device: str):
     return scorer, processor
 
 
-def run_para(paths, device, batch_size=32):
+def run_para(paths, device, batch_size=32, progress=None):
     import torch
 
     scorer, processor = load_para_scorer(device)
@@ -121,6 +131,7 @@ def run_para(paths, device, batch_size=32):
         return processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
 
     results = {}
+    done, n = 0, len(paths)
     for batch_t, bpaths in iter_image_batches(paths, prep, device,
                                               batch_size, "PARA scoring"):
         with torch.no_grad():
@@ -128,6 +139,9 @@ def run_para(paths, device, batch_size=32):
         head_lists = [o.squeeze(1).tolist() for o in out]
         for p, *vals in zip(bpaths, *head_lists):
             results[p] = {k: v for k, v in zip(PARA_KEYS, vals)}
+        done += len(bpaths)
+        if progress is not None:
+            progress(done, n)
 
     fallback = {k: 2.5 for k in PARA_KEYS}
     for p in paths:

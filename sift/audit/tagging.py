@@ -117,7 +117,8 @@ def run_qwen_tags(paths: list, device: str, top_k: int = 12,
 
 def run_caption_and_tags(paths: list, device: str,
                          top_k: int = 12,
-                         batch_size_blip: int = 16) -> dict:
+                         batch_size_blip: int = 16,
+                         progress=None) -> dict:
     """
     Returns {path: {"caption": str, "tags": list[str]}} for every path.
 
@@ -140,6 +141,7 @@ def run_caption_and_tags(paths: list, device: str,
             "Salesforce/blip-image-captioning-base"
         ).to(device).eval()
 
+        n = len(paths)
         for i in tqdm(range(0, len(paths), batch_size_blip), desc="BLIP captions"):
             batch_paths = paths[i:i + batch_size_blip]
             images, bpaths = [], []
@@ -149,18 +151,18 @@ def run_caption_and_tags(paths: list, device: str,
                     bpaths.append(p)
                 except Exception as e:
                     print(f"  skip {p.name}: {e}")
-            if not images:
-                continue
-
-            inputs = blip_proc(images=images, return_tensors="pt").to(device)
-            with torch.no_grad():
-                out_ids = blip_model.generate(
-                    **inputs, max_new_tokens=64,
-                    num_beams=4, length_penalty=1.0,
-                )
-            captions = blip_proc.batch_decode(out_ids, skip_special_tokens=True)
-            for p, cap in zip(bpaths, captions):
-                results[p]["caption"] = cap.strip()
+            if images:
+                inputs = blip_proc(images=images, return_tensors="pt").to(device)
+                with torch.no_grad():
+                    out_ids = blip_model.generate(
+                        **inputs, max_new_tokens=64,
+                        num_beams=4, length_penalty=1.0,
+                    )
+                captions = blip_proc.batch_decode(out_ids, skip_special_tokens=True)
+                for p, cap in zip(bpaths, captions):
+                    results[p]["caption"] = cap.strip()
+            if progress is not None:
+                progress(min(i + batch_size_blip, n), n)
 
         del blip_model
         if device == "cuda":
