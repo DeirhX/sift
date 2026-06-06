@@ -37,7 +37,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager, contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Body
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -385,6 +385,25 @@ def serve_full(image_id: int):
     path = Path(row["path"])
     if not path.exists():
         raise HTTPException(404, "original file missing")
+
+    # Browsers can't render camera RAW (NEF/RAF/CR2/…), so streaming the original
+    # bytes gives a broken <img>. Serve the same embedded preview the pipeline
+    # decodes (orientation-corrected, re-encoded to JPEG in-memory) so the large
+    # view matches the thumbnail. Non-RAW originals are streamed straight off disk.
+    from sift.audit.imaging import is_raw
+    if is_raw(path):
+        try:
+            from io import BytesIO
+            from PIL import ImageOps
+            from sift.audit.imaging import load_rgb
+            img = ImageOps.exif_transpose(load_rgb(path)).convert("RGB")
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=90)
+        except Exception as e:
+            raise HTTPException(500, f"failed to decode RAW preview: {e}")
+        return Response(content=buf.getvalue(), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
     return FileResponse(path)
 
 
