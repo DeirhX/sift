@@ -133,7 +133,7 @@ export function isDeleted<T extends { trash_state?: string | null }>(it: T): boo
   return it.trash_state != null
 }
 
-// Drop trashed photos from a list unless `showDeleted`. Mirrors applyDecisionHide:
+// Drop trashed photos from a list unless `showDeleted`:
 // the server already excludes trashed rows from default views, but an optimistic
 // trash patch lands in the cache before any refetch, so this render-time filter is
 // what makes a just-trashed photo leave the list IMMEDIATELY (rather than lingering
