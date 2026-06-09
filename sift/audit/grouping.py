@@ -308,7 +308,8 @@ def dup_centrality(groups: list, embeddings: dict | None) -> dict:
 
 
 def coarsen_scenes_for_dups(paths: list, scene_of: dict,
-                            dup_groups: list, times: dict | None = None
+                            dup_groups: list, times: dict | None = None,
+                            extra_groups: list | None = None
                             ) -> tuple[dict, int]:
     """Coarsen a scene assignment so every near-duplicate group nests inside a
     single scene. Near-dups are the finest grain, so scenes must contain them:
@@ -317,6 +318,12 @@ def coarsen_scenes_for_dups(paths: list, scene_of: dict,
     pulled into a scene only when a dup group ties it there. This fixes the case
     where the sequential segmenter splits a continuous shoot between two genuine
     near-duplicates (which, being scene-bounded, could otherwise never merge).
+
+    `extra_groups` (lists of paths) are unioned the same way as `dup_groups`,
+    used for *manual* scene merges: the user pins two time-separated bursts into
+    one scene and those pins survive every re-segmentation. A pinned image pulls
+    its whole current scene along, so the merge holds even as nearby frames
+    change.
 
     Returns ({path: scene_id|None}, n_scenes); lone images keep None."""
     from collections import defaultdict
@@ -342,7 +349,7 @@ def coarsen_scenes_for_dups(paths: list, scene_of: dict,
         for q in members[1:]:
             union(members[0], q)
 
-    for group in dup_groups:
+    for group in list(dup_groups) + list(extra_groups or []):
         g = [p for p in group if p in parent]
         for q in g[1:]:
             union(g[0], q)

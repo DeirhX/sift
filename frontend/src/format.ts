@@ -126,19 +126,6 @@ export function fmtTimeRange(
   return `${a} – ${b}`
 }
 
-// "Hide deletions" filter (decision === 'notdel'): drop members already marked
-// for deletion so the set shrinks toward keepers as you cull. The server applies
-// the same rule on fetch; this mirror makes culling LIVE — decisions are patched
-// into the cache optimistically (no refetch), so without it a just-deleted photo
-// would linger. A no-op for every other decision value.
-export function applyDecisionHide<T extends { decision?: string | null }>(
-  items: T[] | null | undefined,
-  decision: string,
-): T[] {
-  if (decision !== 'notdel' || !items) return items ?? []
-  return items.filter((it) => it.decision !== 'del')
-}
-
 // A photo is "deleted" once it's been moved to Trash — any trash_moves state
 // (trashed/emptied/missing) sets trash_state. This is distinct from a 'del'
 // *decision*, which is just a reversible mark that hasn't touched the file yet.
@@ -146,7 +133,7 @@ export function isDeleted<T extends { trash_state?: string | null }>(it: T): boo
   return it.trash_state != null
 }
 
-// Drop trashed photos from a list unless `showDeleted`. Mirrors applyDecisionHide:
+// Drop trashed photos from a list unless `showDeleted`:
 // the server already excludes trashed rows from default views, but an optimistic
 // trash patch lands in the cache before any refetch, so this render-time filter is
 // what makes a just-trashed photo leave the list IMMEDIATELY (rather than lingering
@@ -158,34 +145,6 @@ export function applyTrashHide<T extends { trash_state?: string | null }>(
 ): T[] {
   if (showDeleted || !items) return items ?? []
   return items.filter((it) => it.trash_state == null)
-}
-
-// "Hide deletions" applied to a LIST of containers (scenes / duplicate groups):
-// cull each container's del-marked members, then drop any container left empty
-// so the overview shrinks as you cull. A no-op for every non-'notdel' decision.
-// One definition shared by SceneView + GroupView (they used to inline identical
-// map/filter copies).
-export function hideDelContainers<
-  I extends { decision?: string | null },
-  C extends { items: I[] },
->(containers: C[], decision: string): C[] {
-  if (decision !== 'notdel') return containers
-  return containers
-    .map((c) => ({ ...c, items: applyDecisionHide(c.items, decision) }))
-    .filter((c) => c.items.length > 0)
-}
-
-// "Hide deletions" applied to a SINGLE open review (group/scene overlay): hide
-// del-marked members, but fall back to the unfiltered container rather than
-// empty it — an open overlay with nothing to render is worse than showing the
-// photos you just deleted. Returns null/obj untouched for non-'notdel'.
-export function hideDelInReview<
-  I extends { decision?: string | null },
-  C extends { items: I[] },
->(container: C | null, decision: string): C | null {
-  if (!container || decision !== 'notdel') return container
-  const kept = applyDecisionHide(container.items, decision)
-  return kept.length ? { ...container, items: kept } : container
 }
 
 export interface SceneKeyword {

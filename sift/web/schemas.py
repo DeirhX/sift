@@ -96,6 +96,7 @@ class Scene(BaseModel):
     count: int
     match_count: int
     dup_sets: int
+    manual: bool = False              # contains a user-pinned manual merge
     time_start: float | None = None
     time_end: float | None = None
     items: list[GroupedImageItem]
@@ -106,6 +107,23 @@ class ScenesResponse(BaseModel):
     offset: int
     limit: int
     scenes: list[Scene]
+
+
+class RegroupRequest(BaseModel):
+    gap: float                        # seconds: split scenes at gaps longer than this
+
+
+class RegroupResponse(BaseModel):
+    scene_groups: int
+    gap: float
+
+
+class MergeScenesRequest(BaseModel):
+    scene_groups: list[int]           # scenes to pin into a single scene
+
+
+class UnmergeSceneRequest(BaseModel):
+    scene_group: int                  # a (possibly merged) scene to unpin
 
 
 class Location(BaseModel):

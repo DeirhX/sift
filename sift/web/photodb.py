@@ -206,6 +206,21 @@ CREATE TABLE IF NOT EXISTS cluster_name_anchors (
 );
 """
 
+# Manual scene merges that must survive both a slider re-segmentation and a fresh
+# build_db ingest. Keyed by image content hash (stable across rebuilds), grouped
+# by group_id: every image whose hash shares a group_id is forced into the same
+# scene, so two time-separated bursts the user declared "one scene" stay merged
+# no matter how the automatic time-gap segmentation lands. Like face_overrides,
+# build_db never clears this table.
+SCENE_MERGES_DDL = """
+CREATE TABLE IF NOT EXISTS scene_merges (
+    group_id INTEGER NOT NULL,
+    hash     TEXT NOT NULL,
+    PRIMARY KEY (group_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_scene_merges_hash ON scene_merges(hash);
+"""
+
 # Columns introduced after the initial release. CREATE IF NOT EXISTS can't add a
 # column to an existing table, so ensure_schema() adds them with ALTER on demand.
 _IMAGE_LATE_COLUMNS = (
@@ -268,6 +283,12 @@ def ensure_anchors(conn) -> None:
     conn.executescript(CLUSTER_ANCHORS_DDL)
 
 
+def ensure_scene_merges(conn) -> None:
+    """Create just the scene_merges table. Cheap enough to call defensively from
+    write paths that record or read a manual scene merge."""
+    conn.executescript(SCENE_MERGES_DDL)
+
+
 def ensure_schema(conn) -> None:
     """The one migration authority, shared by ingest and the server.
 
@@ -290,6 +311,7 @@ def ensure_schema(conn) -> None:
     conn.executescript(TRASH_DDL)
     conn.executescript(TASKS_DDL)
     ensure_anchors(conn)
+    ensure_scene_merges(conn)
     # Created after the ALTERs so legacy tables don't index a missing column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_portrait ON images(portrait)")

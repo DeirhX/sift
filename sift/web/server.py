@@ -52,7 +52,8 @@ from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
     MergeResponse, AssignFaceResponse, AutocullResponse, AnalyzeStatus,
-    TaskStartRequest, TaskSnapshot, TaskListResponse)
+    TaskStartRequest, TaskSnapshot, TaskListResponse,
+    RegroupRequest, RegroupResponse, MergeScenesRequest, UnmergeSceneRequest)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -219,6 +220,7 @@ def get_images(
     folder_recursive: bool = True,  # include photos in subfolders of `folder`
     dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
     decision: str = "all",          # all | keep | del | unmarked
+    trash:    str = "active",       # active | trashed | any (lifecycle axis)
     q:       str | None = None,     # caption text search
 ):
     with db() as conn:
@@ -227,7 +229,7 @@ def get_images(
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
-            tags=tags, people=people, q=q, decision=decision,
+            tags=tags, people=people, q=q, decision=decision, trash=trash,
             folder=folder, folder_recursive=folder_recursive)
 
         if dup_mode == "groups-only":
@@ -283,6 +285,7 @@ def get_groups(
     folder:  str | None = None,
     folder_recursive: bool = True,
     decision: str = "all",
+    trash:    str = "active",
     q:       str | None = None,
 ):
     """Return duplicate groups (paginated by group), each with all of its
@@ -296,7 +299,7 @@ def get_groups(
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
-            tags=tags, people=people, q=q, decision=decision,
+            tags=tags, people=people, q=q, decision=decision, trash=trash,
             folder=folder, folder_recursive=folder_recursive)
         total, page = grouped_page(conn, "dup_group", where, params,
                                    order_sql, offset, limit)
@@ -324,6 +327,7 @@ def get_scenes(
     folder:  str | None = None,
     folder_recursive: bool = True,
     decision: str = "all",
+    trash:    str = "active",
     q:       str | None = None,
 ):
     """Return rough scene groups (paginated by scene), each with all member
@@ -344,21 +348,49 @@ def get_scenes(
             sharp_min=sharp_min, sharp_max=sharp_max,
             aes_min=aes_min, aes_max=aes_max,
             portrait_min=portrait_min, portrait_max=portrait_max,
-            tags=tags, people=people, q=q, decision=decision,
+            tags=tags, people=people, q=q, decision=decision, trash=trash,
             folder=folder, folder_recursive=folder_recursive)
         total, page = grouped_page(
             conn, "scene_group", where, params, order_sql, offset, limit,
             agg_extra=", MIN(capture_time) tmin, MAX(capture_time) tmax")
+        pinned = {r["hash"] for r in conn.execute("SELECT hash FROM scene_merges")}
         scenes = [
             {"scene_group": gr["scene_group"], "count": len(items),
              "match_count": sum(it["matches"] for it in items),
              # how many distinct near-dup sets this scene contains
              "dup_sets": len({it["dup_group"] for it in items
                               if it["dup_group"] is not None}),
+             "manual": any(it["hash"] in pinned for it in items),
              "time_start": gr["tmin"], "time_end": gr["tmax"], "items": items}
             for gr, items in page
         ]
     return {"total": total, "offset": offset, "limit": limit, "scenes": scenes}
+
+
+@app.post("/api/scenes/regroup", response_model=RegroupResponse)
+def regroup_scenes(req: RegroupRequest):
+    """Re-segment scenes by capture-time gap only (the 'scene granularity' knob).
+    Clamped to a sane range; recomputes scene_group in place and remembers the
+    chosen gap so the slider re-opens where the user left it."""
+    gap = max(5.0, min(86400.0, float(req.gap)))
+    with db() as conn:
+        return library_ops.recompute_scenes(conn, gap)
+
+
+@app.post("/api/scenes/merge", response_model=RegroupResponse)
+def merge_scenes(req: MergeScenesRequest):
+    """Pin two or more scenes into one (a manual merge that survives recuts and
+    re-analysis). Recomputes at the current gap and returns the new scene count."""
+    with db() as conn:
+        return library_ops.merge_scenes(conn, req.scene_groups)
+
+
+@app.post("/api/scenes/unmerge", response_model=RegroupResponse)
+def unmerge_scene(req: UnmergeSceneRequest):
+    """Drop the manual-merge pins touching a scene, returning it to automatic
+    time-gap segmentation."""
+    with db() as conn:
+        return library_ops.unmerge_scene(conn, req.scene_group)
 
 
 # ── Image serving ─────────────────────────────────────────────────────────────

@@ -36,11 +36,15 @@ def test_apply_moves_del_files(real_library):
     assert (trash / "y.jpg").exists()
     assert not (env.lib / "y.jpg").exists()
     # The DB path follows the file; the decision is unchanged (hash-keyed).
-    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    trash_items = items_by_name(env.client, "?limit=50&trash=trashed")
     moved = trash_items["y.jpg"]
     assert Path(moved["path"]) == trash / "y.jpg"
     assert moved["decision"] == "del"
     assert moved["trash_state"] == "trashed"
+    # Decision + lifecycle are orthogonal: the trashed file is del-marked, so it
+    # shows under trashed+del but not trashed+keep.
+    assert "y.jpg" in items_by_name(env.client, "?limit=50&trash=trashed&decision=del")
+    assert "y.jpg" not in items_by_name(env.client, "?limit=50&trash=trashed&decision=keep")
     # Status reflects the applied move.
     status = env.client.get("/api/apply/status").json()
     assert status["pending"] == 0 and status["applied"] == 1

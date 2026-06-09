@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst, applyDecisionHide, isDeleted, applyTrashHide, sceneKeywords } from './format'
+import { fmt, aestheticScore, groupByDup, fmtTimeRange, representative, repFirst, isDeleted, applyTrashHide, sceneKeywords } from './format'
 
 describe('fmt', () => {
   it('formats numbers to two decimals', () => {
@@ -136,28 +136,6 @@ describe('fmtTimeRange', () => {
     const start = 1593864000
     const [, tail] = (fmtTimeRange(start, start + 2 * 86400) ?? '').split(' – ')
     expect(tail).toContain('2020')
-  })
-})
-
-describe('applyDecisionHide', () => {
-  const items = [
-    { id: 1, decision: 'keep' },
-    { id: 2, decision: 'del' },
-    { id: 3, decision: null },
-  ]
-
-  it('drops del-marked members under the "notdel" filter', () => {
-    expect(applyDecisionHide(items, 'notdel').map((i) => i.id)).toEqual([1, 3])
-  })
-
-  it('is a no-op for any other decision value', () => {
-    expect(applyDecisionHide(items, 'all')).toBe(items)
-    expect(applyDecisionHide(items, 'keep')).toBe(items)
-  })
-
-  it('tolerates nullish input', () => {
-    expect(applyDecisionHide(undefined, 'notdel')).toEqual([])
-    expect(applyDecisionHide(null, 'all')).toEqual([])
   })
 })
 

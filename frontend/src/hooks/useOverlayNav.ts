@@ -58,12 +58,27 @@ export function useOverlayNav(
     writeUrl(nextNav, push)
   }, [writeUrl])
 
+  // Always-current nav, read by the close fallback below without re-creating it.
+  const navRef = useRef<Nav | null>(nav)
+  useEffect(() => { navRef.current = nav }, [nav])
+
   // Unwind the entire open overlay back to the pre-overlay entry (so Back from
   // there returns to wherever you were, not back into the overlay).
+  //
+  // history.go is async and silently no-ops if its argument overshoots the real
+  // stack — which happens whenever the navDepth bookkeeping drifts (rapid
+  // in-overlay steps, Back/Forward, query-invalidation re-renders). That left
+  // the overlay stuck until a reload re-planted a clean base entry. So guarantee
+  // the close: after the go has had a tick to land, if we're somehow still in an
+  // overlay, fall back to writing a clean list entry directly.
   const closeOverlay = useCallback(() => {
     const d = window.history.state?.navDepth
-    if (typeof d === 'number' && d >= 0) window.history.go(-(d + 1))
-    else navigate(null, true)
+    if (typeof d === 'number' && d >= 0) {
+      window.history.go(-(d + 1))
+      window.setTimeout(() => { if (navRef.current) navigate(null, true) }, 150)
+    } else {
+      navigate(null, true)
+    }
   }, [navigate])
 
   const openImage = useCallback((id: number) => navigate({ kind: 'lightbox', imgId: id }), [navigate])

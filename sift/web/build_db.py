@@ -395,6 +395,26 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             conn.execute("INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
                          (h, decision))
 
+    # ── Re-apply manual scene merges ─────────────────────────────────────────
+    # Pinned by content hash (like decisions / face overrides), so a user's
+    # "these two bursts are one scene" survives a fresh ingest. Recoarsen the
+    # report's scene assignment with the pins folded in; renumbered ids are fine.
+    scene_groups_count = report.get("scene_groups", 0)
+    from sift.web import library_ops
+    merge_groups = library_ops.scene_merge_path_groups(conn)
+    if merge_groups:
+        from sift.audit.grouping import coarsen_scenes_for_dups
+        srows = conn.execute(
+            "SELECT path, scene_group, capture_time FROM images").fetchall()
+        spaths = [r[0] for r in srows]
+        scene_of = {r[0]: r[1] for r in srows}
+        stimes = {r[0]: r[2] for r in srows}
+        new_assign, scene_groups_count = coarsen_scenes_for_dups(
+            spaths, scene_of, [], times=stimes, extra_groups=merge_groups)
+        for p, sid in new_assign.items():
+            conn.execute("UPDATE images SET scene_group=? WHERE path=?", (sid, p))
+        print(f"  Re-applied {len(merge_groups)} manual scene merge(s)")
+
     # ── Meta ─────────────────────────────────────────────────────────────────
     for k in ("folder", "backend", "caption_model", "face_model", "scene_model"):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
@@ -404,7 +424,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("duplicate_groups", str(report.get("duplicate_groups", 0))))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
-                 ("scene_groups", str(report.get("scene_groups", 0))))
+                 ("scene_groups", str(scene_groups_count)))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("thumb_size", str(thumb_size)))
 

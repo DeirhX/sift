@@ -69,8 +69,8 @@ def test_decision_filter(env):
     assert names(env.client, "?limit=50&decision=keep") == {"a.jpg"}
     assert names(env.client, "?limit=50&decision=del") == {"b.jpg"}
     assert names(env.client, "?limit=50&decision=unmarked") == {"c.jpg"}
-    # "Hide deletions" keeps everything except the del-marked photo.
-    assert names(env.client, "?limit=50&decision=notdel") == {"a.jpg", "c.jpg"}
+    # 'all' (default) spans every verdict in the active library.
+    assert names(env.client, "?limit=50&decision=all") == {"a.jpg", "b.jpg", "c.jpg"}
 
 
 # ── dup_mode ─────────────────────────────────────────────────────────────────

@@ -8,6 +8,8 @@ interface ScenePileProps {
   focused?: boolean
   activeTags?: string[]
   onToggleTag?: (tag: string) => void
+  selected?: boolean
+  onToggleSelect?: () => void
 }
 
 // A rough scene shown as a stack: the best photo on top, a couple fanned
@@ -15,7 +17,7 @@ interface ScenePileProps {
 // its capture-time range. Clicking opens the scene panel to drill in. Its most
 // common photo keywords are shown as chips that double as tag-filter toggles
 // (`onToggleTag`), so you can pivot the whole view to a keyword from here.
-export default function ScenePile({ scene, onOpen, focused = false, activeTags = [], onToggleTag }: ScenePileProps) {
+export default function ScenePile({ scene, onOpen, focused = false, activeTags = [], onToggleTag, selected = false, onToggleSelect }: ScenePileProps) {
   const items = scene.items
   const top = items[0]
   const behind = items.slice(1, 3)
@@ -29,7 +31,15 @@ export default function ScenePile({ scene, onOpen, focused = false, activeTags =
   const keywords = sceneKeywords(items, 6)
 
   return (
-    <div className={'pile scene-pile' + (focused ? ' focused' : '')} onClick={onOpen} title={`Scene of ${items.length} photos`}>
+    <div className={'pile scene-pile' + (focused ? ' focused' : '') + (selected ? ' selected' : '')} data-sg={scene.scene_group} onClick={onOpen} title={`Scene of ${items.length} photos`}>
+      {onToggleSelect && (
+        <label className="pile-select" title="Select for merge" onClick={(e) => e.stopPropagation()}>
+          <input type="checkbox" checked={selected} onChange={onToggleSelect} />
+        </label>
+      )}
+      {scene.manual && (
+        <span className="pile-merged" title="Manually merged scene (pinned across re-analysis)">merged</span>
+      )}
       <div className="pile-stack">
         {behind.map((it, i) => (
           <div key={it.id} className={`pile-card back back-${i + 1}`}>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { thumbUrl, fullUrl } from '../api'
-import { fmt, aestheticScore, groupByDup, repFirst, isDeleted, applyTrashHide } from '../format'
+import { fmt, aestheticScore, groupByDup, repFirst, isDeleted } from '../format'
 import type { DupSet } from '../format'
 import type { GroupedImageItem } from '../api/types'
 import type { DecisionFn, BulkDecisionFn, SetLightboxIndex } from '../types'
@@ -37,6 +37,9 @@ interface GroupReviewProps {
   // Start with trashed members visible — used when the app's global filter is set
   // to Trash, so an opened set shows the deleted photos it qualified on.
   defaultShowDeleted?: boolean
+  // Start with culled (del-marked, not-yet-trashed) members visible — used when
+  // the global Decision filter is 'del', so an opened set shows them.
+  defaultShowCulled?: boolean
 }
 
 // Review a set of photos: a filmstrip of members up top, a large preview of the
@@ -60,20 +63,28 @@ export default function GroupReview({
   group, onClose, onDecision, onDecisionsBulk,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
   selId = null, zoom = false, onSelect, onZoom, onApplyDeletes,
-  defaultShowDeleted = false,
+  defaultShowDeleted = false, defaultShowCulled = false,
 }: GroupReviewProps) {
-  // Trashed members come back from the server as ordinary set members (flagged
-  // trash_state + matches=false), and an optimistic trash patch marks them the
-  // instant "Delete N now" fires. Hide them by default so a deleted photo leaves
-  // the strip immediately; a "Show deleted" toggle brings them back for review.
+  // Two kinds of "removed" member, each hidden by default so the strip reflects
+  // your culling live, each with its own reveal toggle:
+  //   • CULLED  — marked Del but not yet trashed (a reversible verdict). Hiding
+  //     these is what makes marking Del shrink the set immediately.
+  //   • DELETED — moved to Trash (trash_state set; an optimistic trash patch sets
+  //     it the instant "Delete N now" fires).
+  const [showCulled, setShowCulled] = useState(defaultShowCulled)
   const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
+  const culledCount = useMemo(
+    () => group.items.filter((it) => it.decision === 'del' && !isDeleted(it)).length,
+    [group.items])
   const deletedCount = useMemo(() => group.items.filter(isDeleted).length, [group.items])
-  // Hide trashed members, but never render a blank panel: if hiding would empty
-  // the set (e.g. every member was just trashed), fall back to showing them.
+  // Hide culled + trashed members, but never render a blank panel: if hiding would
+  // empty the set (e.g. every member was just culled), fall back to showing all.
   const items = useMemo(() => {
-    const visible = applyTrashHide(group.items, showDeleted)
-    return visible.length ? visible : group.items
-  }, [group.items, showDeleted])
+    let v = group.items
+    if (!showDeleted) v = v.filter((it) => !isDeleted(it))
+    if (!showCulled) v = v.filter((it) => !(it.decision === 'del' && !isDeleted(it)))
+    return v.length ? v : group.items
+  }, [group.items, showDeleted, showCulled])
 
   // Scene mode arranges the strip as a tree: sets first (each contiguous), then
   // loose photos. `view` is that flattened order so the hero, arrows and zoom
@@ -134,13 +145,30 @@ export default function GroupReview({
     if (i == null || i < 0 || i >= view.length) return
     onSelect(view[i].id)
   }
+  // Marking the on-screen photo "Del" live-culls it from the strip, which would
+  // otherwise drop the controlled selection (selId no longer in `view`) and snap
+  // the hero back to the first photo. Pre-advance to the neighbour that slides
+  // into its slot — the next photo, or the previous one if it was last — so
+  // culling marches forward. Del on a thumb that isn't the current selection, or
+  // any other verdict, leaves the selection untouched.
+  const decide: DecisionFn = (item, decision) => {
+    if (decision === 'del' && !showCulled && !isDeleted(item)) {
+      const i = idIndex.get(item.id)
+      if (i != null && i === sel) {
+        const nextId = view[i + 1]?.id ?? view[i - 1]?.id
+        if (nextId != null) onSelect(nextId)
+      }
+    }
+    onDecision(item, decision)
+  }
   const [showList, setShowList] = useState(false)
   // Ids in this set marked del but NOT yet trashed — the candidates for an
-  // immediate Trash (a member already in Trash, visible via "Show deleted", must
-  // not be re-trashed).
+  // immediate Trash. Read from group.items (not the filtered view) so culled
+  // members still hidden by the live-cull remain trashable, and so an already-
+  // trashed member (visible via "Show deleted") is never re-trashed.
   const delIds = useMemo(
-    () => items.filter((it) => it.decision === 'del' && !isDeleted(it)).map((it) => it.id),
-    [items])
+    () => group.items.filter((it) => it.decision === 'del' && !isDeleted(it)).map((it) => it.id),
+    [group.items])
   const [applying, setApplying] = useState(false)
   const [applyErr, setApplyErr] = useState<string | null>(null)
   const applyDeletes = async () => {
@@ -196,12 +224,12 @@ export default function GroupReview({
       if (e.key === 'Escape') onClose()
       else if (e.key === 'ArrowRight') selectIdx(Math.min(sel + 1, view.length - 1))
       else if (e.key === 'ArrowLeft') selectIdx(Math.max(sel - 1, 0))
-      else if (e.key === 'k' || e.key === '+' || e.key === '=') onDecision(view[sel], 'keep')
-      else if (e.key === 'd' || e.key === '-') onDecision(view[sel], 'del')
+      else if (e.key === 'k' || e.key === '+' || e.key === '=') decide(view[sel], 'keep')
+      else if (e.key === 'd' || e.key === '-') decide(view[sel], 'del')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [full, view, sel, onClose, onDecision])
+  }, [full, view, sel, onClose, decide])
 
   // Follow the selection: when arrow keys move it past the rendered edge of the
   // strip, scroll the active member back into view (horizontal only, no page
@@ -332,45 +360,67 @@ export default function GroupReview({
             {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
           </div>
           <div className="review-actions">
-            {onApplyDeletes && delIds.length > 0 && (
-              <button
-                className="btn danger"
-                onClick={applyDeletes}
-                disabled={applying}
-                title="Move this scene's photos marked Del to Trash now (recoverable)"
-              >
-                {applying ? 'Deleting…' : `Delete ${delIds.length} now`}
+            {/* ACT cluster — the real work (decide / delete), emphasised. Only
+                rendered when there's something to act on. */}
+            {(showGroupBulk || (onApplyDeletes && delIds.length > 0)) && (
+              <div className="review-actgroup">
+                {showGroupBulk && (
+                  <>
+                    <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
+                    <button className="btn" onClick={clearGroup}>Clear</button>
+                  </>
+                )}
+                {onApplyDeletes && delIds.length > 0 && (
+                  <button
+                    className="btn danger"
+                    onClick={applyDeletes}
+                    disabled={applying}
+                    title="Move this scene's photos marked Del to Trash now (recoverable)"
+                  >
+                    {applying ? 'Deleting…' : `Delete ${delIds.length} now`}
+                  </button>
+                )}
+              </div>
+            )}
+            {/* VIEW cluster — how the strip is shown/filtered: a quiet segmented
+                toggle unit so these read as one group of view options, not as
+                more actions. */}
+            <div className="review-viewseg">
+              {canGroup && !showList && (
+                <button
+                  className={'btn' + (grouped ? ' active' : '')}
+                  onClick={() => setGrouped((v) => !v)}
+                  title="Collapse near-duplicate sets into representative tiles"
+                >
+                  {grouped ? `Ungroup (${view.length})` : `Group dups (${sets.length})`}
+                </button>
+              )}
+              {culledCount > 0 && (
+                <button
+                  className={'btn' + (showCulled ? ' active' : '')}
+                  onClick={() => setShowCulled((v) => !v)}
+                  title={showCulled
+                    ? 'Hide photos you marked Del'
+                    : 'Show photos marked Del (hidden as you cull; not yet trashed)'}
+                >
+                  {showCulled ? 'Hide culled' : `Show culled (${culledCount})`}
+                </button>
+              )}
+              {deletedCount > 0 && (
+                <button
+                  className={'btn' + (showDeleted ? ' active' : '')}
+                  onClick={() => setShowDeleted((v) => !v)}
+                  title={showDeleted
+                    ? 'Hide photos that are in Trash'
+                    : 'Show this set\u2019s photos that have been moved to Trash'}
+                >
+                  {showDeleted ? 'Hide deleted' : `Show deleted (${deletedCount})`}
+                </button>
+              )}
+              <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
+                {showList ? 'Preview' : 'List'}
               </button>
-            )}
-            {showGroupBulk && (
-              <>
-                <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
-                <button className="btn" onClick={clearGroup}>Clear</button>
-              </>
-            )}
-            {canGroup && !showList && (
-              <button
-                className={'btn' + (grouped ? ' active' : '')}
-                onClick={() => setGrouped((v) => !v)}
-                title="Collapse near-duplicate sets into representative tiles"
-              >
-                {grouped ? `Ungroup (${view.length})` : `Group dups (${sets.length})`}
-              </button>
-            )}
-            {deletedCount > 0 && (
-              <button
-                className={'btn' + (showDeleted ? ' active' : '')}
-                onClick={() => setShowDeleted((v) => !v)}
-                title={showDeleted
-                  ? 'Hide photos that are in Trash'
-                  : 'Show this set\u2019s photos that have been moved to Trash'}
-              >
-                {showDeleted ? 'Hide deleted' : `Show deleted (${deletedCount})`}
-              </button>
-            )}
-            <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
-              {showList ? 'Preview' : 'List'}
-            </button>
+            </div>
             <button className="review-close" onClick={onClose} aria-label="Close" title="Close (Esc)">✕</button>
           </div>
         </div>
@@ -506,7 +556,7 @@ export default function GroupReview({
                 Keep · delete {dupSiblings.length - 1} near-dup{dupSiblings.length - 1 > 1 ? 's' : ''}
               </button>
             )}
-            <DecideButtons item={cur} onDecision={onDecision} />
+            <DecideButtons item={cur} onDecision={decide} />
           </div>
         </div>
       </div>
@@ -516,7 +566,7 @@ export default function GroupReview({
           items={view}
           index={sel}
           setIndex={lbSetIndex}
-          onDecision={onDecision}
+          onDecision={decide}
           showStrip
         />
       )}
