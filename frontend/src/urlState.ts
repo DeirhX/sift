@@ -27,6 +27,7 @@ export interface Filters {
   portraitMax: number
   dupMode: string
   decision: string
+  trash: string
   tags: string[]
   people: string[]
   folder: string
@@ -56,6 +57,7 @@ export const DEFAULT_FILTERS: Filters = {
   portraitMin: 0, portraitMax: 1,
   dupMode: 'all',
   decision: 'all',
+  trash: 'active',
   tags: [],
   people: [],
   folder: '',
@@ -66,7 +68,7 @@ export const DEFAULT_FILTERS: Filters = {
 const NUM_KEYS = ['scoreMin', 'scoreMax', 'sharpMin', 'sharpMax', 'aesMin', 'aesMax',
   'portraitMin', 'portraitMax'] as const
 const LIST_KEYS = ['tags', 'people'] as const
-const STR_KEYS = ['sort', 'dir', 'dupMode', 'decision', 'folder', 'q'] as const
+const STR_KEYS = ['sort', 'dir', 'dupMode', 'decision', 'trash', 'folder', 'q'] as const
 const BOOL_KEYS = ['folderRecursive'] as const
 
 // Read filters + view out of a query string (e.g. window.location.search).
@@ -96,6 +98,12 @@ export function parseState(search: string): AppState {
     const v = p.get(k)
     if (v != null) f[k] = v !== 'false' && v !== '0'
   }
+
+  // Migrate legacy single-axis decision values to the two-axis model so old
+  // bookmarks (and a session open across the upgrade) don't land on the wrong
+  // view: 'trash' → the Trash lifecycle; 'notdel' (a removed convenience) → All.
+  if (filters.decision === 'trash') { filters.decision = 'all'; filters.trash = 'trashed' }
+  else if (filters.decision === 'notdel') { filters.decision = 'all' }
 
   const rawView = p.get('view')
   const view: View = rawView === 'groups' || rawView === 'scenes' ? rawView : 'grid'

@@ -69,11 +69,19 @@ def folder_sep(folder: str) -> str:
 
 def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
                 aes_min, aes_max, tags, people, q, decision,
+                trash="active",
                 portrait_min=0.0, portrait_max=1.0,
                 folder=None, folder_recursive=True):
     """Build the shared image-level WHERE clauses + params used by both
-    /api/images and /api/groups. Clauses reference alias `i` (images) and
-    `d` (decisions LEFT JOIN on content hash)."""
+    /api/images and /api/groups. Clauses reference alias `i` (images),
+    `d` (decisions LEFT JOIN on content hash) and `tm` (trash_moves LEFT JOIN).
+
+    Filtering is two ORTHOGONAL axes (a photo has BOTH a verdict and a location):
+      `decision` — verdict partition: all | keep | del | unmarked
+      `trash`    — lifecycle: active (default, not trashed) | trashed | any
+    They compose freely, e.g. trash='trashed' + decision='keep' = keep-marked
+    files that are in Trash. (The old single control conflated these and, as a
+    bug, let 'keep' leak trashed rows; both are fixed by the split.)"""
     where = ["i.combined BETWEEN ? AND ?",
              "i.sharpness BETWEEN ? AND ?"]
     params: list = [score_min, score_max, sharp_min, sharp_max]
@@ -116,24 +124,22 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
             where.append(f"i.id IN (SELECT image_id FROM faces WHERE cluster_id IN ({ph}))")
             params += cids
 
+    # Decision axis — a partition of the library by verdict. 'all' adds nothing.
     if decision == "keep":
         where.append("d.decision = 'keep'")
     elif decision == "del":
         where.append("d.decision = 'del'")
-        where.append("tm.id IS NULL")
-    elif decision == "trash":
-        where.append("tm.state = 'trashed'")
-    elif decision == "unmarked":
+    elif decision in ("unmarked", "new"):
         where.append("d.decision IS NULL")
-        where.append("tm.id IS NULL")
-    elif decision == "notdel":
-        # "Hide deletions": everything still in the running (kept + undecided).
-        # Lets the user whittle a scene/grid down to keepers as they cull.
-        where.append("(d.decision IS NULL OR d.decision != 'del')")
-        where.append("tm.id IS NULL")
-    else:
-        # Normal views show the active library. Trash is recoverable but should
-        # not keep appearing in the grid/groups like a zombie JPEG.
+
+    # Lifecycle axis — independent of the verdict. Default hides Trash so the grid
+    # isn't haunted by recoverable JPEGs; 'trashed' shows only Trash; 'any' spans
+    # both (used by nothing yet, but keeps the axis honest).
+    if trash == "trashed":
+        where.append("tm.state = 'trashed'")
+    elif trash == "any":
+        pass
+    else:  # 'active'
         where.append("tm.id IS NULL")
 
     if q:

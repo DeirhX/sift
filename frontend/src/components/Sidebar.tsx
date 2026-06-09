@@ -110,6 +110,9 @@ export default function Sidebar(
         </select>
       </div>
 
+      {/* Two orthogonal axes, not one conflated list. Decision is the verdict
+          partition (All ⊃ Keep|Del|New); Show is the file lifecycle (the active
+          library vs Trash). They compose: e.g. Show=Trash + Decision=Del. */}
       <div className="filter-group">
         <label className="group-label">Decision</label>
         <Seg
@@ -118,11 +121,21 @@ export default function Sidebar(
             { v: 'all', label: 'All' },
             { v: 'keep', label: 'Keep' },
             { v: 'del', label: 'Del' },
-            { v: 'trash', label: 'Trash' },
             { v: 'unmarked', label: 'New' },
-            { v: 'notdel', label: 'Hide del' },
           ]}
           onChange={(v) => updateFilter({ decision: v })}
+        />
+      </div>
+
+      <div className="filter-group">
+        <label className="group-label">Show</label>
+        <Seg
+          value={filters.trash}
+          options={[
+            { v: 'active', label: 'Library' },
+            { v: 'trashed', label: 'Trash' },
+          ]}
+          onChange={(v) => updateFilter({ trash: v })}
         />
       </div>
 

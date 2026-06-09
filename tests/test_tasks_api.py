@@ -39,7 +39,7 @@ def test_apply_task_moves_files(real_library):
     assert done["result"]["moved"] == 1
     assert (env.lib / "_trash" / "y.jpg").exists()
     assert not (env.lib / "y.jpg").exists()
-    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    trash_items = items_by_name(env.client, "?limit=50&trash=trashed")
     assert Path(trash_items["y.jpg"]["path"]) == env.lib / "_trash" / "y.jpg"
 
 
@@ -71,7 +71,7 @@ def test_trash_task_can_move_one_exact_duplicate_copy(real_library):
     assert done["result"]["moved"] == 1
     assert (env.lib / "copy-a.jpg").exists()
     assert not (env.lib / "copy-b.jpg").exists()
-    trash_items = items_by_name(env.client, "?limit=50&decision=trash")
+    trash_items = items_by_name(env.client, "?limit=50&trash=trashed")
     assert list(trash_items) == ["copy-b.jpg"]
 
 

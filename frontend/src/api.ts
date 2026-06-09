@@ -6,7 +6,7 @@ import type {
   LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
   MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
   ApplyResponse, UndoResponse, TrashStatusResponse, TrashListResponse,
-  AnalyzeStatus, TaskSnapshot, TaskListResponse,
+  AnalyzeStatus, TaskSnapshot, TaskListResponse, RegroupResponse,
 } from './api/types'
 
 // Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
@@ -48,6 +48,7 @@ function appendFilters(p: URLSearchParams, filters: Filters): void {
   if (filters.portraitMin > 0) p.set('portrait_min', String(filters.portraitMin))
   if (filters.portraitMax < 1) p.set('portrait_max', String(filters.portraitMax))
   p.set('decision', filters.decision)
+  p.set('trash', filters.trash)
   if (filters.tags?.length) p.set('tags', filters.tags.join(','))
   if (filters.people?.length) p.set('people', filters.people.join(','))
   if (filters.folder) {
@@ -94,6 +95,23 @@ export function fetchScenes(
   p.set('order', order)
   appendFilters(p, filters)
   return jsonFetch<ScenesResponse>(`/api/scenes?${p.toString()}`)
+}
+
+// Re-segment scenes by a capture-time gap (the "scene granularity" knob). The
+// server rewrites scene_group in place and remembers the chosen gap in meta.
+export function regroupScenes(gap: number): Promise<RegroupResponse> {
+  return jsonFetch<RegroupResponse>('/api/scenes/regroup', jsonBody({ gap }))
+}
+
+// Pin several scenes into one. A manual merge that survives both the granularity
+// slider and a full re-analyze (it's stored by image content hash server-side).
+export function mergeScenes(sceneGroups: number[]): Promise<RegroupResponse> {
+  return jsonFetch<RegroupResponse>('/api/scenes/merge', jsonBody({ scene_groups: sceneGroups }))
+}
+
+// Release a manually merged scene back to automatic time-gap segmentation.
+export function unmergeScene(sceneGroup: number): Promise<RegroupResponse> {
+  return jsonFetch<RegroupResponse>('/api/scenes/unmerge', jsonBody({ scene_group: sceneGroup }))
 }
 
 // Fire-and-forget: optimistic UI owns rollback, so these don't await a result.

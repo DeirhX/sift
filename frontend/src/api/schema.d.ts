@@ -179,6 +179,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/scenes/regroup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Regroup Scenes
+         * @description Re-segment scenes by capture-time gap only (the 'scene granularity' knob).
+         *     Clamped to a sane range; recomputes scene_group in place and remembers the
+         *     chosen gap so the slider re-opens where the user left it.
+         */
+        post: operations["regroup_scenes_api_scenes_regroup_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/scenes/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge Scenes
+         * @description Pin two or more scenes into one (a manual merge that survives recuts and
+         *     re-analysis). Recomputes at the current gap and returns the new scene count.
+         */
+        post: operations["merge_scenes_api_scenes_merge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/scenes/unmerge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Unmerge Scene
+         * @description Drop the manual-merge pins touching a scene, returning it to automatic
+         *     time-gap segmentation.
+         */
+        post: operations["unmerge_scene_api_scenes_unmerge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/thumb/{image_id}": {
         parameters: {
             query?: never;
@@ -914,6 +978,11 @@ export interface components {
             /** Moved */
             moved: number;
         };
+        /** MergeScenesRequest */
+        MergeScenesRequest: {
+            /** Scene Groups */
+            scene_groups: number[];
+        };
         /** MetaResponse */
         MetaResponse: {
             /** Meta */
@@ -959,6 +1028,18 @@ export interface components {
             /** Amax */
             amax?: number | null;
         };
+        /** RegroupRequest */
+        RegroupRequest: {
+            /** Gap */
+            gap: number;
+        };
+        /** RegroupResponse */
+        RegroupResponse: {
+            /** Scene Groups */
+            scene_groups: number;
+            /** Gap */
+            gap: number;
+        };
         /** RootsResponse */
         RootsResponse: {
             /** Photo Roots */
@@ -974,6 +1055,11 @@ export interface components {
             match_count: number;
             /** Dup Sets */
             dup_sets: number;
+            /**
+             * Manual
+             * @default false
+             */
+            manual: boolean;
             /** Time Start */
             time_start?: number | null;
             /** Time End */
@@ -1089,6 +1175,11 @@ export interface components {
             restored: number;
             /** Skipped */
             skipped: number;
+        };
+        /** UnmergeSceneRequest */
+        UnmergeSceneRequest: {
+            /** Scene Group */
+            scene_group: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -1253,6 +1344,7 @@ export interface operations {
                 folder_recursive?: boolean;
                 dup_mode?: string;
                 decision?: string;
+                trash?: string;
                 q?: string | null;
             };
             header?: never;
@@ -1300,6 +1392,7 @@ export interface operations {
                 folder?: string | null;
                 folder_recursive?: boolean;
                 decision?: string;
+                trash?: string;
                 q?: string | null;
             };
             header?: never;
@@ -1347,6 +1440,7 @@ export interface operations {
                 folder?: string | null;
                 folder_recursive?: boolean;
                 decision?: string;
+                trash?: string;
                 q?: string | null;
             };
             header?: never;
@@ -1362,6 +1456,105 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScenesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    regroup_scenes_api_scenes_regroup_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegroupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    merge_scenes_api_scenes_merge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeScenesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegroupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unmerge_scene_api_scenes_unmerge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UnmergeSceneRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegroupResponse"];
                 };
             };
             /** @description Validation Error */

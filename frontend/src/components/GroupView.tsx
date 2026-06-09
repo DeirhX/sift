@@ -1,12 +1,14 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { fetchTasks, startTask } from '../api'
-import { hideDelContainers } from '../format'
-import { useInfiniteScroll } from '../hooks/useInfiniteScroll'
-import { useGridKeyboardNav } from '../hooks/useGridKeyboardNav'
 import GroupPile from './GroupPile'
 import TaskPanel from './TaskPanel'
+import WindowedPileGrid from './WindowedPileGrid'
 import type { GroupsResponse, TaskSnapshot } from '../api/types'
+
+// Reserved height below each square stack: one quality-pill / decision-count
+// row. Keeps pile cells uniform so the grid can window by row.
+const GROUP_META_H = 44
 
 // Minimal slice of the useInfiniteQuery result this view consumes (decoupled
 // from react-query's generics; the real result is structurally assignable).
@@ -22,20 +24,18 @@ interface GroupViewProps {
   query: GroupViewQuery
   onOpen: (dupGroup: number) => void
   reviewOpen?: boolean
-  hideDel?: boolean
   onTaskDone?: (task: TaskSnapshot) => void
 }
 
-// Overview of duplicate groups as stacked photo piles. Arrow keys move a
-// keyboard focus across piles; Enter / click asks the app to open the review
-// overlay (`onOpen(dup_group)`). The overlay itself lives at the app root so
-// it is URL-driven / Back-navigable. `reviewOpen` lets the app pause grid keys
-// while that overlay is up (the overlay handles its own keyboard).
-export default function GroupView({ query, onOpen, reviewOpen = false, hideDel = false, onTaskDone }: GroupViewProps) {
+// Overview of duplicate groups as stacked photo piles, rendered through the
+// windowed pile grid so only on-screen piles mount. Arrow keys move a keyboard
+// focus; Enter / click opens the review overlay (`onOpen(dup_group)`), which
+// lives at the app root so it is URL-driven / Back-navigable. `reviewOpen` lets
+// the app pause grid keys while that overlay is up.
+export default function GroupView({ query, onOpen, reviewOpen = false, onTaskDone }: GroupViewProps) {
   const [culling, setCulling] = useState(false)
   const [taskId, setTaskId] = useState<string | null>(null)
   const [taskError, setTaskError] = useState<string | null>(null)
-  const sentinelRef = useRef<HTMLDivElement>(null)
   const qc = useQueryClient()
 
   useEffect(() => {
@@ -73,42 +73,15 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
     onTaskDone?.(task)
   }
 
-  const rawGroups = query.data?.pages.flatMap((p) => p.groups) ?? []
-  const groups = hideDelContainers(rawGroups, hideDel ? 'notdel' : '')
+  const groups = query.data?.pages.flatMap((p) => p.groups) ?? []
 
-  // Infinite scroll via an IntersectionObserver sentinel at the list end.
-  useInfiniteScroll(sentinelRef, query)
-
-  // Open the review overlay for a pile by index (Enter via the hook, click via
-  // GroupPile). The click path also takes keyboard focus first.
   const activate = useCallback((idx: number) => {
     const g = groups[idx]
     if (g) onOpen(g.dup_group)
   }, [groups, onOpen])
 
-  const { focusIdx, setFocusIdx, scrollRef, pileGridRef, onKeyDown } = useGridKeyboardNav({
-    count: groups.length,
-    onActivate: activate,
-    hasNextPage: query.hasNextPage,
-    isFetchingNextPage: query.isFetchingNextPage,
-    fetchNextPage: query.fetchNextPage,
-    enabled: !reviewOpen,
-  })
-
-  const isFetchingNextPage = query.isFetchingNextPage
-
-  if (query.isLoading) return <div className="spinner">Loading groups…</div>
-  if (groups.length === 0) return <div className="empty">No duplicate groups found.</div>
-
-  return (
-    <div
-      className="grid-scroll"
-      ref={scrollRef}
-      tabIndex={0}
-      role="grid"
-      aria-label="Duplicate groups — arrow keys to move, Enter to open, Esc to go back"
-      onKeyDown={onKeyDown}
-    >
+  const header = (
+    <>
       <div className="group-actionbar">
         <button className="btn primary" disabled={culling} onClick={doAutocull}>
           {culling ? 'Culling…' : 'Auto-cull all groups · keep best, delete rest'}
@@ -117,18 +90,31 @@ export default function GroupView({ query, onOpen, reviewOpen = false, hideDel =
       </div>
       {taskError && <div className="af-error">{taskError}</div>}
       <TaskPanel taskId={taskId} title="Auto-cull task" compact onDone={taskDone} />
-      <div className="pile-grid" ref={pileGridRef}>
-        {groups.map((g, i) => (
-          <GroupPile
-            key={g.dup_group}
-            group={g}
-            focused={i === focusIdx}
-            onOpen={() => { setFocusIdx(i); activate(i) }}
-          />
-        ))}
-      </div>
-      <div ref={sentinelRef} />
-      {isFetchingNextPage && <div className="spinner">Loading more…</div>}
-    </div>
+    </>
+  )
+
+  return (
+    <WindowedPileGrid
+      items={groups}
+      getKey={(g) => g.dup_group}
+      metaHeight={GROUP_META_H}
+      hasNextPage={query.hasNextPage}
+      isFetchingNextPage={query.isFetchingNextPage}
+      fetchNextPage={query.fetchNextPage}
+      onActivate={activate}
+      enabled={!reviewOpen}
+      header={header}
+      ariaLabel="Duplicate groups — arrow keys to move, Enter to open, Esc to go back"
+      emptyLabel="No duplicate groups found."
+      loading={query.isLoading}
+      loadingLabel="Loading groups…"
+      renderCell={(g, i, focused) => (
+        <GroupPile
+          group={g}
+          focused={focused}
+          onOpen={() => activate(i)}
+        />
+      )}
+    />
   )
 }

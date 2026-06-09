@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask, regroupScenes, mergeScenes, unmergeScene } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
-import { applyDecisionHide, applyTrashHide, hideDelInReview } from './format'
+import { applyTrashHide } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
 import { useDecisions } from './hooks/useDecisions'
 import { useTaskInvalidation } from './hooks/useTaskInvalidation'
@@ -18,6 +18,7 @@ import ScenePanel from './components/ScenePanel'
 import Lightbox from './components/Lightbox'
 import AnalyzePanel from './components/AnalyzePanel'
 import SettingsPanel from './components/SettingsPanel'
+import SceneGranularity from './components/SceneGranularity'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -107,15 +108,12 @@ export default function App() {
     enabled: view === 'scenes',
   })
 
-  // "Hide deletions" (decision='notdel') also hides photos you mark del *live*:
-  // the server already excludes them on fetch, but optimistic patches don't
-  // refetch, so a freshly-deleted photo is dropped here on the next render.
-  // applyTrashHide does the same for *trashed* photos (optimistically patched the
-  // instant a trash starts) — except on the Trash filter, which is there to show
-  // them.
+  // Grid drops trashed photos (optimistically patched the instant a trash starts)
+  // at render time — except on the Trash filter (trash='trashed'), which exists to
+  // show them. The Decision axis is handled server-side; live-culling of del marks
+  // happens inside the review overlay, not the grid.
   const items = applyTrashHide(
-    applyDecisionHide(images.data?.pages.flatMap((p) => p.items) ?? [], filters.decision),
-    filters.decision === 'trash')
+    images.data?.pages.flatMap((p) => p.items) ?? [], filters.trash === 'trashed')
   const total = images.data?.pages[0]?.total ?? 0
   const groupTotal = groups.data?.pages[0]?.total ?? 0
   const sceneTotal = scenes.data?.pages[0]?.total ?? 0
@@ -124,15 +122,14 @@ export default function App() {
 
   // Resolve the open overlay's backing record from the loaded query pages. May
   // be null right after a deep-link/reload until the relevant page arrives;
-  // the overlay simply waits rather than rendering against missing data.
-  // hideDelInReview hides del members in the open review too (so culling shrinks
-  // the strip live), falling back to the unfiltered set if hiding would empty it.
-  const openGroupObj = hideDelInReview(nav?.kind === 'group'
+  // the overlay simply waits rather than rendering against missing data. The
+  // review itself live-hides culled/trashed members (with reveal toggles).
+  const openGroupObj = nav?.kind === 'group'
     ? (groups.data?.pages.flatMap((p) => p.groups) ?? []).find((g) => g.dup_group === nav.refId) ?? null
-    : null, filters.decision)
-  const openSceneObj = hideDelInReview(nav?.kind === 'scene'
+    : null
+  const openSceneObj = nav?.kind === 'scene'
     ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) ?? null
-    : null, filters.decision)
+    : null
 
   // Adapt the index-based Lightbox (grid) to id-based nav: each move pushes a
   // history step; closing unwinds the overlay.
@@ -167,6 +164,28 @@ export default function App() {
     }
     invalidateAfterTask(snap)
   }, [invalidateAfterTask, patchTrashed])
+
+  // Scene granularity knob: re-segment scenes by capture-time gap, then refetch
+  // scenes (new grouping) and meta (new scene count + remembered gap).
+  const onRegroupScenes = useCallback(async (gap: number) => {
+    await regroupScenes(gap)
+    qc.invalidateQueries({ queryKey: ['scenes'] })
+    qc.invalidateQueries({ queryKey: ['meta'] })
+  }, [qc])
+
+  // Manual scene merge / unmerge: pin (or release) scenes, then refetch the
+  // re-segmented scenes and the scene count.
+  const onMergeScenes = useCallback(async (sceneGroups: number[]) => {
+    await mergeScenes(sceneGroups)
+    qc.invalidateQueries({ queryKey: ['scenes'] })
+    qc.invalidateQueries({ queryKey: ['meta'] })
+  }, [qc])
+
+  const onUnmergeScene = useCallback(async (sceneGroup: number) => {
+    await unmergeScene(sceneGroup)
+    qc.invalidateQueries({ queryKey: ['scenes'] })
+    qc.invalidateQueries({ queryKey: ['meta'] })
+  }, [qc])
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
@@ -220,6 +239,13 @@ export default function App() {
           <span className="result-count">
             {headerCount.toLocaleString()} {headerLabel}
           </span>
+          {view === 'scenes' && (
+            <SceneGranularity
+              gap={Number(meta.data?.meta?.scene_gap) || 120}
+              sceneCount={sceneTotal}
+              onCommit={onRegroupScenes}
+            />
+          )}
           <div className="spacer" />
           {activeTask && (
             <button
@@ -276,16 +302,16 @@ export default function App() {
             query={scenes}
             onOpen={openScene}
             reviewOpen={nav?.kind === 'scene'}
-            hideDel={filters.decision === 'notdel'}
             activeTags={filters.tags}
             onToggleTag={(t) => toggleInList('tags', t)}
+            onMerge={onMergeScenes}
+            onUnmerge={onUnmergeScene}
           />
         ) : (
           <GroupView
             query={groups}
             onOpen={openGroup}
             reviewOpen={nav?.kind === 'group'}
-            hideDel={filters.decision === 'notdel'}
             onTaskDone={invalidateAfterTask}
           />
         )}
@@ -310,7 +336,8 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
-          defaultShowDeleted={filters.decision === 'trash'}
+          defaultShowDeleted={filters.trash === 'trashed'}
+          defaultShowCulled={filters.decision === 'del'}
         />
       )}
 
@@ -325,7 +352,8 @@ export default function App() {
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
           onApplyDeletes={applyDeletes}
-          defaultShowDeleted={filters.decision === 'trash'}
+          defaultShowDeleted={filters.trash === 'trashed'}
+          defaultShowCulled={filters.decision === 'del'}
         />
       )}
 

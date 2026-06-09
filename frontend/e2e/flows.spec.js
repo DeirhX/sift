@@ -137,8 +137,10 @@ test.describe('group review', () => {
     const panel = page.locator('.review-panel')
     await expect(panel).toBeVisible()
 
-    // Bulk: keep best, delete the rest -> strip shows both flag types.
+    // Bulk: keep best, delete the rest. Del'd members are live-culled from the
+    // strip the instant they're marked, so reveal them to verify both flag types.
     await panel.getByRole('button', { name: 'Keep best · delete rest' }).click()
+    await panel.getByRole('button', { name: /Show culled/ }).click()
     await expect(panel.locator('.strip-flag.keep')).toBeVisible()
     await expect(panel.locator('.strip-flag.del')).toBeVisible()
 

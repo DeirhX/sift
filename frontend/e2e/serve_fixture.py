@@ -69,9 +69,25 @@ def seed():
          "scene_group": None, "capture_time": 99999.0,
          "imgw": 80, "imgh": 60, "caption": "a blurry shot", "tags": [], "faces": []},
     ]
+    # Optional scale seed (E2E_SCALE=N): append N single-photo scenes so the
+    # pile overview has hundreds of piles. This is what the windowing e2e scrolls
+    # through to prove the DOM stays bounded in a real browser. Distinct colours
+    # keep content hashes unique (no dedup collapse); low scores keep them below
+    # the base fixtures so the existing sort-order tests are unaffected.
+    scale = int(os.environ.get("E2E_SCALE", "0"))
+    for i in range(scale):
+        color = (i % 256, (i * 7) % 256, (i * 13) % 256)
+        images.append(
+            {"path": _img(f"filler_{i:04d}.jpg", color, (16, 16)),
+             "filename": f"filler_{i:04d}.jpg",
+             "combined": 0.05, "sharpness": 0.05, "para_aesthetic": 0.05,
+             "dup_group": None, "scene_group": 100 + i, "capture_time": 20000.0 + i * 60.0,
+             "imgw": 16, "imgh": 16, "caption": f"filler scene {i}",
+             "tags": [f"f{i % 8}"], "faces": []})
+
     report = {"folder": str(LIB), "backend": "para", "caption_model": "blip",
               "face_model": "mtcnn+vggface2", "scene_model": "exif+clip-b32",
-              "duplicate_groups": 1, "scene_groups": 2, "images": images}
+              "duplicate_groups": 1, "scene_groups": 2 + scale, "images": images}
     FIXROOT.mkdir(parents=True, exist_ok=True)
     # Start from a clean DB every run: build_db deliberately *preserves*
     # decisions across rebuilds, so a stale photos.db would leak verdicts from
@@ -80,8 +96,10 @@ def seed():
         leftover.unlink(missing_ok=True)
     report_path = FIXROOT / "audit_report.json"
     report_path.write_text(json.dumps(report), encoding="utf-8")
+    # Skip thumbnail generation in scale mode: the windowing test counts DOM
+    # nodes, not pixels, so hundreds of thumbnails would only slow startup.
     build_db.build(report_path, DB, THUMBS, thumb_size=400, thumb_quality=80,
-                   workers=4, skip_thumbs=False, force_thumbs=True, prune=True)
+                   workers=4, skip_thumbs=scale > 0, force_thumbs=scale == 0, prune=True)
 
 
 def main():
