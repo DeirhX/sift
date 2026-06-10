@@ -225,9 +225,13 @@ export default function GroupReview({
   // vs. the subset passing the active filters. Read from the full member list so
   // the header's "N of M" matches the pile exactly, no matter which members the
   // strip is currently hiding. The strip still dims non-matching members (see
-  // renderThumb) so the full set stays visible for context.
-  const memberTotal = group.items.length
-  const memberMatch = group.items.filter((it) => it.matches !== false).length
+  // renderThumb) so the full set stays visible for context. Trashed members drop
+  // out the instant they're culled (optimistic trash_state patch) so the count
+  // reflects a "Delete N now" before the server refetch lands — unless we're
+  // explicitly showing deleted (the Trash view), where they're the point.
+  const counted = showDeleted ? group.items : group.items.filter((it) => !isDeleted(it))
+  const memberTotal = counted.length
+  const memberMatch = counted.filter((it) => it.matches !== false).length
   const partial = memberMatch < memberTotal
   // Same "N of M" for the flat (ungrouped) strip, counted over what it renders.
   const viewMatch = view.filter((it) => it.matches !== false).length

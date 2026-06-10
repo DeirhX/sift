@@ -25,6 +25,8 @@ interface SceneViewProps {
   onToggleTag?: (tag: string) => void
   onMerge?: (sceneGroups: number[]) => void | Promise<void>
   onUnmerge?: (sceneGroup: number) => void | Promise<void>
+  // Trash filter active → piles count/show trashed members (passed to ScenePile).
+  showTrashed?: boolean
 }
 
 // Overview of rough scenes as stacked photo piles, rendered through the
@@ -34,7 +36,7 @@ interface SceneViewProps {
 // Back-navigable. `reviewOpen` pauses grid keys while that panel is up.
 export default function SceneView(
   { query, onOpen, reviewOpen = false, activeTags = [], onToggleTag,
-    onMerge, onUnmerge }: SceneViewProps,
+    onMerge, onUnmerge, showTrashed = false }: SceneViewProps,
 ) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [busy, setBusy] = useState(false)
@@ -126,6 +128,7 @@ export default function SceneView(
           onToggleTag={onToggleTag}
           selected={selected.has(s.scene_group)}
           onToggleSelect={() => toggleSelect(s.scene_group)}
+          showTrashed={showTrashed}
         />
       )}
     />

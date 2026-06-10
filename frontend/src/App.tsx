@@ -306,6 +306,7 @@ export default function App() {
             onToggleTag={(t) => toggleInList('tags', t)}
             onMerge={onMergeScenes}
             onUnmerge={onUnmergeScene}
+            showTrashed={filters.trash.includes('trashed') || filters.trash.includes('any')}
           />
         ) : (
           <GroupView
