@@ -2,11 +2,14 @@
 Command-line entry point for the photo audit pipeline.
 
 Usage:
-  sift analyze <folder> [options]
+  sift analyze <folder> [<folder> ...] [options]
+
+Multiple folders are scanned as one union, so duplicate/scene/face grouping stays
+global across the whole catalog. The report lists every source under "folders".
 
 Options:
   --recurse             Include subfolders (default: top-level only)
-  --out <path>          JSON report output path (default: <folder>/audit_report.json)
+  --out <path>          JSON report output path (default: <first folder>/audit_report.json)
   --dup-threshold <n>   Perceptual-hash Hamming distance for duplicate grouping (default: 6)
   --backend {clip-iqa,para,both}
                         Aesthetic scoring backend (default: para)
@@ -88,7 +91,11 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'} |
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("folder")
+    # One or more source folders. They are scanned as a single UNION so duplicate
+    # grouping, scene grouping and face clustering stay global across the whole
+    # catalog (independent per-folder runs would assign colliding group/cluster
+    # ids and miss cross-folder dupes/people).
+    ap.add_argument("folder", nargs="+", metavar="FOLDER")
     ap.add_argument("--recurse",        action="store_true")
     ap.add_argument("--out",            default=None)
     ap.add_argument("--dup-threshold",  type=int,   default=6)
@@ -204,13 +211,30 @@ def main():
         pct = lo + (hi - lo) * max(0.0, min(1.0, frac))
         emit_progress(phase, pct, message)
 
-    folder = Path(args.folder)
-    if not folder.exists():
-        print(f"Error: {folder} does not exist"); sys.exit(1)
+    folders = [Path(f) for f in args.folder]
+    missing = [f for f in folders if not f.exists()]
+    if missing:
+        print("Error: folder(s) do not exist: "
+              + ", ".join(str(f) for f in missing)); sys.exit(1)
 
-    emit_progress("scan", 0.01, f"Scanning {folder.name}…")
-    paths = _discover_image_paths(folder, args.recurse)
-    print(f"Found {len(paths)} images in {folder}")
+    # Scan every folder and UNION the results, de-duplicating by resolved path so
+    # overlapping/nested onboarded folders don't score the same file twice. Order
+    # is preserved (first folder's files first) for stable, diffable reports.
+    emit_progress("scan", 0.01,
+                  f"Scanning {len(folders)} folder(s)…")
+    paths = []
+    seen: set = set()
+    for f in folders:
+        for p in _discover_image_paths(f, args.recurse):
+            try:
+                key = p.resolve()
+            except OSError:
+                key = p
+            if key not in seen:
+                seen.add(key)
+                paths.append(p)
+    where = folders[0].name if len(folders) == 1 else f"{len(folders)} folders"
+    print(f"Found {len(paths)} images in {where}")
     emit_progress("scan", 0.02, f"Found {len(paths)} images", 0, len(paths))
     if not paths:
         sys.exit(0)
@@ -219,7 +243,7 @@ def main():
     use_para     = not args.no_clip and args.backend in ("para",     "both")
     use_scenes   = not args.no_scenes
 
-    out_path = Path(args.out) if args.out else folder / "audit_report.json"
+    out_path = Path(args.out) if args.out else folders[0] / "audit_report.json"
 
     # ── Incremental cache ────────────────────────────────────────────────────
     # The previous report doubles as the cache: reuse a record verbatim when the
@@ -593,7 +617,10 @@ def main():
             if args.faces else 0
         )
         json.dump({
-            "folder":           str(folder),
+            # `folders` is the source of truth (the full onboarded set); `folder`
+            # is kept as the first one for older readers and single-folder paths.
+            "folder":           str(folders[0]),
+            "folders":          [str(f) for f in folders],
             "backend":          "none" if args.no_clip else args.backend,
             "caption_model":    "blip-base+qwen3vl-8b-nf4" if args.caption else None,
             "face_model":       "mtcnn+vggface2" if args.faces else None,

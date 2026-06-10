@@ -107,26 +107,56 @@ export default function ApplyPanel({ onTaskDone }: ApplyPanelProps) {
   return (
     <div className="apply-panel">
       <label className="group-label">Trash</label>
-      <button
-        className="btn full danger"
-        disabled={busy || !s.pending}
-        onClick={doApply}
-      >
-        {s.pending ? `Move ${s.pending} to Trash` : 'Nothing marked Del'}
-      </button>
-      {s.applied > 0 && (
-        <button className="btn full" disabled={busy} onClick={doUndo}>
-          Restore ({s.applied} trashed)
+
+      {/* Stage 1 — photos you marked Del, still sitting in their folders. The
+          recoverable, "main" action, so it gets the primary (not danger) style. */}
+      <div className="trash-stage">
+        <div className="trash-stage-head">
+          <span className="trash-stage-name">Marked for deletion</span>
+          <span className="trash-stage-count">{s.pending}</span>
+        </div>
+        <button
+          className="btn full primary"
+          disabled={busy || !s.pending}
+          onClick={doApply}
+          title={`Move the ${s.pending} photo(s) you marked Del into the _trash/ folder. Recoverable — nothing is deleted from disk yet.`}
+        >
+          {s.pending ? `Move ${s.pending} to Trash →` : 'Nothing marked Del'}
         </button>
-      )}
+      </div>
+
+      {/* Stage 2 — files now in _trash/: put them back, or delete for good.
+          Only "Empty Trash" is irreversible, so it alone wears the danger style. */}
       {s.applied > 0 && (
-        <button className="btn full danger" disabled={busy} onClick={doEmptyTrash}>
-          Empty Trash ({s.applied})
-        </button>
+        <div className="trash-stage">
+          <div className="trash-stage-head">
+            <span className="trash-stage-name">In Trash</span>
+            <span className="trash-stage-count">{s.applied}</span>
+          </div>
+          <button
+            className="btn full"
+            disabled={busy}
+            onClick={doUndo}
+            title="Move the trashed files back to their original locations."
+          >
+            ← Restore {s.applied}
+          </button>
+          <button
+            className="btn full danger"
+            disabled={busy}
+            onClick={doEmptyTrash}
+            title="Permanently delete the trashed files from disk. This cannot be undone."
+          >
+            Empty Trash — delete {s.applied} forever
+          </button>
+        </div>
       )}
+
       {msg && <div className="apply-msg">{msg}</div>}
       <TaskPanel taskId={taskId} title="Trash task" compact onDone={taskDone} />
-      <div className="apply-hint">Files move to <code>_trash/</code>; emptying Trash deletes them.</div>
+      <div className="apply-hint">
+        Marked photos move to <code>_trash/</code> (recoverable). <b>Empty Trash</b> deletes them permanently.
+      </div>
     </div>
   )
 }

@@ -26,8 +26,8 @@ interface PhotoCardProps {
 //
 // Clicking a face box opens an inline editor (overlaying the meta block) to
 // reassign the face to another person, spin up a new person, or delete a
-// false-positive box. These are pure DB edits and last until the next
-// build_db ingest.
+// false-positive box. These are pure DB edits, persisted as face overrides and
+// name anchors that survive the next build_db ingest.
 export default function PhotoCard(
   { item, colWidth, thumbH, onOpen, onDecision, personName, people = [], onFaceChange }: PhotoCardProps,
 ) {

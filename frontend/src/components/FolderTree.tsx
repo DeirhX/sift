@@ -111,9 +111,12 @@ interface FolderTreeProps {
   folders?: FolderFacet[]
   filters: Filters
   updateFilter: UpdateFilter
+  // When rendered inside a collapsible Section the title is supplied by the
+  // section header, so the component drops its own "Folders" label.
+  embedded?: boolean
 }
 
-export default function FolderTree({ folders, filters, updateFilter }: FolderTreeProps) {
+export default function FolderTree({ folders, filters, updateFilter, embedded = false }: FolderTreeProps) {
   const forest = useMemo<DisplayNode[]>(() => {
     if (!folders?.length) return []
     const root = buildTree(folders)
@@ -148,12 +151,20 @@ export default function FolderTree({ folders, filters, updateFilter }: FolderTre
 
   return (
     <div className="filter-group">
-      <label className="group-label">
-        Folders
-        {filters.folder && (
-          <button className="link-btn" onClick={() => updateFilter({ folder: '' })}>clear</button>
-        )}
-      </label>
+      {embedded ? (
+        filters.folder && (
+          <div className="section-tools">
+            <button className="link-btn" onClick={() => updateFilter({ folder: '' })}>clear</button>
+          </div>
+        )
+      ) : (
+        <label className="group-label">
+          Folders
+          {filters.folder && (
+            <button className="link-btn" onClick={() => updateFilter({ folder: '' })}>clear</button>
+          )}
+        </label>
+      )}
 
       <ul className="folder-tree">
         {forest.map((n) => (

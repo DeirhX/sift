@@ -55,6 +55,46 @@ def test_add_root_requires_path(env, clean_roots):
     assert env.client.post("/api/settings/roots", json={}).status_code == 400
 
 
+# ── /api/settings/folders (the catalog's onboarded source set) ───────────────
+
+def test_add_list_delete_library_folder(env, clean_roots, tmp_path):
+    d = tmp_path / "lib"
+    d.mkdir()
+    resolved = str(d.resolve())
+
+    out = env.client.post("/api/settings/folders", json={"path": str(d)}).json()
+    assert out["folders"] == [resolved]
+    assert env.client.get("/api/settings/folders").json()["folders"] == [resolved]
+
+    # Onboarding also registers it as a reveal root, for convenience.
+    assert resolved in env.client.get("/api/settings/roots").json()["photo_roots"]
+
+    # Re-adding the same folder conflicts.
+    assert env.client.post("/api/settings/folders", json={"path": str(d)}).status_code == 409
+
+    env.client.request("DELETE", "/api/settings/folders", json={"path": resolved})
+    assert env.client.get("/api/settings/folders").json()["folders"] == []
+
+
+def test_add_library_folder_rejects_nonexistent(env, clean_roots, tmp_path):
+    r = env.client.post("/api/settings/folders", json={"path": str(tmp_path / "nope")})
+    assert r.status_code == 400
+
+
+def test_add_library_folder_requires_path(env, clean_roots):
+    assert env.client.post("/api/settings/folders", json={}).status_code == 400
+
+
+def test_second_folder_keeps_first(env, clean_roots, tmp_path):
+    """Adding a second folder must never drop the first (the table → multi-folder
+    transition is the classic place to lose the original)."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    env.client.post("/api/settings/folders", json={"path": str(a)})
+    out = env.client.post("/api/settings/folders", json={"path": str(b)}).json()
+    assert set(out["folders"]) == {str(a.resolve()), str(b.resolve())}
+
+
 # ── /api/reveal (guardrail only; OS call stubbed) ────────────────────────────
 
 def test_reveal_without_root_forbidden(env, clean_roots, tmp_path):

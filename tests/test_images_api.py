@@ -31,13 +31,17 @@ def test_aesthetic_max_excludes_high(env):
     assert names(env.client, "?limit=50&aes_max=0.5") == {"c.jpg"}
 
 
-def test_aesthetic_filter_keeps_null_rows(make_env):
-    # Rows without an aesthetic score must not be filtered out by an aes range.
+def test_score_range_excludes_null_rows(make_env):
+    # Uniform NULL rule across all four sliders: a NON-default range keeps only
+    # rows that HAVE that score, while a full [0,1] range never drops unscored
+    # rows. Verified here on the aesthetic slider.
     rep = default_report()
     rep["images"][0]["para_aesthetic"] = None       # a.jpg has no aesthetic
     env = make_env(rep)
-    # aes_max=0.1 would drop b/c (have scores) but keep a (NULL passes).
-    assert "a.jpg" in names(env.client, "?limit=50&aes_max=0.1")
+    # Non-default aes range drops the unscored a.jpg (it has no score to be in range)…
+    assert "a.jpg" not in names(env.client, "?limit=50&aes_max=0.1")
+    # …but the default full range keeps it.
+    assert "a.jpg" in names(env.client, "?limit=50")
 
 
 # ── people + tags ────────────────────────────────────────────────────────────
@@ -58,6 +62,9 @@ def test_tags_filter(make_env):
     env = make_env(rep)
     assert names(env.client, "?limit=50&tags=sunset") == {"a.jpg"}
     assert names(env.client, "?limit=50&tags=beach") == {"a.jpg", "b.jpg"}
+    # Multiple tags are AND'd: only photos carrying EVERY selected tag match.
+    assert names(env.client, "?limit=50&tags=sunset,beach") == {"a.jpg"}
+    assert names(env.client, "?limit=50&tags=beach,sunset") == {"a.jpg"}
 
 
 # ── decision filter ──────────────────────────────────────────────────────────
@@ -71,6 +78,22 @@ def test_decision_filter(env):
     assert names(env.client, "?limit=50&decision=unmarked") == {"c.jpg"}
     # 'all' (default) spans every verdict in the active library.
     assert names(env.client, "?limit=50&decision=all") == {"a.jpg", "b.jpg", "c.jpg"}
+
+
+def test_decision_filter_multi_select(env):
+    by = items_by_name(env.client)
+    env.client.post("/api/decisions", json={"hash": by["a.jpg"]["hash"], "decision": "keep"})
+    env.client.post("/api/decisions", json={"hash": by["b.jpg"]["hash"], "decision": "del"})
+    # Verdicts OR together.
+    assert names(env.client, "?limit=50&decision=keep,del") == {"a.jpg", "b.jpg"}
+    assert names(env.client, "?limit=50&decision=keep,none") == {"a.jpg", "c.jpg"}
+    assert names(env.client, "?limit=50&decision=del,none") == {"b.jpg", "c.jpg"}
+    # 'none' is the new spelling of unmarked.
+    assert names(env.client, "?limit=50&decision=none") == {"c.jpg"}
+    # Selecting every verdict is the same as no constraint.
+    assert names(env.client, "?limit=50&decision=keep,del,none") == {"a.jpg", "b.jpg", "c.jpg"}
+    # An empty value is also "any".
+    assert names(env.client, "?limit=50&decision=") == {"a.jpg", "b.jpg", "c.jpg"}
 
 
 # ── dup_mode ─────────────────────────────────────────────────────────────────

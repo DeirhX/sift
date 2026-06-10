@@ -156,3 +156,79 @@ def test_create_base_schema_then_ensure_is_clean():
     photodb.ensure_schema(conn)
     cols = _cols(conn, "images")
     assert {"portrait", "content_hash"} <= cols
+
+
+# ── cluster-name anchors: IoU-tolerant re-binding ────────────────────────────
+
+def test_iou_full_overlap_is_one():
+    assert photodb._iou((0, 0, 10, 10), (0, 0, 10, 10)) == pytest.approx(1.0)
+
+
+def test_iou_disjoint_is_zero():
+    assert photodb._iou((0, 0, 10, 10), (20, 20, 30, 30)) == 0.0
+
+
+def test_resolve_anchor_rebinds_to_jittered_box_and_new_cluster_id():
+    # Rename anchored the name onto a face's exact box; on the next ingest the
+    # detector nudges that box a few pixels AND hands the person a new cluster
+    # id. The name must still re-bind via bbox overlap.
+    conn = sqlite3.connect(":memory:")
+    photodb.ensure_anchors(conn)
+    conn.execute("INSERT INTO cluster_name_anchors (hash, x1, y1, x2, y2, name) "
+                 "VALUES (?,?,?,?,?,?)", ("h1", 10.0, 10.0, 50.0, 50.0, "Bob"))
+    members = {7: [("h1", 12.0, 11.0, 52.0, 49.0)]}   # was cluster 0, jittered box
+    assert photodb.resolve_anchor_names(conn, members) == {7: "Bob"}
+
+
+def test_resolve_anchor_ignores_non_overlapping_face_in_same_photo():
+    # A different face in the same photo (no overlap) must not inherit the name.
+    conn = sqlite3.connect(":memory:")
+    photodb.ensure_anchors(conn)
+    conn.execute("INSERT INTO cluster_name_anchors (hash, x1, y1, x2, y2, name) "
+                 "VALUES (?,?,?,?,?,?)", ("h1", 10.0, 10.0, 50.0, 50.0, "Bob"))
+    members = {7: [("h1", 200.0, 200.0, 240.0, 240.0)]}
+    assert photodb.resolve_anchor_names(conn, members) == {}
+
+
+def test_set_then_resolve_survives_jitter_end_to_end():
+    # Exercises the real write path (set_cluster_name_anchors reads faces+images)
+    # plus the read path with a perturbed box under a fresh cluster id.
+    conn = sqlite3.connect(":memory:")
+    photodb.create_base_schema(conn)
+    photodb.ensure_schema(conn)
+    conn.execute("INSERT INTO images (id, path, filename, content_hash) "
+                 "VALUES (1, '/fake/a.jpg', 'a.jpg', 'h1')")
+    conn.execute("INSERT INTO faces (image_id, x1, y1, x2, y2, prob, cluster_id) "
+                 "VALUES (1, 10.0, 10.0, 50.0, 50.0, 0.99, 3)")
+    photodb.set_cluster_name_anchors(conn, 3, "Bob")
+    rebound = photodb.resolve_anchor_names(conn, {9: [("h1", 11.0, 9.0, 51.0, 50.0)]})
+    assert rebound == {9: "Bob"}
+
+
+def test_ensure_anchors_migrates_legacy_text_key_table():
+    # A DB built before the IoU change has a (hash, bbox, name) anchors table.
+    # ensure_anchors must drop it so the numeric-coord schema can be created,
+    # rather than leaving a table that the new queries can't read.
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        "CREATE TABLE cluster_name_anchors "
+        "(hash TEXT, bbox TEXT, name TEXT, PRIMARY KEY (hash, bbox));")
+    conn.execute("INSERT INTO cluster_name_anchors VALUES ('h1', '10,10,50,50', 'Bob')")
+    photodb.ensure_anchors(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(cluster_name_anchors)")}
+    assert {"x1", "y1", "x2", "y2"} <= cols and "bbox" not in cols
+    # Resolve no longer raises and finds nothing until names re-anchor.
+    assert photodb.resolve_anchor_names(conn, {0: [("h1", 10.0, 10.0, 50.0, 50.0)]}) == {}
+
+
+def test_set_with_falsy_name_clears_overlapping_anchor():
+    conn = sqlite3.connect(":memory:")
+    photodb.create_base_schema(conn)
+    photodb.ensure_schema(conn)
+    conn.execute("INSERT INTO images (id, path, filename, content_hash) "
+                 "VALUES (1, '/fake/a.jpg', 'a.jpg', 'h1')")
+    conn.execute("INSERT INTO faces (image_id, x1, y1, x2, y2, prob, cluster_id) "
+                 "VALUES (1, 10.0, 10.0, 50.0, 50.0, 0.99, 3)")
+    photodb.set_cluster_name_anchors(conn, 3, "Bob")
+    photodb.set_cluster_name_anchors(conn, 3, None)   # un-name the person
+    assert conn.execute("SELECT COUNT(*) FROM cluster_name_anchors").fetchone()[0] == 0

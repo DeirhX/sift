@@ -352,8 +352,13 @@ export default function App() {
           onDecision={setDecision}
           onDecisionsBulk={setDecisionsBulk}
           onApplyDeletes={applyDeletes}
-          defaultShowDeleted={filters.trash === 'trashed'}
-          defaultShowCulled={filters.decision === 'del'}
+          // The scene's member count tracks the active filters, so the panel opens
+          // showing every member that passes them — del-marked photos included
+          // (they're still in the library until trashed), so it agrees with the
+          // pile's count. "Hide culled" re-enables cull-as-you-go on demand;
+          // trashed photos surface only when the trash filter asks for them.
+          defaultShowDeleted={filters.trash.includes('trashed') || filters.trash.includes('any')}
+          defaultShowCulled
         />
       )}
 

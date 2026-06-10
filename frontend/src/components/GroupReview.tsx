@@ -301,16 +301,35 @@ export default function GroupReview({
         title={isDeleted(it) ? it.filename + '\n(in Trash)' : describe(it)}
       >
         <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
-        {bestIds.has(it.id) && <span className="strip-best">★</span>}
+        {bestIds.has(it.id) && (
+          <span className="strip-best" title="Best of this set — the suggested keep">★</span>
+        )}
         {isDeleted(it)
           ? <span className="strip-trashed" title="In Trash">🗑</span>
-          : it.matches === false && <span className="strip-filtered">⊘</span>}
+          : it.matches === false && (
+            <span className="strip-filtered" title="Outside the current filter — shown for context">⊘</span>
+          )}
         {/* Suggestion = a dashed "ghost" verdict bar on the TOP edge, mirroring the
             solid committed bar on the bottom. Same hue, opposite edge + dashed, so a
             suggestion can never be mistaken for a decision — even when both show at
             once (red-dashed top over green-solid bottom = "suggested delete, you kept"). */}
-        {rec && <span className={'strip-rec ' + rec} aria-hidden />}
-        {it.decision && <span className={'strip-flag ' + it.decision} />}
+        {rec && (
+          <span
+            className={'strip-rec ' + rec}
+            aria-hidden
+            title={rec === 'keep'
+              ? 'Suggestion: keep — the lead frame of this near-duplicate set. Not applied; click Keep to commit.'
+              : 'Suggestion: delete — a near-duplicate of the lead frame. Not applied; click Delete to commit.'}
+          />
+        )}
+        {it.decision && (
+          <span
+            className={'strip-flag ' + it.decision}
+            title={it.decision === 'keep'
+              ? 'Your decision: Keep'
+              : 'Your decision: Delete — marked, not yet moved to Trash'}
+          />
+        )}
       </button>
     )
   }
@@ -332,7 +351,12 @@ export default function GroupReview({
           title={`near-duplicate set · ${s.items.length} photos · click to preview the lead frame`}
         >
           <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
-          {anyDecided && <span className="strip-grouptile-decided" />}
+          {anyDecided && (
+            <span
+              className="strip-grouptile-decided"
+              title="Some photos in this set already have a Keep/Delete decision"
+            />
+          )}
         </button>
         <button
           className="strip-toggle expand"
