@@ -10,6 +10,10 @@ interface ScenePileProps {
   onToggleTag?: (tag: string) => void
   selected?: boolean
   onToggleSelect?: () => void
+  // The Trash filter is active, so trashed members are the point — count and
+  // show them. Off (the default), trashed members drop from the pile the instant
+  // they're culled, before the scenes refetch lands.
+  showTrashed?: boolean
 }
 
 // A rough scene shown as a stack: the best photo on top, a couple fanned
@@ -17,23 +21,30 @@ interface ScenePileProps {
 // its capture-time range. Clicking opens the scene panel to drill in. Its most
 // common photo keywords are shown as chips that double as tag-filter toggles
 // (`onToggleTag`), so you can pivot the whole view to a keyword from here.
-export default function ScenePile({ scene, onOpen, focused = false, activeTags = [], onToggleTag, selected = false, onToggleSelect }: ScenePileProps) {
+export default function ScenePile({ scene, onOpen, focused = false, activeTags = [], onToggleTag, selected = false, onToggleSelect, showTrashed = false }: ScenePileProps) {
   const items = scene.items
-  const top = items[0]
-  const behind = items.slice(1, 3)
+  // Recompute member counts from the live cache rather than the server's
+  // `count`/`match_count` snapshot, so trashing a photo from inside the scene
+  // updates the pile the instant it's culled (optimistic trash_state patch) —
+  // not only once the scenes query refetches. At fetch time these equal the
+  // server fields (a scene's members are non-trashed in every view but Trash),
+  // so the pile still agrees with what the panel opens to. The Trash filter
+  // (`showTrashed`) keeps trashed members in the count, since they're the point.
+  const live = showTrashed ? items : items.filter((i) => i.trash_state == null)
+  // Always render a non-empty stack: fall back to the raw list if hiding trashed
+  // would empty it (e.g. a fully-trashed scene still showing under Trash).
+  const pool = live.length ? live : items
+  const top = pool[0]
+  const behind = pool.slice(1, 3)
 
-  // Member counts track the active filters: `match_count` is how many members
-  // pass them (server-computed, the same filters the grid uses), `count` is the
-  // scene's full size. Lead with the filtered count so the pile agrees with what
-  // the scene panel opens to, and show "N of M" whenever a filter hides members.
-  const total = scene.count
-  const matching = scene.match_count
+  const total = live.length
+  const matching = live.filter((i) => i.matches !== false).length
   const filtered = matching < total
   const countLabel = filtered ? `${matching} of ${total}` : `${matching}`
 
   // Verdict pills count only members that pass the filters, so the pile never
   // advertises keep/del marks the current filter has excluded from view.
-  const inFilter = items.filter((i) => i.matches !== false)
+  const inFilter = live.filter((i) => i.matches !== false)
   const kept = inFilter.filter((i) => i.decision === 'keep').length
   const del = inFilter.filter((i) => i.decision === 'del').length
   const undecided = inFilter.length - kept - del
