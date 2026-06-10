@@ -349,6 +349,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Folders */
+        get: operations["get_folders_api_settings_folders_get"];
+        put?: never;
+        /**
+         * Add Folder
+         * @description Onboard a source folder: add it to the analyze set and register it as a
+         *     reveal root. Re-run analysis afterwards to actually index its photos.
+         */
+        post: operations["add_folder_api_settings_folders_post"];
+        /**
+         * Delete Folder
+         * @description Remove a folder from the catalog's source set. Already-indexed photos
+         *     remain until the next re-analysis rebuilds from the remaining folders.
+         */
+        delete: operations["delete_folder_api_settings_folders_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/fs/complete": {
         parameters: {
             query?: never;
@@ -1773,6 +1800,96 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RootsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_folders_api_settings_folders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    add_folder_api_settings_folders_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_folder_api_settings_folders_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
