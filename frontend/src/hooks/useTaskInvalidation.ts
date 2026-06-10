@@ -12,6 +12,10 @@ import type { TaskSnapshot } from '../api/types'
 export function useTaskInvalidation() {
   const qc = useQueryClient()
 
+  // A finished task changed the library on the server, so mark every list view
+  // stale (not just the one in front of you). The active view refetches now; the
+  // inactive ones (the view-gated Grid/Scenes/Groups queries) refetch the moment
+  // you navigate back to them, so you never land on a pre-edit snapshot.
   const invalidateAfterTask = useCallback((task: TaskSnapshot) => {
     switch (task.type) {
       case 'analyze_library':
