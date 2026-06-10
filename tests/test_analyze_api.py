@@ -86,3 +86,31 @@ def test_build_steps_rejects_bad_numeric(env, tmp_path):
         _build_steps(env, {
             "folder": str(tmp_path), "backend": "para", "dup_threshold": "abc"})
     assert ei.value.status_code == 400
+
+
+def test_build_steps_passes_multiple_folders(env, tmp_path):
+    """All onboarded folders land on the analyze argv before --out, so the CLI
+    scans them as one union."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    audit = dict(_build_steps(env, {
+        "folders": [str(a), str(b)], "backend": "para"}))["analyze"]
+    i = audit.index("analyze")
+    out = audit.index("--out")
+    assert audit[i + 1:out] == [str(a), str(b)]
+
+
+def test_build_steps_dedups_folders(env, tmp_path):
+    a = tmp_path / "a"
+    a.mkdir()
+    audit = dict(_build_steps(env, {
+        "folders": [str(a), str(a)], "backend": "para"}))["analyze"]
+    assert audit.count(str(a)) == 1
+
+
+def test_build_steps_missing_folder_in_set_raises(env, tmp_path):
+    a = tmp_path / "a"
+    a.mkdir()
+    with pytest.raises(HTTPException) as ei:
+        _build_steps(env, {"folders": [str(a), str(tmp_path / "ghost")]})
+    assert ei.value.status_code == 400

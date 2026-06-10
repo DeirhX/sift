@@ -22,16 +22,28 @@ export default function ScenePile({ scene, onOpen, focused = false, activeTags =
   const top = items[0]
   const behind = items.slice(1, 3)
 
-  const kept = items.filter((i) => i.decision === 'keep').length
-  const del = items.filter((i) => i.decision === 'del').length
-  const undecided = items.length - kept - del
+  // Member counts track the active filters: `match_count` is how many members
+  // pass them (server-computed, the same filters the grid uses), `count` is the
+  // scene's full size. Lead with the filtered count so the pile agrees with what
+  // the scene panel opens to, and show "N of M" whenever a filter hides members.
+  const total = scene.count
+  const matching = scene.match_count
+  const filtered = matching < total
+  const countLabel = filtered ? `${matching} of ${total}` : `${matching}`
+
+  // Verdict pills count only members that pass the filters, so the pile never
+  // advertises keep/del marks the current filter has excluded from view.
+  const inFilter = items.filter((i) => i.matches !== false)
+  const kept = inFilter.filter((i) => i.decision === 'keep').length
+  const del = inFilter.filter((i) => i.decision === 'del').length
+  const undecided = inFilter.length - kept - del
 
   const when = fmtTimeRange(scene.time_start, scene.time_end)
   const dupSets = scene.dup_sets ?? 0
   const keywords = sceneKeywords(items, 6)
 
   return (
-    <div className={'pile scene-pile' + (focused ? ' focused' : '') + (selected ? ' selected' : '')} data-sg={scene.scene_group} onClick={onOpen} title={`Scene of ${items.length} photos`}>
+    <div className={'pile scene-pile' + (focused ? ' focused' : '') + (selected ? ' selected' : '')} data-sg={scene.scene_group} onClick={onOpen} title={filtered ? `Scene of ${total} photos · ${matching} match the current filters` : `Scene of ${total} photos`}>
       {onToggleSelect && (
         <label className="pile-select" title="Select for merge" onClick={(e) => e.stopPropagation()}>
           <input type="checkbox" checked={selected} onChange={onToggleSelect} />
@@ -48,7 +60,7 @@ export default function ScenePile({ scene, onOpen, focused = false, activeTags =
         ))}
         <div className="pile-card top">
           <img src={thumbUrl(top.id)} loading="lazy" alt={top.filename} />
-          <span className="pile-count">{items.length} photos</span>
+          <span className="pile-count">{countLabel} photos</span>
           {del > 0 && <span className="pile-flag del">{del} del</span>}
         </div>
       </div>

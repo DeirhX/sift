@@ -263,6 +263,42 @@ export async function removeRoot(path: string): Promise<RootsResponse> {
   return r.json() as Promise<RootsResponse>
 }
 
+// ── Library folders (the catalog's onboarded source set) ─────────────────────
+// Plain { folders: string[] } payloads (no generated schema type), so we type
+// them locally. Onboarding/removing here only edits the set; re-run analysis to
+// actually (re)index. Filtering by folder then works through the normal folder
+// facet, since meta.folders is derived from indexed image paths.
+export interface LibraryFoldersResponse { folders: string[] }
+
+export async function getLibraryFolders(): Promise<LibraryFoldersResponse> {
+  const r = await fetch('/api/settings/folders')
+  if (!r.ok) throw new Error('failed to load library folders')
+  return r.json() as Promise<LibraryFoldersResponse>
+}
+
+export async function addLibraryFolder(path: string): Promise<LibraryFoldersResponse> {
+  const r = await fetch('/api/settings/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({} as { detail?: string }))
+    throw new Error((msg as { detail?: string }).detail || 'failed to add folder')
+  }
+  return r.json() as Promise<LibraryFoldersResponse>
+}
+
+export async function removeLibraryFolder(path: string): Promise<LibraryFoldersResponse> {
+  const r = await fetch('/api/settings/folders', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) throw new Error('failed to remove folder')
+  return r.json() as Promise<LibraryFoldersResponse>
+}
+
 // Server-side directory autocomplete for the settings folder field. Returns
 // { entries: string[], truncated: bool }. The browser can't enumerate the FS,
 // hence the round-trip.

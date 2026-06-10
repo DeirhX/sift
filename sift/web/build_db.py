@@ -339,18 +339,19 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         print(f"  Re-applied {applied} reassign + {dropped} delete face overrides")
 
     # ── Re-seed clusters: re-bind names to people, add any new cluster ids ───
-    # Names are anchored to member faces (by content hash + bbox), so they
-    # follow the actual people even when the detector hands a cluster a new id.
-    # Resolve each cluster's name from its members' anchors first; fall back to
-    # the old id-keyed name (still correct for stable manual-cluster ids), then
-    # to any name embedded in the report (from --face-ref matching).
+    # Names are anchored to member faces (by content hash + bbox overlap), so
+    # they follow the actual people even when the detector hands a cluster a new
+    # id or nudges a face's box slightly. Resolve each cluster's name from its
+    # members' overlapping anchors first; fall back to the old id-keyed name
+    # (still correct for stable manual-cluster ids), then to any name embedded
+    # in the report (from --face-ref matching).
     members_by_cluster: dict[int, list] = {}
     for fr in conn.execute(
             "SELECT image_id, x1, y1, x2, y2, cluster_id FROM faces WHERE cluster_id >= 0"):
         h = hashes.get(fr[0])
         if h:
             members_by_cluster.setdefault(fr[5], []).append(
-                (h, bbox_key(fr[1], fr[2], fr[3], fr[4])))
+                (h, float(fr[1]), float(fr[2]), float(fr[3]), float(fr[4])))
     anchor_names = photodb.resolve_anchor_names(conn, members_by_cluster)
 
     report_names: dict[int, str] = {}
@@ -419,6 +420,11 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     for k in ("folder", "backend", "caption_model", "face_model", "scene_model"):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                      (k, str(report.get(k))))
+    # The full onboarded source set, as JSON, for the UI's "Library folders" view.
+    # Falls back to the single `folder` for reports produced before multi-folder.
+    folders_meta = report.get("folders") or ([report["folder"]] if report.get("folder") else [])
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                 ("folders", json.dumps(folders_meta)))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                  ("total_images", str(len(images))))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",

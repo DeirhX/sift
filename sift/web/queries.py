@@ -30,6 +30,16 @@ SORT_COLUMNS = {
 }
 
 
+def _parse_tokens(raw, allowed: set[str]) -> set[str]:
+    """Lower-cased token set from a comma-separated query value, keeping only
+    `allowed` tokens. Tolerates None, surrounding spaces, and the legacy single
+    values that predate the multi-select filters."""
+    if not raw:
+        return set()
+    return {t.strip().lower() for t in raw.split(",")
+            if t.strip().lower() in allowed}
+
+
 def has_fts(conn) -> bool:
     """True when the FTS5 mirror table exists (full-text caption search)."""
     row = conn.execute(
@@ -76,15 +86,39 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
     /api/images and /api/groups. Clauses reference alias `i` (images),
     `d` (decisions LEFT JOIN on content hash) and `tm` (trash_moves LEFT JOIN).
 
-    Filtering is two ORTHOGONAL axes (a photo has BOTH a verdict and a location):
-      `decision` — verdict partition: all | keep | del | unmarked
-      `trash`    — lifecycle: active (default, not trashed) | trashed | any
-    They compose freely, e.g. trash='trashed' + decision='keep' = keep-marked
-    files that are in Trash. (The old single control conflated these and, as a
-    bug, let 'keep' leak trashed rows; both are fixed by the split.)"""
-    where = ["i.combined BETWEEN ? AND ?",
-             "i.sharpness BETWEEN ? AND ?"]
-    params: list = [score_min, score_max, sharp_min, sharp_max]
+    Composition law: clauses across categories are AND'd; within a multi-value
+    category the chosen values are combined per that category's operator below.
+
+      Score sliders (combined, sharpness, aesthetic, portrait) — ONE uniform NULL
+        rule so they behave identically: a non-default range [lo,hi] keeps only
+        rows that HAVE that score and fall inside it; a full [0,1] range adds no
+        clause at all (so it never drops unscored rows). No more three different
+        NULL policies across the four sliders.
+      `tags`   — AND within: a photo must carry EVERY selected tag.
+      `people` — OR within: a photo must contain ANY selected person/cluster.
+      `decision` — verdicts: any of keep | del | none(=unmarked), OR'd;
+        empty/'all' (and selecting all three) = any.
+      `trash`    — lifecycle: any of active(library) | trashed, OR'd;
+        empty = active only.
+    The two status axes are orthogonal and compose freely, e.g. trash='trashed'
+    + decision='keep,del' = keep- or del-marked files that are in Trash. (The old
+    single control conflated these and, as a bug, let 'keep' leak trashed rows;
+    both are fixed by the split.)"""
+    where: list[str] = []
+    params: list = []
+
+    # Score ranges share one rule so they compose predictably: a non-default
+    # range constrains AND requires the score to exist; a full [0,1] range is a
+    # no-op. Pairing clause+params here keeps their order in lockstep.
+    def add_range(col: str, lo: float, hi: float) -> None:
+        if lo > 0.0 or hi < 1.0:
+            where.append(f"({col} IS NOT NULL AND {col} BETWEEN ? AND ?)")
+            params.extend([lo, hi])
+
+    add_range("i.combined", score_min, score_max)
+    add_range("i.sharpness", sharp_min, sharp_max)
+    add_range("i.para_aesthetic", aes_min, aes_max)
+    add_range("i.portrait", portrait_min, portrait_max)
 
     # Folder filter: prefix-match the stored path. Recursive matches everything
     # below `folder`; non-recursive additionally requires no further separator
@@ -101,21 +135,16 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
             where.append("instr(substr(i.path, ?), ?) = 0")
             params += [plen + 1, sep]
 
-    # Aesthetic range only constrains rows that have a score.
-    where.append("(i.para_aesthetic IS NULL OR i.para_aesthetic BETWEEN ? AND ?)")
-    params += [aes_min, aes_max]
-
-    # Portrait range only constrains rows that have a portrait score (faces).
-    if portrait_min > 0.0 or portrait_max < 1.0:
-        where.append("(i.portrait IS NOT NULL AND i.portrait BETWEEN ? AND ?)")
-        params += [portrait_min, portrait_max]
-
+    # Tags are AND'd: the photo must carry every selected tag. One subquery
+    # counts how many of the chosen tags it has and requires the full set.
     if tags:
         tag_list = [t for t in tags.split(",") if t]
         if tag_list:
             ph = ",".join("?" * len(tag_list))
-            where.append(f"i.id IN (SELECT image_id FROM image_tags WHERE tag IN ({ph}))")
-            params += tag_list
+            where.append(
+                f"i.id IN (SELECT image_id FROM image_tags WHERE tag IN ({ph}) "
+                f"GROUP BY image_id HAVING COUNT(DISTINCT tag) = ?)")
+            params += tag_list + [len(tag_list)]
 
     if people:
         cids = [int(c) for c in people.split(",") if c.lstrip("-").isdigit()]
@@ -124,22 +153,36 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
             where.append(f"i.id IN (SELECT image_id FROM faces WHERE cluster_id IN ({ph}))")
             params += cids
 
-    # Decision axis — a partition of the library by verdict. 'all' adds nothing.
-    if decision == "keep":
-        where.append("d.decision = 'keep'")
-    elif decision == "del":
-        where.append("d.decision = 'del'")
-    elif decision in ("unmarked", "new"):
-        where.append("d.decision IS NULL")
+    # Decision axis — a multi-select verdict partition. The value is a comma list
+    # of any of keep / del / none(=unmarked); the chosen verdicts are OR'd. An
+    # empty set (or the legacy 'all') — and selecting every verdict — adds no
+    # constraint. Legacy single values (keep|del|unmarked|new) still parse.
+    verdicts = _parse_tokens(decision, {"keep", "del", "none", "unmarked", "new"})
+    want_keep = "keep" in verdicts
+    want_del = "del" in verdicts
+    want_none = bool(verdicts & {"none", "unmarked", "new"})
+    chosen = [on for on in (want_keep, want_del, want_none) if on]
+    if chosen and len(chosen) < 3:   # a strict subset constrains; full set = all
+        ors = []
+        if want_keep:
+            ors.append("d.decision = 'keep'")
+        if want_del:
+            ors.append("d.decision = 'del'")
+        if want_none:
+            ors.append("d.decision IS NULL")
+        where.append("(" + " OR ".join(ors) + ")")
 
-    # Lifecycle axis — independent of the verdict. Default hides Trash so the grid
-    # isn't haunted by recoverable JPEGs; 'trashed' shows only Trash; 'any' spans
-    # both (used by nothing yet, but keeps the axis honest).
-    if trash == "trashed":
+    # Lifecycle axis — a multi-select of active(library) / trashed, OR'd. Legacy
+    # 'any' spans everything (incl. emptied/missing); an empty set defaults to
+    # active so the grid isn't haunted by recoverable JPEGs unless asked.
+    states = _parse_tokens(trash, {"active", "trashed", "any"})
+    if "any" in states:
+        pass                                   # no lifecycle constraint
+    elif "active" in states and "trashed" in states:
+        where.append("(tm.id IS NULL OR tm.state = 'trashed')")
+    elif "trashed" in states:
         where.append("tm.state = 'trashed'")
-    elif trash == "any":
-        pass
-    else:  # 'active'
+    else:                                       # {'active'} or empty → library
         where.append("tm.id IS NULL")
 
     if q:

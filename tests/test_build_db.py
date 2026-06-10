@@ -17,6 +17,30 @@ def _decisions_columns(db_path):
         conn.close()
 
 
+def _meta(db_path, key):
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def test_meta_folders_from_list(tmp_path):
+    """A multi-folder report's `folders` list is persisted verbatim into meta."""
+    rep = default_report()
+    rep["folders"] = ["/fake", "/other"]
+    _, db_path, _ = ingest(tmp_path, rep)
+    assert json.loads(_meta(db_path, "folders")) == ["/fake", "/other"]
+
+
+def test_meta_folders_fallback_to_single(tmp_path):
+    """Pre-multi-folder reports (only `folder`) still get a one-element list."""
+    rep = default_report()                       # has "folder": "/fake", no "folders"
+    _, db_path, _ = ingest(tmp_path, rep)
+    assert json.loads(_meta(db_path, "folders")) == ["/fake"]
+
+
 def test_decision_persists_across_rebuild(env, rebuild):
     h = items_by_name(env.client)["a.jpg"]["hash"]
     env.client.post("/api/decisions", json={"hash": h, "decision": "keep"})

@@ -45,6 +45,11 @@ def test_apply_moves_del_files(real_library):
     # shows under trashed+del but not trashed+keep.
     assert "y.jpg" in items_by_name(env.client, "?limit=50&trash=trashed&decision=del")
     assert "y.jpg" not in items_by_name(env.client, "?limit=50&trash=trashed&decision=keep")
+    # Show is multi-select: active,trashed spans both the live library and Trash,
+    # while active alone (the default) hides the trashed file.
+    both = items_by_name(env.client, "?limit=50&trash=active,trashed")
+    assert {"x.jpg", "z.jpg"} <= set(both) and "y.jpg" in both
+    assert "y.jpg" not in items_by_name(env.client, "?limit=50&trash=active")
     # Status reflects the applied move.
     status = env.client.get("/api/apply/status").json()
     assert status["pending"] == 0 and status["applied"] == 1

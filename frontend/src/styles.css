@@ -124,6 +124,50 @@ body {
   font-weight: 600;
 }
 
+/* ── Collapsible filter sections ──────────────────────────────────────────── */
+.filter-section { display: flex; flex-direction: column; }
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.section-head:hover { color: var(--text); }
+.section-chevron { font-size: 10px; width: 10px; flex: none; opacity: 0.8; }
+.section-title { flex: none; }
+.section-summary {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  color: var(--text-dim);
+  font-size: 11px;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.section-tools { display: flex; justify-content: flex-end; }
+
+.tag-filter { font-size: 12px; padding: 5px 8px; }
+.link-btn.show-more { align-self: flex-start; margin-left: 0; margin-top: 2px; }
+.muted-note { color: var(--text-dim); font-size: 12px; opacity: 0.8; }
+
 select, input[type="text"], input[type="number"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -723,6 +767,17 @@ select:focus, input:focus {
 .btn.danger { border-color: var(--del); color: #ff9b8f; }
 .btn.danger:hover:not(:disabled) { background: var(--del); color: var(--on-del); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* Each Trash stage groups a state count with the action(s) on it, so the two
+   different numbers (marked-for-deletion vs in-trash) read as separate steps. */
+.trash-stage { display: flex; flex-direction: column; gap: 6px; }
+.trash-stage-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+}
+.trash-stage-name {
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--text-dim);
+}
+.trash-stage-count { font-size: 13px; font-weight: 700; color: var(--text); }
 .apply-msg { font-size: 12px; color: var(--accent); }
 .apply-hint { font-size: 11px; color: var(--text-dim); }
 .apply-hint code { background: var(--bg-card); padding: 1px 4px; border-radius: 3px; }
@@ -1092,7 +1147,10 @@ select:focus, input:focus {
   color: #fff;
   font-size: 13px;
   text-shadow: 0 0 3px #000;
-  pointer-events: none;
+  /* Hoverable + above the edge bars so its own tooltip wins in the corner. */
+  pointer-events: auto;
+  cursor: help;
+  z-index: 2;
 }
 .review-filternote { color: var(--accent); }
 .review-filternote.err { color: var(--del); }
@@ -1114,6 +1172,8 @@ select:focus, input:focus {
   color: var(--gold);
   font-size: 13px;
   text-shadow: 0 0 3px #000;
+  cursor: help;
+  z-index: 2;
 }
 /* A trashed member, only visible via "Show deleted": heavily knocked back and
    stamped with a bin so it never gets mistaken for an in-play frame. */
@@ -1124,7 +1184,9 @@ select:focus, input:focus {
   top: 2px; right: 4px;
   font-size: 12px;
   text-shadow: 0 0 3px #000;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: help;
+  z-index: 2;
 }
 /* A near-duplicate set inside a scene's filmstrip — bracketed so the tree
    structure reads at a glance. Lone-set / no-set scenes don't render this. */
@@ -1245,6 +1307,10 @@ select:focus, input:focus {
   position: absolute;
   bottom: 0; left: 0; right: 0;
   height: 4px;
+  /* Hoverable so the tooltip fires on the bar itself; the click still bubbles
+     up to the thumb button, so tapping the edge keeps selecting the photo. */
+  cursor: help;
+  z-index: 1;
 }
 .strip-flag.keep { background: var(--keep); }
 .strip-flag.del { background: var(--del); }
@@ -1258,9 +1324,14 @@ select:focus, input:focus {
 .strip-rec {
   position: absolute;
   top: 0; left: 0; right: 0;
-  height: 0;
+  /* A taller transparent box under the 3px dash gives the tooltip a real hover
+     target without changing the visible line. pointer-events:auto (overriding
+     the old none) lets the title fire; clicks still bubble to the thumb button. */
+  height: 7px;
   border-top: 3px dashed transparent;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: help;
+  z-index: 1;
 }
 .strip-rec.keep { border-top-color: rgba(var(--keep-rgb), 0.9); }
 .strip-rec.del  { border-top-color: rgba(var(--del-rgb), 0.9); }
@@ -1538,6 +1609,28 @@ select:focus, input:focus {
 .af-error { color: var(--del); font-size: 12px; }
 .af-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; }
 .af-note code { background: var(--bg-card); padding: 1px 4px; border-radius: 4px; }
+
+/* Library-folders manager */
+.af-folder-note { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; }
+.af-folder-empty { color: var(--text-dim); font-size: 12px; font-style: italic; }
+.af-folder-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.af-folder-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--bg-card); border-radius: 6px; padding: 5px 8px;
+}
+.af-folder-path {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  direction: rtl; text-align: left;     /* keep the meaningful tail visible */
+}
+.af-folder-del {
+  flex: none; border: none; background: transparent; cursor: pointer;
+  color: var(--text-dim); font-size: 16px; line-height: 1; padding: 0 4px;
+}
+.af-folder-del:hover:not(:disabled) { color: var(--del); }
+.af-folder-del:disabled { opacity: 0.4; cursor: default; }
+.af-folder-add { display: flex; align-items: flex-start; gap: 6px; }
+.af-folder-add .folder-input { flex: 1; }
 
 .analyze-term {
   margin: 0;

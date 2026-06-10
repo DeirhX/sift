@@ -19,6 +19,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from sift.web import photodb
+
 # Stages are launched as `python -m sift <cmd>` rather than by script path, so
 # the subsystem doesn't care where the package lives. REPO_ROOT is the job's cwd
 # (this file is sift/web/analysis.py, so the repo root is two parents up); it
@@ -146,26 +148,59 @@ class AnalysisJob:
             self._commit(buf.decode("utf-8", "replace"))
 
 
+def _resolve_folders(payload: dict, db_factory) -> list[str]:
+    """The catalog's source folders for this analyze run, in priority order:
+      1. an explicit `folders` list (or legacy single `folder`) in the payload,
+      2. the persisted ``library_folders`` table (the onboarded set),
+      3. the DB's stored single folder (``meta.folder``) — pre-multi-folder libs.
+    De-duped case-insensitively with order preserved."""
+    raw = payload.get("folders")
+    folders: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        folders = [str(x).strip().strip('"') for x in raw if str(x).strip()]
+    else:
+        single = (payload.get("folder") or "").strip().strip('"')
+        if single:
+            folders = [single]
+    if not folders:
+        with db_factory() as conn:
+            folders = photodb.get_library_folders(conn)
+            if not folders:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='folder'").fetchone()
+                val = (row["value"] if row else "") or ""
+                if val and val != "None":
+                    folders = [val]
+    out: list[str] = []
+    seen: set = set()
+    for f in folders:
+        k = f.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(f)
+    return out
+
+
 def build_analyze_steps(payload: dict, *, db_path: Path, thumb_dir: Path,
                         db_factory) -> list[tuple[str, list[str]]]:
     """Translate the UI payload into argv for `sift analyze` + `sift index`.
-    Only known flags are emitted; the folder is validated. Raises HTTPException.
+    Only known flags are emitted; folders are validated. Raises HTTPException.
 
     `db_path`/`thumb_dir` target the DB the server is serving; `db_factory` is a
-    context-manager connection factory used to look up the default folder."""
-    folder = (payload.get("folder") or "").strip()
-    if not folder:
-        with db_factory() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
-            folder = row["value"] if row else ""
-    fpath = Path(folder)
-    if not folder or not fpath.is_dir():
-        raise HTTPException(400, f"folder not found: {folder!r}")
+    context-manager connection factory used to look up the onboarded folders."""
+    folders = _resolve_folders(payload, db_factory)
+    if not folders:
+        raise HTTPException(400, "no library folders configured")
+    missing = [f for f in folders if not Path(f).is_dir()]
+    if missing:
+        # Re-indexing rebuilds the catalog from this one report, so a missing
+        # folder would silently drop its photos. Fail loudly instead.
+        raise HTTPException(400, f"folder(s) not found: {missing}")
 
     report_path = db_path.parent / "audit_report.json"
     py = sys.executable
 
-    audit = [py, "-m", "sift", "analyze", str(fpath), "--out", str(report_path)]
+    audit = [py, "-m", "sift", "analyze", *folders, "--out", str(report_path)]
     if payload.get("recurse"):
         audit.append("--recurse")
     if payload.get("no_clip"):

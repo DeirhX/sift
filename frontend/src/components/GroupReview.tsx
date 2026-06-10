@@ -211,10 +211,27 @@ export default function GroupReview({
     return parts.join('\n')
   }
 
-  // How many members pass the active filters (server-computed). When some
-  // don't, the filmstrip dims them so you still see the full duplicate set.
-  const matchCount = items.filter((it) => it.matches !== false).length
-  const someFiltered = matchCount < items.length
+  // Per near-dup set: how many frames pass the active filters vs. its full size,
+  // so the collapse/expand badge reflects the filter the same way the header
+  // does ("N of M") instead of always advertising the gross set size.
+  const setMatch = (s: DupSet<GroupedImageItem>): number =>
+    s.items.filter((it) => it.matches !== false).length
+  const setLabel = (s: DupSet<GroupedImageItem>): string => {
+    const m = setMatch(s)
+    return m < s.items.length ? `${m} of ${s.items.length}` : `${s.items.length}`
+  }
+
+  // Set size the way the server (and the overview pile) count it: every member
+  // vs. the subset passing the active filters. Read from the full member list so
+  // the header's "N of M" matches the pile exactly, no matter which members the
+  // strip is currently hiding. The strip still dims non-matching members (see
+  // renderThumb) so the full set stays visible for context.
+  const memberTotal = group.items.length
+  const memberMatch = group.items.filter((it) => it.matches !== false).length
+  const partial = memberMatch < memberTotal
+  // Same "N of M" for the flat (ungrouped) strip, counted over what it renders.
+  const viewMatch = view.filter((it) => it.matches !== false).length
+  const viewLabel = viewMatch < view.length ? `${viewMatch} of ${view.length}` : `${view.length}`
 
   // Keyboard: arrows switch members, k/d decide, Esc closes — but only when
   // the full-size viewer isn't open (it handles its own keys).
@@ -301,16 +318,35 @@ export default function GroupReview({
         title={isDeleted(it) ? it.filename + '\n(in Trash)' : describe(it)}
       >
         <img src={thumbUrl(it.id, it.hash)} alt={it.filename} loading="lazy" />
-        {bestIds.has(it.id) && <span className="strip-best">★</span>}
+        {bestIds.has(it.id) && (
+          <span className="strip-best" title="Best of this set — the suggested keep">★</span>
+        )}
         {isDeleted(it)
           ? <span className="strip-trashed" title="In Trash">🗑</span>
-          : it.matches === false && <span className="strip-filtered">⊘</span>}
+          : it.matches === false && (
+            <span className="strip-filtered" title="Outside the current filter — shown for context">⊘</span>
+          )}
         {/* Suggestion = a dashed "ghost" verdict bar on the TOP edge, mirroring the
             solid committed bar on the bottom. Same hue, opposite edge + dashed, so a
             suggestion can never be mistaken for a decision — even when both show at
             once (red-dashed top over green-solid bottom = "suggested delete, you kept"). */}
-        {rec && <span className={'strip-rec ' + rec} aria-hidden />}
-        {it.decision && <span className={'strip-flag ' + it.decision} />}
+        {rec && (
+          <span
+            className={'strip-rec ' + rec}
+            aria-hidden
+            title={rec === 'keep'
+              ? 'Suggestion: keep — the lead frame of this near-duplicate set. Not applied; click Keep to commit.'
+              : 'Suggestion: delete — a near-duplicate of the lead frame. Not applied; click Delete to commit.'}
+          />
+        )}
+        {it.decision && (
+          <span
+            className={'strip-flag ' + it.decision}
+            title={it.decision === 'keep'
+              ? 'Your decision: Keep'
+              : 'Your decision: Delete — marked, not yet moved to Trash'}
+          />
+        )}
       </button>
     )
   }
@@ -329,18 +365,27 @@ export default function GroupReview({
         <button
           className={'strip-grouptile' + (repIdx === sel ? ' active' : '')}
           onClick={() => selectIdx(repIdx)}
-          title={`near-duplicate set · ${s.items.length} photos · click to preview the lead frame`}
+          title={setMatch(s) < s.items.length
+            ? `Near-duplicate set · ${setMatch(s)} of ${s.items.length} match the current filters · click to preview the lead frame`
+            : `near-duplicate set · ${s.items.length} photos · click to preview the lead frame`}
         >
           <img src={thumbUrl(rep.id, rep.hash)} alt={rep.filename} loading="lazy" />
-          {anyDecided && <span className="strip-grouptile-decided" />}
+          {anyDecided && (
+            <span
+              className="strip-grouptile-decided"
+              title="Some photos in this set already have a Keep/Delete decision"
+            />
+          )}
         </button>
         <button
           className="strip-toggle expand"
           aria-expanded={false}
           onClick={() => toggleExpand(s.dup_group)}
-          title={`Show all ${s.items.length} photos in this near-duplicate set`}
+          title={setMatch(s) < s.items.length
+            ? `Near-duplicate set · ${setMatch(s)} of ${s.items.length} match the current filters · click to show all`
+            : `Show all ${s.items.length} photos in this near-duplicate set`}
         >
-          <span className="strip-toggle-caret">▸</span>{s.items.length}
+          <span className="strip-toggle-caret">▸</span>{setLabel(s)}
         </button>
       </div>
     )
@@ -352,11 +397,8 @@ export default function GroupReview({
         <div className="review-head">
           <div>
             <b>{title ?? `Duplicate group #${group.dup_group}`}</b>
-            <span className="review-sub"> · {view.length} photos · viewing {sel + 1}/{view.length}</span>
+            <span className="review-sub"> · {partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos · viewing {sel + 1}/{view.length}</span>
             {subExtra}
-            {someFiltered && (
-              <span className="review-filternote"> · {matchCount}/{view.length} match filter</span>
-            )}
             {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
           </div>
           <div className="review-actions">
@@ -392,7 +434,7 @@ export default function GroupReview({
                   onClick={() => setGrouped((v) => !v)}
                   title="Collapse near-duplicate sets into representative tiles"
                 >
-                  {grouped ? `Ungroup (${view.length})` : `Group dups (${sets.length})`}
+                  {grouped ? `Ungroup (${viewLabel})` : `Group dups (${sets.length})`}
                 </button>
               )}
               {culledCount > 0 && (
@@ -435,16 +477,20 @@ export default function GroupReview({
                   <div
                     className="strip-cluster"
                     key={'set-' + s.dup_group}
-                    title={`near-duplicate set · ${s.items.length} photos`}
+                    title={setMatch(s) < s.items.length
+                      ? `near-duplicate set · ${setMatch(s)} of ${s.items.length} match the current filters`
+                      : `near-duplicate set · ${s.items.length} photos`}
                     onClick={(e) => { if (e.target === e.currentTarget) toggleExpand(s.dup_group) }}
                   >
                     <button
                       className="strip-toggle collapse"
                       aria-expanded={true}
                       onClick={(e) => { e.stopPropagation(); toggleExpand(s.dup_group) }}
-                      title={`Collapse this near-duplicate set (${s.items.length} photos)`}
+                      title={setMatch(s) < s.items.length
+                        ? `Collapse this near-duplicate set (${setMatch(s)} of ${s.items.length} match the current filters)`
+                        : `Collapse this near-duplicate set (${s.items.length} photos)`}
                     >
-                      <span className="strip-toggle-caret">▾</span>{s.items.length}
+                      <span className="strip-toggle-caret">▾</span>{setLabel(s)}
                     </button>
                     {s.items.map(renderThumb)}
                   </div>
@@ -461,7 +507,9 @@ export default function GroupReview({
                 <div
                   className="strip-flatgroup"
                   key={'fg-' + s.dup_group}
-                  title={`near-duplicate set · ${s.items.length} photos`}
+                  title={setMatch(s) < s.items.length
+                    ? `near-duplicate set · ${setMatch(s)} of ${s.items.length} match the current filters`
+                    : `near-duplicate set · ${s.items.length} photos`}
                 >
                   {s.items.map(renderThumb)}
                 </div>

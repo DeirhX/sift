@@ -214,13 +214,13 @@ def get_images(
     sharp_min: float = 0.0, sharp_max: float = 1.0,
     aes_min:   float = 0.0, aes_max:   float = 1.0,
     portrait_min: float = 0.0, portrait_max: float = 1.0,
-    tags:    str | None = None,     # comma-separated, OR match
-    people:  str | None = None,     # comma-separated cluster ids, OR match
+    tags:    str | None = None,     # comma-separated, AND match (all required)
+    people:  str | None = None,     # comma-separated cluster ids, OR match (any)
     folder:  str | None = None,     # folder-hierarchy prefix filter
     folder_recursive: bool = True,  # include photos in subfolders of `folder`
     dup_mode: str = "all",          # all | groups-only | hide-dups | no-groups
-    decision: str = "all",          # all | keep | del | unmarked
-    trash:    str = "active",       # active | trashed | any (lifecycle axis)
+    decision: str = "all",          # CSV multi-select: keep,del,none (empty=all)
+    trash:    str = "active",       # CSV multi-select: active,trashed (empty=active)
     q:       str | None = None,     # caption text search
 ):
     with db() as conn:
@@ -527,6 +527,21 @@ def _init_photo_roots(explicit: list[str] | None) -> None:
     print(f"Reveal roots: {PHOTO_ROOT_DIRS or '(none — folder reveal disabled)'}")
 
 
+def _init_library_folders() -> None:
+    """Seed the onboarded-folder set from the DB's single library folder when the
+    table is empty, so an existing single-folder catalog upgrades to the
+    multi-folder model without losing its original folder once a second is added."""
+    with db() as conn:
+        if not photodb.get_library_folders(conn):
+            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+            val = (row[0] if row else "") or ""
+            if val and val != "None" and Path(val).is_dir():
+                photodb.add_library_folder(conn, val)
+                conn.commit()
+        folders = photodb.get_library_folders(conn)
+    print(f"Library folders: {folders or '(none — onboard one in the web UI)'}")
+
+
 def _reveal_in_os(target: Path) -> None:
     """Open a path in the OS file manager: a directory opens directly, a file
     opens its folder with the file selected."""
@@ -614,6 +629,67 @@ def delete_root(payload: dict = Body(...)):
         conn.commit()
         _refresh_roots(conn)
     return _roots_payload()
+
+
+# ── Settings: library folders (the catalog's onboarded source set) ────────────
+#
+# Distinct from photo_roots: this set is what `sift analyze` actually scans (as
+# one union, so dedup/scenes/faces stay global). Onboarding a folder here also
+# registers it as a reveal root for convenience. Indexing is NOT automatic —
+# the client re-runs analysis after editing the set.
+
+def _folders_payload():
+    with db() as conn:
+        return {"folders": photodb.get_library_folders(conn)}
+
+
+@app.get("/api/settings/folders")
+def get_folders():
+    return _folders_payload()
+
+
+@app.post("/api/settings/folders")
+def add_folder(payload: dict = Body(...)):
+    """Onboard a source folder: add it to the analyze set and register it as a
+    reveal root. Re-run analysis afterwards to actually index its photos."""
+    raw = (payload.get("path") or "").strip().strip('"')
+    if not raw:
+        raise HTTPException(400, "path required")
+    p = Path(raw)
+    if not p.is_dir():
+        raise HTTPException(400, f"not a directory: {raw}")
+    resolved = str(p.resolve())
+    with db() as conn:
+        existing = {_norm_path(x) for x in photodb.get_library_folders(conn)}
+        if _norm_path(resolved) in existing:
+            raise HTTPException(409, "already a library folder")
+        # Seed the pre-existing single folder (meta.folder) before adding the new
+        # one, so flipping the table from empty→populated never silently drops the
+        # original catalog folder.
+        if not existing:
+            row = conn.execute("SELECT value FROM meta WHERE key='folder'").fetchone()
+            val = (row[0] if row else "") or ""
+            if (val and val != "None" and Path(val).is_dir()
+                    and _norm_path(val) != _norm_path(resolved)):
+                photodb.add_library_folder(conn, val)
+        photodb.add_library_folder(conn, resolved)
+        photodb.add_photo_root(conn, resolved)
+        conn.commit()
+        _refresh_roots(conn)
+    return _folders_payload()
+
+
+@app.delete("/api/settings/folders")
+def delete_folder(payload: dict = Body(...)):
+    """Remove a folder from the catalog's source set. Already-indexed photos
+    remain until the next re-analysis rebuilds from the remaining folders."""
+    raw = (payload.get("path") or "").strip()
+    if not raw:
+        raise HTTPException(400, "path required")
+    with db() as conn:
+        photodb.remove_library_folder(conn, raw)
+        conn.commit()
+    return _folders_payload()
 
 
 # ── Filesystem path autocomplete (settings folder field) ──────────────────────
@@ -1066,6 +1142,7 @@ def _init_runtime(db_path: Path, thumb_dir: Path, frontend_dist: Path | None,
     _configure_tasks()
     tasks.MANAGER.abandon_running()
     _init_photo_roots(photo_roots)
+    _init_library_folders()
     _mount_frontend()
     _RUNTIME_INITIALIZED = True
 

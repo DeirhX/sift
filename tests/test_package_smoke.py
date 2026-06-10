@@ -60,9 +60,17 @@ def test_package_reexports_same_object(name):
 def test_parser_builds_and_parses():
     """The argparse contract survives the move to sift.audit.cli."""
     args = audit.build_parser().parse_args(["/some/folder", "--no-clip"])
-    assert args.folder == "/some/folder"
+    # `folder` is nargs='+' now (multi-folder onboarding), so it's a list.
+    assert args.folder == ["/some/folder"]
     assert args.no_clip is True
     assert args.backend == "para"
+
+
+def test_parser_accepts_multiple_folders():
+    """Multiple source folders collapse into the one positional list."""
+    args = audit.build_parser().parse_args(["/a", "/b", "/c", "--recurse"])
+    assert args.folder == ["/a", "/b", "/c"]
+    assert args.recurse is True
 
 
 def test_package_has_version():
