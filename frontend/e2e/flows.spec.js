@@ -57,6 +57,8 @@ test.describe('sidebar filters', () => {
 
   test('tag chip narrows to tagged photos', async ({ page }) => {
     await page.goto('/')
+    // Tags live in a collapsed section by default; open it before clicking a chip.
+    await sidebar(page).getByRole('button', { name: /Tags/ }).click()
     await sidebar(page).locator('.chip', { hasText: 'beach' }).first().click()
     await expect(cards(page)).toHaveCount(2)
     await sidebar(page).getByRole('button', { name: 'Reset filters' }).click()
@@ -75,12 +77,15 @@ test.describe('sidebar filters', () => {
     const first = cards(page).first()
     await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
 
-    await sidebar(page).getByRole('button', { name: 'Del', exact: true }).click()
+    // Decision is multi-select (None/Keep/Del all lit = "all"); peel off the
+    // other two so only Del-marked photos remain.
+    await sidebar(page).getByRole('button', { name: 'None', exact: true }).click()
+    await sidebar(page).getByRole('button', { name: 'Keep', exact: true }).click()
     await expect(cards(page)).toHaveCount(1)
     await expect(cards(page).first().locator('.badge-decision.del')).toBeVisible()
 
-    // cleanup: back to all + clear the mark
-    await sidebar(page).getByRole('button', { name: 'All', exact: true }).click()
+    // cleanup: clear the mark (DB must be pristine for later tests; the verdict
+    // filter itself resets on the next test's reload).
     await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Delete' }).click())
   })
 })
@@ -423,9 +428,9 @@ test.describe('apply / undo', () => {
     await page.reload()
     const apply = page.locator('.apply-panel')
     await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
-    await expect(apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ })).toBeVisible()
+    await expect(apply.getByRole('button', { name: /Restore \d+/ })).toBeVisible()
 
-    await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ }).click())
+    await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \d+/ }).click())
     await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 
     // cleanup: clear the restored del mark.
