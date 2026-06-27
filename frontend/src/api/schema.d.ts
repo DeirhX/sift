@@ -313,7 +313,7 @@ export interface paths {
          * Reveal Path
          * @description Open a path in the OS file manager. Bounded to the configured photo
          *     root(s) (see --photo-root / meta.folder): the target must be a root or sit
-         *     below one, so this can't be turned into an open-anything primitive � and
+         *     below one, so this can't be turned into an open-anything primitive — and
          *     unlike the old check, it won't open a root's ancestors (e.g. a drive).
          */
         post: operations["reveal_path_api_reveal_post"];
@@ -361,14 +361,17 @@ export interface paths {
         put?: never;
         /**
          * Add Folder
-         * @description Onboard a source folder: add it to the analyze set and register it as a
-         *     reveal root. Re-run analysis afterwards to actually index its photos.
+         * @description Onboard a source folder into the catalog. It joins the analyze set and,
+         *     because reveal roots are derived from the library folders, immediately
+         *     becomes reveal-allowed. Re-run analysis afterwards to index its photos.
          */
         post: operations["add_folder_api_settings_folders_post"];
         /**
          * Delete Folder
          * @description Remove a folder from the catalog's source set. Already-indexed photos
-         *     remain until the next re-analysis rebuilds from the remaining folders.
+         *     remain until the next re-analysis rebuilds from the remaining folders;
+         *     decisions are hash-keyed and survive regardless. Also drops any matching
+         *     legacy reveal root so reveal permission follows the folder out.
          */
         delete: operations["delete_folder_api_settings_folders_delete"];
         options?: never;
@@ -445,7 +448,7 @@ export interface paths {
         /**
          * Merge Clusters
          * @description Reassign every face of the `from` cluster(s) into `into`, then drop the
-         *     now-empty source cluster name rows. Pure DB edit � no re-embedding. Each
+         *     now-empty source cluster name rows. Pure DB edit — no re-embedding. Each
          *     moved face is also recorded as a persistent override.
          */
         post: operations["merge_clusters_api_clusters_merge_post"];
@@ -515,6 +518,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import Decisions
+         * @description Re-apply keep/del verdicts from an exported audit_decisions.json.
+         *
+         *     Each entry is matched by content hash (preferred) or, failing that, by path.
+         *     Additive and non-destructive: it overwrites marks only for hashes present in
+         *     the file, leaves every other existing mark untouched, and ignores the
+         *     `unmarked` bucket (it carries no verdict to apply). A hash that isn't in the
+         *     current catalog is still recorded — it binds if that photo is indexed later,
+         *     exactly like decisions preserved across a rebuild.
+         */
+        post: operations["import_decisions_api_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/groups/autocull": {
         parameters: {
             query?: never;
@@ -527,7 +557,7 @@ export interface paths {
         /**
          * Autocull Groups
          * @description For every duplicate group, mark the best-scoring photo 'keep' and the
-         *     rest 'del'. Overwrites existing marks within groups. Marks only � files
+         *     rest 'del'. Overwrites existing marks within groups. Marks only — files
          *     are not touched until /api/apply.
          */
         post: operations["autocull_groups_api_groups_autocull_post"];
@@ -2123,6 +2153,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    import_decisions_api_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
