@@ -66,7 +66,8 @@ def test_add_list_delete_library_folder(env, clean_roots, tmp_path):
     assert out["folders"] == [resolved]
     assert env.client.get("/api/settings/folders").json()["folders"] == [resolved]
 
-    # Onboarding also registers it as a reveal root, for convenience.
+    # Reveal permission is *derived* from the library folders — a source folder is
+    # reveal-allowed without anyone touching a separate roots list.
     assert resolved in env.client.get("/api/settings/roots").json()["photo_roots"]
 
     # Re-adding the same folder conflicts.
@@ -74,6 +75,24 @@ def test_add_list_delete_library_folder(env, clean_roots, tmp_path):
 
     env.client.request("DELETE", "/api/settings/folders", json={"path": resolved})
     assert env.client.get("/api/settings/folders").json()["folders"] == []
+    # Removing the folder also revokes its reveal permission (roots follow it out).
+    assert resolved not in env.client.get("/api/settings/roots").json()["photo_roots"]
+
+
+def test_reveal_allowed_via_library_folder(env, clean_roots, monkeypatch, tmp_path):
+    """End-to-end: onboarding a source folder (no explicit photo-root) is enough
+    to authorise /api/reveal into it; removing the folder forbids it again."""
+    monkeypatch.setattr(server, "_reveal_in_os", lambda target: None)
+    root = tmp_path / "lib"
+    root.mkdir()
+    f = root / "photo.jpg"
+    f.write_bytes(b"x")
+
+    env.client.post("/api/settings/folders", json={"path": str(root)})
+    assert env.client.post("/api/reveal", json={"path": str(f)}).status_code == 200
+
+    env.client.request("DELETE", "/api/settings/folders", json={"path": str(root.resolve())})
+    assert env.client.post("/api/reveal", json={"path": str(f)}).status_code == 403
 
 
 def test_add_library_folder_rejects_nonexistent(env, clean_roots, tmp_path):

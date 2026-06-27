@@ -75,14 +75,16 @@ export default function ScenePile({ scene, onOpen, focused = false, activeTags =
           {del > 0 && <span className="pile-flag del">{del} del</span>}
         </div>
       </div>
-      <div className="pile-meta">
-        {when && <span className="scene-when" title="Capture time range">{when}</span>}
-        <div className="pile-pills">
+      <div className="scene-meta">
+        <div className="scene-toprow">
+          {when && <span className="scene-when" title="Capture time range">{when}</span>}
           {dupSets > 0 && (
-            <span className="cpill dup" title="Near-duplicate sets in this scene">
-              {dupSets} near-dup set{dupSets > 1 ? 's' : ''}
+            <span className="cpill dup" title={`${dupSets} near-duplicate set${dupSets > 1 ? 's' : ''} in this scene`}>
+              {dupSets} set{dupSets > 1 ? 's' : ''}
             </span>
           )}
+        </div>
+        <div className="scene-verdicts">
           {kept > 0 && <span className="cpill keep">{kept} keep</span>}
           {del > 0 && <span className="cpill del">{del} del</span>}
           {undecided > 0 && <span className="cpill left">{undecided} left</span>}
