@@ -61,3 +61,6 @@ testpaths = ["tests"]
 markers = [
     "ml: tests that load/download neural model weights; opt in with --run-ml or RUN_ML=1",
 ]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*",
+]
