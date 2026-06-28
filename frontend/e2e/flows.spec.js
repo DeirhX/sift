@@ -176,9 +176,10 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(piles).toHaveCount(2)
 
     // Scenes are time-ordered: scene 0 (the beach burst) comes first and
-    // advertises its single near-duplicate set.
+    // advertises its single near-duplicate set (the pill reads "1 set"; the
+    // full "near-duplicate set" wording lives in its tooltip).
     const first = piles.first()
-    await expect(first).toContainText('1 near-dup set')
+    await expect(first).toContainText('1 set')
     await first.click()
 
     // The scene opens straight into the unified review — an open image up top
