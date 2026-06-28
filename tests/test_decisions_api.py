@@ -42,14 +42,72 @@ def test_export_buckets(env):
     assert {e["filename"] for e in out["kept"]} == {"a.jpg"}
     assert {e["filename"] for e in out["deleted"]} == {"b.jpg"}
     assert {e["filename"] for e in out["unmarked"]} == {"c.jpg"}
-    # entries carry path/filename/combined
-    assert set(out["kept"][0]) >= {"path", "filename", "combined"}
+    # entries carry the stable hash key plus the human-readable fields
+    assert set(out["kept"][0]) >= {"hash", "path", "filename", "combined"}
+    assert out["kept"][0]["hash"] == by["a.jpg"]["hash"]
 
 
 def test_export_all_unmarked_initially(env):
     out = env.client.get("/api/export").json()
     assert out["kept"] == [] and out["deleted"] == []
     assert {e["filename"] for e in out["unmarked"]} == {"a.jpg", "b.jpg", "c.jpg"}
+
+
+# ── import (re-apply exported verdicts) ──────────────────────────────────────
+
+def test_import_roundtrip_by_hash(env):
+    by = items_by_name(env.client)
+    env.client.post("/api/decisions", json={"hash": by["a.jpg"]["hash"], "decision": "keep"})
+    env.client.post("/api/decisions", json={"hash": by["b.jpg"]["hash"], "decision": "del"})
+    exported = env.client.get("/api/export").json()
+    # wipe both marks, then restore them from the exported file
+    env.client.post("/api/decisions", json={"hash": by["a.jpg"]["hash"], "decision": None})
+    env.client.post("/api/decisions", json={"hash": by["b.jpg"]["hash"], "decision": None})
+    assert items_by_name(env.client)["a.jpg"]["decision"] is None
+
+    r = env.client.post("/api/import", json=exported).json()
+    assert r == {"ok": True, "applied": 2, "unmatched": 0}
+    after = items_by_name(env.client)
+    assert after["a.jpg"]["decision"] == "keep"
+    assert after["b.jpg"]["decision"] == "del"
+    assert after["c.jpg"]["decision"] is None       # unmarked bucket is ignored
+
+
+def test_import_matches_by_path_without_hash(env):
+    # An entry lacking a hash still resolves through its path.
+    payload = {"kept": [{"path": "/fake/a.jpg"}], "deleted": []}
+    r = env.client.post("/api/import", json=payload).json()
+    assert r["applied"] == 1 and r["unmatched"] == 0
+    assert items_by_name(env.client)["a.jpg"]["decision"] == "keep"
+
+
+def test_import_is_additive(env):
+    # Marks not present in the file are left untouched.
+    by = items_by_name(env.client)
+    env.client.post("/api/decisions", json={"hash": by["c.jpg"]["hash"], "decision": "keep"})
+    env.client.post("/api/import",
+                    json={"kept": [{"hash": by["a.jpg"]["hash"]}], "deleted": []})
+    after = items_by_name(env.client)
+    assert after["a.jpg"]["decision"] == "keep"
+    assert after["c.jpg"]["decision"] == "keep"     # untouched
+
+
+def test_import_counts_unmatched(env):
+    payload = {"kept": [{"path": "/nope/ghost.jpg"}, {}], "deleted": []}
+    r = env.client.post("/api/import", json=payload).json()
+    assert r["applied"] == 0 and r["unmatched"] == 2
+
+
+def test_import_records_unknown_hash(env):
+    # A hash that isn't in the catalog is still recorded; it binds if that photo
+    # is indexed later (same contract as decisions preserved across a rebuild).
+    r = env.client.post("/api/import",
+                        json={"kept": [{"hash": "deadbeefcafe"}], "deleted": []}).json()
+    assert r["applied"] == 1 and r["unmatched"] == 0
+
+
+def test_import_rejects_bad_format(env):
+    assert env.client.post("/api/import", json={"foo": 1}).status_code == 400
 
 
 # ── autocull ─────────────────────────────────────────────────────────────────

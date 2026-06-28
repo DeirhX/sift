@@ -215,7 +215,8 @@ export default function App() {
         updateFilter={updateFilter}
         toggleInList={toggleInList}
         resetFilters={resetFilters}
-        total={total}
+        shownCount={headerCount}
+        shownLabel={headerLabel}
         onPeopleChange={refetchPeople}
         onTaskDone={invalidateAfterTask}
       />
@@ -365,7 +366,6 @@ export default function App() {
 
       {showAnalyze && (
         <AnalyzePanel
-          defaultFolder={meta.data?.meta?.folder || ''}
           onClose={() => setShowAnalyze(false)}
           onDone={invalidateAfterTask}
         />
@@ -374,7 +374,9 @@ export default function App() {
       {showSettings && (
         <SettingsPanel
           onClose={() => setShowSettings(false)}
-          onChange={() => qc.invalidateQueries({ queryKey: ['meta'] })}
+          // Broad refetch: roots edits move counts, and a decisions import moves
+          // the keep/del badges across the grid/groups/scenes.
+          onChange={() => invalidateRoots(qc, PHOTO_DATA_QUERY_ROOTS)}
         />
       )}
     </div>

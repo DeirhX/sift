@@ -10,6 +10,38 @@ def names(client, query):
     return set(items_by_name(client, query))
 
 
+# ── folder facet ─────────────────────────────────────────────────────────────
+
+def test_meta_folders_excludes_trash_dir(make_env):
+    """The app's <library>/_trash directory must not appear as a browsable folder
+    facet — it's covered by the Trash lifecycle filter, and surfacing it would
+    duplicate that control and inflate counts with hidden trashed files."""
+    rep = default_report()                               # folder == "/fake"
+    rep["images"].append(
+        {"path": "/fake/_trash/gone.jpg", "filename": "gone.jpg", "combined": 0.1,
+         "sharpness": 0.1, "para_aesthetic": 0.1, "dup_group": None,
+         "scene_group": None, "capture_time": 1.0, "imgw": 10, "imgh": 10,
+         "faces": []})
+    env = make_env(rep)
+    folders = {f["path"] for f in env.client.get("/api/meta").json()["folders"]}
+    assert not any(p.rstrip("\\/").endswith("_trash") for p in folders)
+    assert any(p.rstrip("\\/").endswith("fake") for p in folders)  # real folder kept
+
+
+def test_meta_folders_keeps_user_named_trash(make_env):
+    """Exclusion is by exact app-trash path, so a *different* folder coincidentally
+    named "_trash" (not under the library root) is still surfaced."""
+    rep = default_report()                               # folder == "/fake"
+    rep["images"].append(
+        {"path": "/other/_trash/keep.jpg", "filename": "keep.jpg", "combined": 0.5,
+         "sharpness": 0.5, "para_aesthetic": 0.5, "dup_group": None,
+         "scene_group": None, "capture_time": 1.0, "imgw": 10, "imgh": 10,
+         "faces": []})
+    env = make_env(rep)
+    folders = {f["path"] for f in env.client.get("/api/meta").json()["folders"]}
+    assert any(p.rstrip("\\/").endswith("_trash") for p in folders)
+
+
 # ── range filters ────────────────────────────────────────────────────────────
 
 def test_score_min(env):

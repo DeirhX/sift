@@ -176,9 +176,10 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(piles).toHaveCount(2)
 
     // Scenes are time-ordered: scene 0 (the beach burst) comes first and
-    // advertises its single near-duplicate set.
+    // advertises its single near-duplicate set (the pill reads "1 set"; the
+    // full "near-duplicate set" wording lives in its tooltip).
     const first = piles.first()
-    await expect(first).toContainText('1 near-dup set')
+    await expect(first).toContainText('1 set')
     await first.click()
 
     // The scene opens straight into the unified review — an open image up top
@@ -407,14 +408,26 @@ test.describe('face editing', () => {
 })
 
 test.describe('re-analyze panel', () => {
-  test('opens, prefills the folder and closes', async ({ page }) => {
+  test('opens, shows the source summary and closes', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: 'Re-analyze' }).click()
     const panel = page.locator('.analyze-panel')
     await expect(panel).toBeVisible()
-    await expect(panel.locator('input[type="text"]')).not.toHaveValue('')
+    // Folder management moved to the sidebar; the panel just summarises sources.
+    await expect(panel.locator('.af-folder-note')).toBeVisible()
     await panel.getByRole('button', { name: 'Close' }).click()
     await expect(panel).toHaveCount(0)
+  })
+})
+
+test.describe('folders panel', () => {
+  test('source folders are managed in the sidebar', async ({ page }) => {
+    await page.goto('/')
+    const folders = page.locator('.folder-manager')
+    await expect(folders).toBeVisible()
+    // The add field and button are present (first-class onboarding).
+    await expect(folders.locator('.folder-add input[type="text"]')).toBeVisible()
+    await expect(folders.getByRole('button', { name: 'Add' })).toBeVisible()
   })
 })
 

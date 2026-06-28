@@ -15,6 +15,7 @@ Serves:
   POST /api/faces/{id}/assign     { cluster_id | new_person } reassign a face
   DELETE /api/faces/{id}          remove a false-positive face box
   GET  /api/export                full decisions export (kept/deleted/unmarked)
+  POST /api/import                re-apply keep/del verdicts from an export
 
 In production it also serves the built React app from ./frontend/dist.
 
@@ -186,7 +187,16 @@ def get_meta():
         for (p,) in conn.execute("SELECT path FROM images"):
             d = os.path.dirname(p)
             folder_counts[d] = folder_counts.get(d, 0) + 1
-        folders = [{"path": k, "count": v} for k, v in sorted(folder_counts.items())]
+        # The app's own Trash directory (<library>/_trash) is reachable via the
+        # Trash lifecycle filter, so don't surface it as a browsable folder — it
+        # would duplicate that control and inflate folder counts with trashed
+        # files the default Library view hides. Excluded by exact path (not by
+        # name) so a user folder coincidentally called "_trash" is untouched.
+        folder_val = meta.get("folder")
+        trash_norm = (_norm_path(os.path.join(folder_val, "_trash"))
+                      if folder_val and folder_val != "None" else None)
+        folders = [{"path": k, "count": v} for k, v in sorted(folder_counts.items())
+                   if trash_norm is None or _norm_path(k) != trash_norm]
 
     return {
         "meta": meta,
@@ -485,10 +495,20 @@ def _minimal_roots(dirs: set[str]) -> list[str]:
 
 
 def _refresh_roots(conn) -> None:
-    """Reload PHOTO_ROOT_DIRS (display) + PHOTO_ROOTS (normalised) from the
-    photo_roots table. Call after any mutation and at startup."""
+    """Reload PHOTO_ROOT_DIRS (display) + PHOTO_ROOTS (normalised). Reveal is
+    allowed into the catalog's source folders (the user-managed library set)
+    PLUS any legacy/extra photo_roots (e.g. --photo-root or pre-unification
+    rows). Union, de-duped, source folders first. Call after any mutation and
+    at startup."""
     global PHOTO_ROOT_DIRS, PHOTO_ROOTS
-    PHOTO_ROOT_DIRS = photodb.get_photo_roots(conn)
+    seen: set[str] = set()
+    merged: list[str] = []
+    for d in (*photodb.get_library_folders(conn), *photodb.get_photo_roots(conn)):
+        k = _norm_path(d)
+        if k not in seen:
+            seen.add(k)
+            merged.append(d)
+    PHOTO_ROOT_DIRS = merged
     PHOTO_ROOTS = [_norm_path(p) for p in PHOTO_ROOT_DIRS]
 
 
@@ -539,6 +559,7 @@ def _init_library_folders() -> None:
                 photodb.add_library_folder(conn, val)
                 conn.commit()
         folders = photodb.get_library_folders(conn)
+        _refresh_roots(conn)            # source folders now contribute reveal roots
     print(f"Library folders: {folders or '(none — onboard one in the web UI)'}")
 
 
@@ -650,8 +671,9 @@ def get_folders():
 
 @app.post("/api/settings/folders")
 def add_folder(payload: dict = Body(...)):
-    """Onboard a source folder: add it to the analyze set and register it as a
-    reveal root. Re-run analysis afterwards to actually index its photos."""
+    """Onboard a source folder into the catalog. It joins the analyze set and,
+    because reveal roots are derived from the library folders, immediately
+    becomes reveal-allowed. Re-run analysis afterwards to index its photos."""
     raw = (payload.get("path") or "").strip().strip('"')
     if not raw:
         raise HTTPException(400, "path required")
@@ -673,22 +695,25 @@ def add_folder(payload: dict = Body(...)):
                     and _norm_path(val) != _norm_path(resolved)):
                 photodb.add_library_folder(conn, val)
         photodb.add_library_folder(conn, resolved)
-        photodb.add_photo_root(conn, resolved)
         conn.commit()
-        _refresh_roots(conn)
+        _refresh_roots(conn)            # library folders drive reveal permission
     return _folders_payload()
 
 
 @app.delete("/api/settings/folders")
 def delete_folder(payload: dict = Body(...)):
     """Remove a folder from the catalog's source set. Already-indexed photos
-    remain until the next re-analysis rebuilds from the remaining folders."""
+    remain until the next re-analysis rebuilds from the remaining folders;
+    decisions are hash-keyed and survive regardless. Also drops any matching
+    legacy reveal root so reveal permission follows the folder out."""
     raw = (payload.get("path") or "").strip()
     if not raw:
         raise HTTPException(400, "path required")
     with db() as conn:
         photodb.remove_library_folder(conn, raw)
+        photodb.remove_photo_root(conn, raw)
         conn.commit()
+        _refresh_roots(conn)
     return _folders_payload()
 
 
@@ -925,11 +950,14 @@ def delete_face(face_id: int):
 def export_decisions():
     with db() as conn:
         rows = conn.execute(
-            f"""SELECT i.path, i.filename, i.combined, d.decision
+            f"""SELECT i.path, i.filename, i.combined, i.content_hash, d.decision
                FROM images i LEFT JOIN {DEC_ON}""").fetchall()
     out = {"kept": [], "deleted": [], "unmarked": []}
     for r in rows:
-        entry = {"path": r["path"], "filename": r["filename"], "combined": r["combined"]}
+        # `hash` is the stable key (decisions are hash-keyed); path/filename are
+        # for humans and a fallback when re-importing into a moved library.
+        entry = {"hash": r["content_hash"], "path": r["path"],
+                 "filename": r["filename"], "combined": r["combined"]}
         if r["decision"] == "keep":
             out["kept"].append(entry)
         elif r["decision"] == "del":
@@ -938,6 +966,45 @@ def export_decisions():
             out["unmarked"].append(entry)
     return JSONResponse(out, headers={
         "Content-Disposition": "attachment; filename=audit_decisions.json"})
+
+
+@app.post("/api/import")
+def import_decisions(payload: dict = Body(...)):
+    """Re-apply keep/del verdicts from an exported audit_decisions.json.
+
+    Each entry is matched by content hash (preferred) or, failing that, by path.
+    Additive and non-destructive: it overwrites marks only for hashes present in
+    the file, leaves every other existing mark untouched, and ignores the
+    `unmarked` bucket (it carries no verdict to apply). A hash that isn't in the
+    current catalog is still recorded — it binds if that photo is indexed later,
+    exactly like decisions preserved across a rebuild."""
+    if "kept" not in payload and "deleted" not in payload:
+        raise HTTPException(400, "unrecognized export: expected 'kept'/'deleted' lists")
+    buckets = (("keep", payload.get("kept") or []),
+               ("del",  payload.get("deleted") or []))
+    applied = 0
+    unmatched = 0
+    with db() as conn:
+        for decision, entries in buckets:
+            for e in entries:
+                if not isinstance(e, dict):
+                    unmatched += 1
+                    continue
+                h = e.get("hash") or e.get("content_hash")
+                if not h and e.get("path"):
+                    row = conn.execute(
+                        "SELECT content_hash FROM images WHERE path=?",
+                        (e["path"],)).fetchone()
+                    h = row["content_hash"] if row else None
+                if not h:
+                    unmatched += 1
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                    (h, decision))
+                applied += 1
+        conn.commit()
+    return {"ok": True, "applied": applied, "unmatched": unmatched}
 
 
 # ── Bulk auto-cull duplicate groups ───────────────────────────────────────────

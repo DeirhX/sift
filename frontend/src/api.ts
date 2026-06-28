@@ -171,6 +171,13 @@ export function undoApply(): Promise<UndoResponse> {
   return jsonFetch<UndoResponse>('/api/apply/undo', { method: 'POST' })
 }
 
+// Re-apply keep/del verdicts from a previously exported audit_decisions.json.
+// The body is the parsed export object; the server matches by hash then path.
+export interface ImportResult { ok: boolean; applied: number; unmatched: number }
+export function importDecisions(data: unknown): Promise<ImportResult> {
+  return jsonFetch<ImportResult>('/api/import', jsonBody(data))
+}
+
 // ── Generic long-running tasks ───────────────────────────────────────────────
 export function startTask(type: string, params: Record<string, unknown> = {}): Promise<TaskSnapshot> {
   return jsonFetch<TaskSnapshot>('/api/tasks', jsonBody({ type, params }))

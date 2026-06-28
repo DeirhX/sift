@@ -1,8 +1,12 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import ApplyPanel from './ApplyPanel'
 import RangeSlider from './RangeSlider'
 import FolderTree from './FolderTree'
-import { renameCluster, mergeClusters } from '../api'
+import FolderInput from './FolderInput'
+import {
+  renameCluster, mergeClusters, startTask,
+  getLibraryFolders, addLibraryFolder, removeLibraryFolder,
+} from '../api'
 import type { Filters } from '../urlState'
 import type { MetaResponse, ClusterFacet, TaskSnapshot } from '../api/types'
 import type { UpdateFilter } from '../types'
@@ -145,7 +149,11 @@ interface SidebarProps {
   updateFilter: UpdateFilter
   toggleInList: (key: 'tags' | 'people', value: string) => void
   resetFilters: () => void
-  total: number
+  // The count/label of what the *active view* is showing (photos / scenes /
+  // groups), so the footer matches reality instead of always using the grid
+  // count — which is 0 in Scenes/Groups view (that query is disabled there).
+  shownCount: number
+  shownLabel: string
   onPeopleChange?: () => void
   onTaskDone?: (task: TaskSnapshot) => void
 }
@@ -154,7 +162,7 @@ const PEOPLE_CAP = 10
 const TAG_CAP = 14
 
 export default function Sidebar(
-  { meta, filters, updateFilter, toggleInList, resetFilters, total, onPeopleChange, onTaskDone }: SidebarProps,
+  { meta, filters, updateFilter, toggleInList, resetFilters, shownCount, shownLabel, onPeopleChange, onTaskDone }: SidebarProps,
 ) {
   const clusters = meta?.clusters ?? []
   const tags = meta?.tags ?? []
@@ -164,6 +172,73 @@ export default function Sidebar(
   const [peopleExpanded, setPeopleExpanded] = useState(false)
   const [tagQuery, setTagQuery] = useState('')
   const [tagsExpanded, setTagsExpanded] = useState(false)
+
+  // Source-folder management (the catalog's definition). Loaded once; kept in
+  // sync locally on add/remove. Each mutation auto-kicks a re-analyze — cheap,
+  // since unchanged folders are pure cache hits — so the change actually lands
+  // in the catalog. App's task poller shows progress and refreshes on done.
+  const [libFolders, setLibFolders] = useState<string[] | null>(null)
+  const [folderInput, setFolderInput] = useState('')
+  const [folderBusy, setFolderBusy] = useState(false)
+  const [folderMsg, setFolderMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    getLibraryFolders()
+      .then((d) => { if (live) setLibFolders(d.folders) })
+      .catch(() => { if (live) setLibFolders([]) })
+    return () => { live = false }
+  }, [])
+
+  // Indexed photo count for a source folder: sum the directory facet entries
+  // (meta.folders) that sit at or below it. A folder added but not yet analyzed
+  // sums to 0, which the UI surfaces as "not indexed yet".
+  const sepOf = (s: string) => (s.includes('\\') ? '\\' : '/')
+  const countForFolder = (lib: string): number => {
+    const base = lib.replace(/[\\/]+$/, '')
+    const sep = sepOf(base)
+    let n = 0
+    for (const f of meta?.folders ?? []) {
+      if (f.path === base || f.path.startsWith(base + sep)) n += f.count
+    }
+    return n
+  }
+
+  const reanalyze = async (folders: string[], note: string) => {
+    if (!folders.length) { setFolderMsg('No folders left — add one to rebuild the catalog.'); return }
+    await startTask('analyze_library', { folders })
+    setFolderMsg(note)
+  }
+
+  const addFolder = async () => {
+    const path = folderInput.trim().replace(/[\\/]+$/, '')
+    if (!path || folderBusy) return
+    setFolderBusy(true); setFolderMsg(null)
+    try {
+      const d = await addLibraryFolder(path)
+      setLibFolders(d.folders)
+      setFolderInput('')
+      await reanalyze(d.folders, 'Indexing the new folder…')
+    } catch (e) {
+      setFolderMsg(e instanceof Error ? e.message : String(e))
+    } finally { setFolderBusy(false) }
+  }
+
+  const removeFolder = async (path: string) => {
+    if (folderBusy) return
+    if (!window.confirm(
+      `Remove this folder from the library?\n\n${path}\n\n` +
+      'Its photos leave the catalog on the next index. Your keep/delete ' +
+      'decisions are kept and re-bind if you add it back.')) return
+    setFolderBusy(true); setFolderMsg(null)
+    try {
+      const d = await removeLibraryFolder(path)
+      setLibFolders(d.folders)
+      await reanalyze(d.folders, 'Re-indexing the remaining folders…')
+    } catch (e) {
+      setFolderMsg(e instanceof Error ? e.message : String(e))
+    } finally { setFolderBusy(false) }
+  }
 
   const personLabel = (c: ClusterFacet): string =>
     c.name && c.name.trim() ? c.name : `Person ${c.cluster_id}`
@@ -250,6 +325,66 @@ export default function Sidebar(
           onChange={(v) => updateFilter({ dir: v })}
         />
       </div>
+
+      {/* Folders are first-class: this section both *manages* the catalog's
+          source folders (add/remove → auto re-analyze) and *filters* by them. */}
+      <Section title="Folders" sticky="folders" summary={folderSummary} defaultOpen>
+        <div className="folder-manager">
+          {libFolders == null ? (
+            <div className="folder-empty">Loading folders…</div>
+          ) : libFolders.length === 0 ? (
+            <div className="folder-empty">No folders yet — add one to build your library.</div>
+          ) : (
+            <ul className="folder-roots">
+              {libFolders.map((f) => {
+                const n = countForFolder(f)
+                return (
+                  <li key={f} className="folder-root" title={f}>
+                    <span className="folder-root-name">
+                      {f.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || f}
+                    </span>
+                    <span className={'folder-root-count' + (n > 0 ? '' : ' pending')}>
+                      {n > 0 ? n.toLocaleString() : 'not indexed'}
+                    </span>
+                    <button
+                      className="folder-root-x"
+                      title="Remove from library (decisions are kept)"
+                      disabled={folderBusy}
+                      onClick={() => removeFolder(f)}
+                    >
+                      ×
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+
+          <div className="folder-add">
+            <FolderInput
+              value={folderInput}
+              onChange={setFolderInput}
+              disabled={folderBusy}
+              placeholder="Add a folder…"
+            />
+            <button
+              className="btn"
+              disabled={folderBusy || !folderInput.trim()}
+              onClick={addFolder}
+            >
+              Add
+            </button>
+          </div>
+          {folderMsg && <div className="folder-msg">{folderMsg}</div>}
+
+          {(meta?.folders?.length ?? 0) > 0 && (
+            <>
+              <div className="folder-filter-label">Filter by folder</div>
+              <FolderTree folders={meta?.folders} filters={filters} updateFilter={updateFilter} embedded />
+            </>
+          )}
+        </div>
+      </Section>
 
       <Section title="Scores" sticky="scores" summary={scoresSummary} defaultOpen={false}>
         <RangeSlider label="Quality range" minKey="scoreMin" maxKey="scoreMax" filters={filters} updateFilter={updateFilter} histogram={hist.combined} />
@@ -356,12 +491,6 @@ export default function Sidebar(
         </Section>
       )}
 
-      {(meta?.folders?.length ?? 0) > 0 && (
-        <Section title="Folders" sticky="folders" summary={folderSummary} defaultOpen={false}>
-          <FolderTree folders={meta?.folders} filters={filters} updateFilter={updateFilter} embedded />
-        </Section>
-      )}
-
       {tags.length > 0 && (
         <Section title="Tags" sticky="tags" summary={tagsSummary} defaultOpen={false}>
           {tags.length > TAG_CAP && (
@@ -395,14 +524,12 @@ export default function Sidebar(
 
       <button className="btn full" onClick={resetFilters}>Reset filters</button>
 
-      <a className="btn full" href="/api/export" style={{ textAlign: 'center', textDecoration: 'none' }}>
-        Export decisions
-      </a>
-
       <ApplyPanel onTaskDone={onTaskDone} />
 
       <div className="stats">
-        Showing <b>{total.toLocaleString()}</b> of {(counts?.total ?? 0).toLocaleString()}<br />
+        Showing <b>{shownCount.toLocaleString()}</b> {shownLabel}
+        {shownLabel === 'photos' && <> of {(counts?.total ?? 0).toLocaleString()}</>}
+        <br />
         With faces: <b>{counts?.with_faces ?? 0}</b>
       </div>
     </aside>

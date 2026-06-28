@@ -3,9 +3,10 @@ import ScenePile from './ScenePile'
 import WindowedPileGrid from './WindowedPileGrid'
 import type { ScenesResponse } from '../api/types'
 
-// Reserved height below each square stack: scene meta row + one clamped keyword
-// row. Keeps pile cells uniform so the grid can window by row.
-const SCENE_META_H = 80
+// Reserved height below each square stack: two scene meta rows (time + dup-set
+// count, then the verdict tally) plus one clamped keyword row. Keeps pile cells
+// uniform so the grid can window by row.
+const SCENE_META_H = 100
 
 // Minimal slice of the useInfiniteQuery result this view consumes (decoupled
 // from react-query's generics; the real result is structurally assignable).

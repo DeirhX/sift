@@ -1,10 +1,6 @@
 import { useState, useEffect } from 'react'
-import {
-  fetchTasks, startTask, cancelTask,
-  getLibraryFolders, addLibraryFolder, removeLibraryFolder,
-} from '../api'
+import { fetchTasks, startTask, cancelTask, getLibraryFolders } from '../api'
 import TaskPanel from './TaskPanel'
-import FolderInput from './FolderInput'
 import type { TaskSnapshot } from '../api/types'
 
 interface AnalyzeParams {
@@ -24,16 +20,15 @@ interface AnalyzeParams {
 }
 
 interface AnalyzePanelProps {
-  defaultFolder?: string
   onClose: () => void
   onDone?: (task: TaskSnapshot) => void
 }
 
-// Modal to re-run `sift analyze` + `sift index` from the browser, streaming
-// their live output (tqdm progress included) and showing the exact command.
-// The launcher is constrained: known flags only; the folder is the one free
-// (server-validated) field.
-export default function AnalyzePanel({ defaultFolder, onClose, onDone }: AnalyzePanelProps) {
+// Modal to re-run `sift analyze` + `sift index` from the browser with chosen
+// options, streaming their live output (tqdm progress included). Folder
+// management lives in the sidebar's Folders panel now; this panel just operates
+// on whatever source folders are already configured.
+export default function AnalyzePanel({ onClose, onDone }: AnalyzePanelProps) {
   const [p, setP] = useState<AnalyzeParams>({
     recurse: true,
     no_clip: false,
@@ -55,48 +50,15 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
   const [error, setError] = useState<string | null>(null)
   const [showAdv, setShowAdv] = useState(false)
 
-  // The catalog's onboarded source folders. Analyze scans their union; filtering
-  // by folder afterwards is the normal Folders facet, no extra wiring.
+  // The catalog's onboarded source folders, read-only here (managed in the
+  // sidebar). Analyze scans their union; Run is disabled if there are none.
   const [folders, setFolders] = useState<string[] | null>(null)
-  const [newFolder, setNewFolder] = useState(defaultFolder || '')
-  const [folderBusy, setFolderBusy] = useState(false)
-  const [folderErr, setFolderErr] = useState<string | null>(null)
 
   const set = (patch: Partial<AnalyzeParams>) => setP((v) => ({ ...v, ...patch }))
 
   useEffect(() => {
     getLibraryFolders().then((d) => setFolders(d.folders)).catch(() => setFolders([]))
   }, [])
-
-  const addFolder = async () => {
-    const path = newFolder.trim().replace(/[\\/]+$/, '')
-    if (!path || folderBusy) return
-    setFolderBusy(true)
-    setFolderErr(null)
-    try {
-      const d = await addLibraryFolder(path)
-      setFolders(d.folders)
-      setNewFolder('')
-    } catch (e) {
-      setFolderErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setFolderBusy(false)
-    }
-  }
-
-  const removeFolder = async (path: string) => {
-    if (folderBusy) return
-    setFolderBusy(true)
-    setFolderErr(null)
-    try {
-      const d = await removeLibraryFolder(path)
-      setFolders(d.folders)
-    } catch (e) {
-      setFolderErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setFolderBusy(false)
-    }
-  }
 
   // Escape closes the panel. The job (if any) keeps running server-side and
   // re-attaches when the panel is reopened.
@@ -181,38 +143,15 @@ export default function AnalyzePanel({ defaultFolder, onClose, onDone }: Analyze
         <div className="analyze-body">
           <div className="analyze-form">
             <section className="af-group">
-              <div className="af-group-title">Library folders</div>
+              <div className="af-group-title">Source</div>
               <div className="af-folder-note">
-                Photos from every folder are scanned together (one catalog). Filter
-                by any of them later in the Folders filter.
+                {folders == null
+                  ? 'Loading source folders…'
+                  : folders.length === 0
+                    ? 'No source folders yet — add one in the Folders panel (sidebar).'
+                    : `Scans ${folders.length} source folder${folders.length === 1 ? '' : 's'} (one catalog). ` +
+                      'Add or remove folders in the Folders panel (sidebar).'}
               </div>
-              {folders == null ? (
-                <div className="af-folder-empty">Loading…</div>
-              ) : folders.length === 0 ? (
-                <div className="af-folder-empty">No folders yet — add one below.</div>
-              ) : (
-                <ul className="af-folder-list">
-                  {folders.map((f) => (
-                    <li key={f} className="af-folder-row">
-                      <span className="af-folder-path" title={f}>{f}</span>
-                      <button className="af-folder-del" disabled={running || folderBusy}
-                        title="Remove from catalog (re-analyze to drop its photos)"
-                        onClick={() => removeFolder(f)}>×</button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div className="af-folder-add">
-                <FolderInput
-                  value={newFolder}
-                  disabled={running || folderBusy}
-                  onChange={setNewFolder}
-                  placeholder="add a folder path…"
-                />
-                <button className="btn" disabled={running || folderBusy || !newFolder.trim()}
-                  onClick={addFolder}>Add</button>
-              </div>
-              {folderErr && <div className="af-error">{folderErr}</div>}
               <div className="af-checks">
                 <label><input type="checkbox" checked={p.recurse} disabled={running}
                   onChange={(e) => set({ recurse: e.target.checked })} /> Recurse subfolders</label>

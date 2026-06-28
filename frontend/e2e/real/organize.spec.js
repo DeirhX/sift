@@ -4,9 +4,10 @@ import path from 'path'
 import fs from 'fs'
 
 // REAL end-to-end: drive the actual analysis pipeline (photo_audit + build_db)
-// from the Re-analyze panel against a copy of a real library, then exercise the
-// reorganization (trash -> move del-marked files into <lib>/_trash/, restore).
-// Verifies file moves on disk via Node fs. Opt-in: see playwright.real.config.js.
+// by onboarding a copied real library in the sidebar Folders panel (which
+// auto-kicks analyze+index), then exercise the reorganization (trash -> move
+// del-marked files into <lib>/_trash/, restore). Verifies file moves on disk
+// via Node fs. Opt-in: see playwright.real.config.js.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const LIBPATH_FILE = path.join(__dirname, '..', '.real', 'libpath.txt')
@@ -46,26 +47,24 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   // Fresh DB -> empty grid before analysis.
   await expect(page.locator('.result-count')).toContainText('0 photos')
 
-  // ── Run the real analysis from the web panel ────────────────────────────────
-  await page.getByRole('button', { name: 'Re-analyze' }).click()
-  const panel = page.locator('.analyze-panel')
-  await expect(panel).toBeVisible()
-  const folder = panel.locator('input[type="text"]').first()
-  await folder.fill(lib)
-  await panel.getByRole('button', { name: 'Run analysis' }).click()
+  // ── Onboard the library from the sidebar; adding auto-kicks analyze+index ────
+  const folders = page.locator('.folder-manager')
+  await expect(folders).toBeVisible()
+  await folders.locator('.folder-add input[type="text"]').fill(lib)
+  const [taskResp] = await Promise.all([
+    page.waitForResponse((r) =>
+      r.url().includes('/api/tasks') && r.request().method() === 'POST'),
+    folders.getByRole('button', { name: 'Add' }).click(),
+  ])
+  expect(taskResp.ok()).toBeTruthy()
+  const analyzeTask = await taskResp.json()
 
-  // Stream runs photo_audit then build_db; wait for the success state. If it
-  // fails, surface the error text instead of a blind timeout.
-  await expect(async () => {
-    const failed = await panel.locator('.analyze-status.failed').count()
-    if (failed) {
-      const err = await panel.locator('.af-error').textContent().catch(() => '')
-      throw new Error(`analysis failed: ${err}`)
-    }
-    await expect(panel.locator('.analyze-status.done')).toBeVisible({ timeout: 2000 })
-  }).toPass({ timeout: ANALYZE_TIMEOUT })
-
-  await panel.getByRole('button', { name: 'Close' }).click()
+  // photo_audit then build_db; poll the background task to completion.
+  await expect.poll(async () => {
+    const status = await page.request.get(`/api/tasks/${analyzeTask.id}`)
+    expect(status.ok()).toBeTruthy()
+    return (await status.json()).state
+  }, { timeout: ANALYZE_TIMEOUT, intervals: [3000] }).toBe('done')
 
   // Grid is now populated from the freshly-built DB.
   await expect(page.locator('.result-count')).not.toContainText('0 photos')
