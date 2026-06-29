@@ -1,8 +1,6 @@
 """Unit tests for photo_audit's pure, model-free helpers: sharpness
 normalisation and perceptual-hash duplicate grouping."""
 from pathlib import Path
-from types import SimpleNamespace
-import sys
 
 import pytest
 
@@ -203,16 +201,12 @@ def test_clean_tags_splits_on_newlines_and_semicolons():
 def test_run_qwen_tags_degrades_gracefully_on_load_failure(monkeypatch, tmp_path):
     """A model/load failure must never propagate: every path gets [] and the
     run continues. This is what keeps a broken tagger from killing an audit."""
-    class AutoProcessor:
-        @staticmethod
-        def from_pretrained(*_args, **_kwargs):
-            raise RuntimeError("no model for you")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("torch")
 
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(bfloat16=object()))
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
-        AutoProcessor=AutoProcessor,
-        Qwen3VLForConditionalGeneration=object,
-    ))
+    def boom(*a, **k):
+        raise RuntimeError("no model for you")
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", boom)
 
     paths = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
     out = photo_audit.run_qwen_tags(paths, device="cpu", top_k=12)
@@ -220,18 +214,14 @@ def test_run_qwen_tags_degrades_gracefully_on_load_failure(monkeypatch, tmp_path
 
 
 def test_run_caption_and_tags_merges_qwen_tags(monkeypatch, tmp_path):
-    """run_caption_and_tags must attach run_qwen_tags output to each record even
+    """run_caption_and_tags must attach run_qwen_tags' output to each record even
     when BLIP captioning fails (captioning and tagging are independent paths)."""
-    class BlipProcessor:
-        @staticmethod
-        def from_pretrained(*_args, **_kwargs):
-            raise RuntimeError("no blip")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("torch")
 
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
-        BlipProcessor=BlipProcessor,
-        BlipForConditionalGeneration=object,
-    ))
+    def boom(*a, **k):
+        raise RuntimeError("no blip")
+    monkeypatch.setattr(transformers.BlipProcessor, "from_pretrained", boom)
 
     p = tmp_path / "x.jpg"
     # run_caption_and_tags lives in sift.audit.tagging and calls that module's
