@@ -2127,6 +2127,7 @@ select:focus, input:focus {
 }
 .folder-suggest-more:hover { background: transparent !important; }
 
+.pile-group-status { color: var(--text-dim); font-size: 12px; padding: 3px 1px 0; }
 .mark-preview, .review-notice { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 8px 14px; }
 .mark-preview-summary, .review-notice { display: flex; align-items: center; gap: 8px; }
 .mark-preview-summary > div, .review-notice > span { flex: 1; }

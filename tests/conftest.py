@@ -32,12 +32,12 @@ def default_report():
             # a + b are a near-dup set; all three share scene 0, so scene 0
             # nests one dup set ({a, b}) plus a loose member (c).
             {"path": "/fake/a.jpg", "filename": "a.jpg", "combined": 0.80,
-             "sharpness": 0.70, "para_aesthetic": 0.75, "dup_group": 0,
+             "sharpness": 0.70, "para_aesthetic": 0.75, "dup_group": 0, "dup_cull_safe": True,
              "scene_group": 0, "capture_time": 1000.0, "imgw": 400, "imgh": 300,
              "faces": [{"bbox": [10.0, 10.0, 50.0, 50.0], "prob": 0.99,
                         "cluster_id": 0, "name": None, "sharp": 0.90, "expr": 0.80}]},
             {"path": "/fake/b.jpg", "filename": "b.jpg", "combined": 0.60,
-             "sharpness": 0.50, "para_aesthetic": 0.55, "dup_group": 0,
+             "sharpness": 0.50, "para_aesthetic": 0.55, "dup_group": 0, "dup_cull_safe": True,
              "scene_group": 0, "capture_time": 1010.0, "imgw": 400, "imgh": 300,
              "faces": [{"bbox": [20.0, 20.0, 60.0, 60.0], "prob": 0.95,
                         "cluster_id": 1, "name": None, "sharp": 0.30, "expr": 0.40}]},

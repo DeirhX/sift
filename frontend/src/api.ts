@@ -125,6 +125,10 @@ export async function setDecisions(updates: {
   await jsonFetch('/api/decisions', jsonBody({ updates }))
 }
 
+export function previewAutocull(): Promise<{ changes: import('./types').ReviewMark[]; review: number }> {
+  return jsonFetch('/api/groups/autocull/preview')
+}
+
 export async function renameCluster(cluster_id: number, name: string | null): Promise<void> {
   await fetch('/api/clusters', jsonBody({ cluster_id, name }))
 }

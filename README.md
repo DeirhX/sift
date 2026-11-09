@@ -125,8 +125,8 @@ npm run typecheck                # tsc --noEmit; also runs as part of `npm run b
 ```
 
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
-captions; review duplicate groups; auto-cull (keep the best of each group);
-and finally move every `del`-marked file into `<library>/_trash/`. Trash is
+captions; review duplicate groups; preview auto-cull for exact copies and tight
+groups with a clear keeper; and move `del`-marked files into `<library>/_trash/`. Trash is
 recoverable via Restore; permanent deletion happens only when you Empty Trash.
 
 **Face editing** (sidebar "manage" + clicking a face box on a tile): rename or
@@ -144,7 +144,7 @@ marks follow paths moved by Sift's Trash and Restore actions.
 
 ## Scores (all 0–1, higher = better)
 
-- `sharpness` — normalized Laplacian variance (blur detection)
+- `sharpness` — Laplacian variance on a fixed log scale (blur detection)
 - `clip_iqa` — CLIP-IQA bipolar prompt score
 - `para_aesthetic`, `para_*` — PARA model heads (aesthetic/quality/composition/light/color/dof/content)
 - `combined` — `0.4 * sharpness + 0.6 * primary_aesthetic`

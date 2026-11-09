@@ -89,7 +89,7 @@ export default function App() {
 
   const groups = useInfiniteQuery({
     queryKey: ['groups', filters],
-    queryFn: ({ pageParam }) => fetchGroups(filters, pageParam, GROUP_PAGE),
+    queryFn: ({ pageParam }) => fetchGroups(filters, pageParam, GROUP_PAGE, 'review'),
     initialPageParam: 0,
     getNextPageParam: (last) => {
       const next = last.offset + last.limit
@@ -325,7 +325,8 @@ export default function App() {
             query={groups}
             onOpen={openGroup}
             reviewOpen={nav?.kind === 'group'}
-            onTaskDone={invalidateAfterTask}
+            onSaveReview={saveReview}
+            reviewBusy={reviewBusy}
           />
         )}
       </div>

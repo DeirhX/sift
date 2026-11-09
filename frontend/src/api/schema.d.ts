@@ -546,6 +546,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/groups/autocull/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Preview Autocull Groups */
+        get: operations["preview_autocull_groups_api_groups_autocull_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/groups/autocull": {
         parameters: {
             query?: never;
@@ -557,9 +574,7 @@ export interface paths {
         put?: never;
         /**
          * Autocull Groups
-         * @description For every duplicate group, mark the best-scoring photo 'keep' and the
-         *     rest 'del'. Overwrites existing marks within groups. Marks only — files
-         *     are not touched until /api/apply.
+         * @description Mark exact copies and clear winners in tight, active duplicate sets.
          */
         post: operations["autocull_groups_api_groups_autocull_post"];
         delete?: never;
@@ -777,6 +792,11 @@ export interface components {
             kept: number;
             /** Deleted */
             deleted: number;
+            /**
+             * Review
+             * @default 0
+             */
+            review: number;
         };
         /** ClusterFacet */
         ClusterFacet: {
@@ -856,6 +876,10 @@ export interface components {
             hash?: string | null;
             /** Combined */
             combined?: number | null;
+            /** Keeper Score */
+            keeper_score?: number | null;
+            /** Dup Cull Safe */
+            dup_cull_safe?: boolean | null;
             /** Sharpness */
             sharpness?: number | null;
             /** Para Aesthetic */
@@ -943,6 +967,10 @@ export interface components {
             hash?: string | null;
             /** Combined */
             combined?: number | null;
+            /** Keeper Score */
+            keeper_score?: number | null;
+            /** Dup Cull Safe */
+            dup_cull_safe?: boolean | null;
             /** Sharpness */
             sharpness?: number | null;
             /** Para Aesthetic */
@@ -2189,6 +2217,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_autocull_groups_api_groups_autocull_preview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
         };

@@ -37,13 +37,20 @@ export function representative<T extends RepItem = RepItem>(list: T[] | null | u
 }
 
 // Same list with its representative moved to the front; the rest keep their
-// incoming (best-quality-first) order. Used so the hero, ★ and "keep best" all
-// agree on the lead frame.
+// incoming order. The keeper recommendation is ranked separately.
 export function repFirst<T extends RepItem = RepItem>(list: T[] | null | undefined): T[] {
   if (!list || list.length === 0) return list ?? []
   const rep = representative(list)
   if (!rep) return list
   return [rep, ...list.filter((it) => it.id !== rep.id)]
+}
+
+export function rankKeepers<T extends Pick<ImageItem, 'id' | 'combined' | 'keeper_score' | 'trash_state' | 'hash'>>(
+  list: T[],
+): T[] {
+  const score = (it: T) => it.keeper_score ?? it.combined ?? -1
+  return list.filter((it) => !isDeleted(it) && it.hash != null)
+    .sort((a, b) => score(b) - score(a) || a.id - b.id)
 }
 
 export interface DupSet<T> {
@@ -131,6 +138,18 @@ export function fmtTimeRange(
 // *decision*, which is just a reversible mark that hasn't touched the file yet.
 export function isDeleted<T extends { trash_state?: string | null }>(it: T): boolean {
   return it.trash_state != null
+}
+
+export function groupActivity(items: Pick<ImageItem, 'trash_state' | 'decision'>[]) {
+  const active = items.filter((it) => !isDeleted(it))
+  const trashed = items.filter((it) => it.trash_state === 'trashed').length
+  const unavailable = items.length - active.length - trashed
+  return {
+    active,
+    needsReview: active.length > 1 && active.some((it) => !it.decision),
+    label: [`${active.length} active`, trashed && `${trashed} in Trash`, unavailable && `${unavailable} unavailable`]
+      .filter(Boolean).join(' · '),
+  }
 }
 
 // Drop trashed photos from a list unless `showDeleted`:

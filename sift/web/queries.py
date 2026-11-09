@@ -214,6 +214,13 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
     return where, params
 
 
+def keeper_score(combined, portrait):
+    """Let portrait quality sway close comparisons."""
+    if combined is None or portrait is None:
+        return combined
+    return round(combined + 0.05 * (portrait - 0.5), 6)
+
+
 def rows_to_items(conn, rows) -> list[dict]:
     """Attach face boxes + tags to a batch of image rows and shape them
     into the JSON payload used by /api/images and /api/groups."""
@@ -242,6 +249,7 @@ def rows_to_items(conn, rows) -> list[dict]:
             "id": d["id"], "filename": d["filename"], "path": d["path"],
             "hash": d["content_hash"],
             "combined": d["combined"], "sharpness": d["sharpness"],
+            "keeper_score": keeper_score(d["combined"], d.get("portrait")),
             "para_aesthetic": d["para_aesthetic"],
             "para_quality": d["para_quality"],
             "para_composition": d["para_composition"],
@@ -251,6 +259,7 @@ def rows_to_items(conn, rows) -> list[dict]:
             "para_content": d["para_content"],
             "clip_iqa": d["clip_iqa"],
             "dup_group": d["dup_group"],
+            "dup_cull_safe": bool(d.get("dup_cull_safe")),
             "dup_central": d.get("dup_central"),
             "scene_group": d.get("scene_group"),
             "capture_time": d.get("capture_time"),
@@ -269,7 +278,7 @@ def rows_to_items(conn, rows) -> list[dict]:
 
 
 def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
-                 agg_extra=""):
+                 agg_extra="", agg_join=""):
     """Shared skeleton for /api/groups and /api/scenes.
 
     Pages over a grouping column (`dup_group` or `scene_group`): a group is
@@ -289,7 +298,7 @@ def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
 
     grp_rows = conn.execute(
         f"""SELECT {group_col}, COUNT(*) c{agg_extra}
-            FROM images WHERE {group_col} IN ({qual})
+            FROM images i {agg_join} WHERE {group_col} IN ({qual})
             GROUP BY {group_col}
             ORDER BY {order_sql}
             LIMIT ? OFFSET ?""",

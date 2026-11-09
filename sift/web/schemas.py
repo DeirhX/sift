@@ -37,6 +37,8 @@ class ImageItem(BaseModel):
     path: str
     hash: str | None = None
     combined: float | None = None
+    keeper_score: float | None = None
+    dup_cull_safe: bool | None = None
     sharpness: float | None = None
     para_aesthetic: float | None = None
     para_quality: float | None = None
@@ -217,6 +219,7 @@ class AutocullResponse(BaseModel):
     groups: int
     kept: int
     deleted: int
+    review: int = 0
 
 
 class ApplyStatusResponse(BaseModel):

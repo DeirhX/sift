@@ -149,7 +149,7 @@ def test_stale_batch_rolls_back_earlier_updates(env):
 def test_autocull_keeps_best_deletes_rest(env):
     r = env.client.post("/api/groups/autocull").json()
     # group 0 = {a(.80), b(.60)} -> keep a, del b. c has no group, untouched.
-    assert r == {"groups": 1, "kept": 1, "deleted": 1}
+    assert r == {"groups": 1, "kept": 1, "deleted": 1, "review": 0}
     by = items_by_name(env.client)
     assert by["a.jpg"]["decision"] == "keep"
     assert by["b.jpg"]["decision"] == "del"
@@ -162,3 +162,65 @@ def test_autocull_overwrites_existing_marks(env):
     env.client.post("/api/decisions", json={"hash": by["a.jpg"]["hash"], "decision": "del"})
     env.client.post("/api/groups/autocull")
     assert items_by_name(env.client)["a.jpg"]["decision"] == "keep"
+
+
+def test_autocull_exact_copies_keep_one_active_file(real_library):
+    env = real_library([("a.jpg", 0.8, 0, "same"), ("b.jpg", 0.7, 0, "same"),
+                        ("c.jpg", 0.6, 0, "similar")])
+    client = env.client
+    assert client.post("/api/groups/autocull").json() == {
+        "groups": 1, "kept": 1, "deleted": 1, "review": 1,
+    }
+    by_name = items_by_name(client)
+    assert [by_name[f"{c}.jpg"]["decision"] for c in "abc"] == ["keep", "del", None]
+    assert client.post("/api/apply").json()["moved"] == 1
+    assert (env.lib / "a.jpg").exists()
+    assert (env.lib / "c.jpg").exists()
+    assert client.post("/api/groups/autocull").json()["deleted"] == 0
+
+
+def test_autocull_leaves_tight_near_ties_for_review(env):
+    import sqlite3
+
+    with sqlite3.connect(env.db) as conn:
+        conn.execute("UPDATE images SET combined=0.8, portrait=NULL WHERE dup_group=0")
+    result = env.client.post("/api/groups/autocull").json()
+    assert result["review"] == 1 and result["deleted"] == 0
+    assert all(it["decision"] is None for it in items_by_name(env.client).values())
+
+
+def test_autocull_ranks_only_active_members(real_library):
+    import sqlite3
+
+    env = real_library([("a.jpg", 0.9, 0, "a"), ("b.jpg", 0.8, 0, "b"),
+                        ("c.jpg", 0.7, 0, "c")])
+    client = env.client
+    first = items_by_name(client)["a.jpg"]
+    client.post("/api/decisions", json={"hash": first["hash"], "decision": "del"})
+    assert client.post("/api/apply").json()["moved"] == 1
+    with sqlite3.connect(env.db) as conn:
+        conn.execute("UPDATE images SET dup_cull_safe=1")
+
+    assert client.post("/api/groups/autocull").json()["kept"] == 1
+    by_name = items_by_name(client)
+    assert by_name["b.jpg"]["decision"] == "keep"
+    assert by_name["c.jpg"]["decision"] == "del"
+    assert client.post("/api/apply").json()["moved"] == 1
+    assert (env.lib / "b.jpg").exists()
+
+
+def test_autocull_preview_and_stale_apply_are_read_only(env):
+    client = env.client
+    preview = client.get("/api/groups/autocull/preview").json()
+    assert {change["filename"]: change["decision"] for change in preview["changes"]} == {
+        "a.jpg": "keep", "b.jpg": "del",
+    }
+    assert all(it["decision"] is None for it in items_by_name(client).values())
+
+    changes = [{**change, "expected_decision": change["previous"]} for change in preview["changes"]]
+    photo = items_by_name(client)["b.jpg"]
+    client.post("/api/decisions", json={"id": photo["id"], "hash": photo["hash"], "decision": "keep"})
+    assert client.post("/api/decisions", json={"updates": changes}).status_code == 409
+    current = items_by_name(client)
+    assert current["a.jpg"]["decision"] is None
+    assert current["b.jpg"]["decision"] == "keep"
