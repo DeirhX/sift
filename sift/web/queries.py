@@ -12,10 +12,11 @@ in ``server.py``.
 import os
 
 
-# Decisions are keyed by content hash, so every query that needs a photo's
-# keep/del state joins on it the same way. One definition so the join key can't
-# drift across the half-dozen queries that use it.
-DEC_ON = "decisions d ON d.hash = i.content_hash"
+# Older decisions apply by content hash. A particular copy can override its
+# hash's decision, including clearing an inherited mark.
+DEC_JOIN = """LEFT JOIN decisions d ON d.hash = i.content_hash
+              LEFT JOIN copy_decisions cd ON cd.hash = i.content_hash AND cd.path = i.path"""
+DECISION = "CASE WHEN cd.path IS NULL THEN d.decision ELSE cd.decision END"
 # The ledger is matched by the file's trash path, never by image id: `sift index`
 # renumbers images on every rebuild, so an id recorded at trash time later
 # belongs to an unrelated photo. A trashed image's `path` IS its trash path, and
@@ -174,11 +175,11 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
     if chosen and len(chosen) < 3:   # a strict subset constrains; full set = all
         ors = []
         if want_keep:
-            ors.append("d.decision = 'keep'")
+            ors.append(f"({DECISION}) = 'keep'")
         if want_del:
-            ors.append("d.decision = 'del'")
+            ors.append(f"({DECISION}) = 'del'")
         if want_none:
-            ors.append("d.decision IS NULL")
+            ors.append(f"({DECISION}) IS NULL")
         where.append("(" + " OR ".join(ors) + ")")
 
     # Lifecycle axis — a multi-select of active(library) / trashed, OR'd. Legacy
@@ -275,7 +276,7 @@ def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
 
     # Groups with at least one member passing the filters.
     qual = (f"SELECT DISTINCT i.{group_col} FROM images i "
-            f"LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON} WHERE {where_sql}")
+            f"{DEC_JOIN} LEFT JOIN {TRASH_ON} WHERE {where_sql}")
     total = conn.execute(f"SELECT COUNT(*) FROM ({qual})", params).fetchone()[0]
 
     grp_rows = conn.execute(
@@ -292,15 +293,15 @@ def grouped_page(conn, group_col, where, params, order_sql, offset, limit,
     if page_gids:
         ph = ",".join("?" * len(page_gids))
         match_ids = {r[0] for r in conn.execute(
-            f"SELECT i.id FROM images i LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON} "
+            f"SELECT i.id FROM images i {DEC_JOIN} LEFT JOIN {TRASH_ON} "
             f"WHERE {where_sql} AND i.{group_col} IN ({ph})", params + page_gids)}
 
     page = []
     for gr in grp_rows:
         members = conn.execute(
-            f"""SELECT i.*, d.decision, tm.state AS trash_state,
+            f"""SELECT i.*, ({DECISION}) AS decision, tm.state AS trash_state,
                        tm.from_path AS original_path, tm.trashed_at
-                FROM images i LEFT JOIN {DEC_ON} LEFT JOIN {TRASH_ON}
+                FROM images i {DEC_JOIN} LEFT JOIN {TRASH_ON}
                 WHERE i.{group_col} = ? ORDER BY i.combined DESC, i.id ASC""",
             (gr[group_col],),
         ).fetchall()

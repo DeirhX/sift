@@ -24,12 +24,23 @@ export type NumericFilterKey = {
 
 // One row of a bulk keep/del/clear operation over a group's members.
 export interface BulkDecision {
+  path?: string
   id: number
   hash: string | null
   decision: Decision | null
+  expected_decision?: Decision | null
 }
 
-export type BulkDecisionFn = (decisions: BulkDecision[]) => void
+export interface ReviewMark extends BulkDecision {
+  filename: string
+  previous: Decision | null
+}
+
+export interface ReviewPlan {
+  title: string
+  note?: string
+  changes: ReviewMark[]
+}
 
 // Lightbox index control: a new index, null to close, or a functional updater.
 export type LightboxIndex = number | null | ((prev: number) => number)

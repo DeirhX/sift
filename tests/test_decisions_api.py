@@ -110,6 +110,40 @@ def test_import_rejects_bad_format(env):
     assert env.client.post("/api/import", json={"foo": 1}).status_code == 400
 
 
+def test_copy_marks_survive_trash_restore_and_export(real_library):
+    env = real_library([("a.jpg", 0.8, 0, "same"), ("b.jpg", 0.7, 0, "same")])
+    client = env.client
+    photo = items_by_name(client)["b.jpg"]
+    identity = {key: photo[key] for key in ("id", "hash", "path")}
+    client.post("/api/decisions", json={"hash": photo["hash"], "decision": "keep"})
+    assert client.post("/api/decisions", json={**identity, "decision": "del"}).is_success
+    assert client.post("/api/apply").json()["moved"] == 1
+    assert (env.lib / "a.jpg").exists()
+    assert client.post("/api/apply/undo").json()["restored"] == 1
+    assert items_by_name(client)["b.jpg"]["decision"] == "del"
+
+    client.post("/api/decisions", json={**identity, "decision": None})
+    saved = client.get("/api/export").json()
+    assert saved["unmarked"][0]["copy_specific"]
+    client.post("/api/decisions", json={**identity, "decision": "keep"})
+    assert client.post("/api/import", json=saved).is_success
+    photos = items_by_name(client)
+    assert photos["a.jpg"]["decision"] == "keep"
+    assert photos["b.jpg"]["decision"] is None
+
+
+def test_stale_batch_rolls_back_earlier_updates(env):
+    client = env.client
+    photos = items_by_name(client)
+    updates = [
+        {**{key: photos[name][key] for key in ("id", "hash", "path")},
+         "expected_decision": previous, "decision": "del"}
+        for name, previous in [("a.jpg", None), ("b.jpg", "keep")]
+    ]
+    assert client.post("/api/decisions", json={"updates": updates}).status_code == 409
+    assert items_by_name(client)["a.jpg"]["decision"] is None
+
+
 # ── autocull ─────────────────────────────────────────────────────────────────
 
 def test_autocull_keeps_best_deletes_rest(env):

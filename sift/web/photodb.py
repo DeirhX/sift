@@ -337,6 +337,10 @@ def ensure_schema(conn) -> None:
     conn.executescript(LIBRARY_FOLDERS_DDL)
     conn.executescript(TRASH_DDL)
     conn.executescript(TASKS_DDL)
+    conn.execute("""CREATE TABLE IF NOT EXISTS copy_decisions (
+        path TEXT NOT NULL, hash TEXT NOT NULL, decision TEXT,
+        PRIMARY KEY (path, hash)
+    )""")
     ensure_anchors(conn)
     ensure_scene_merges(conn)
     # Created after the ALTERs so legacy tables don't index a missing column.

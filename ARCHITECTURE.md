@@ -93,8 +93,9 @@ decoupled.
   (`n_faces`, `face_sharp`, `face_expr`, `portrait`).
 - **`faces`** — per-face boxes, `prob`, `cluster_id`, per-face `sharp`/`expr`.
 - **`clusters`** — `cluster_id → name` (people). Manual people get ids ≥ 100000.
-- **`decisions`** — `content_hash → keep|del`. **Hash-keyed, not path-keyed**, so
-  decisions survive file moves/reorg.
+- **`decisions`** — `content_hash → keep|del`. These survive moves and reorgs.
+  **`copy_decisions`** overrides a shared verdict for a particular path and hash,
+  so culling one byte-identical copy can preserve another.
 - **`image_tags`** — keyword tags; mirrored into an FTS5 table (`images_fts`) for
   caption/tag search when available.
 - **`face_overrides`** — persisted UI face edits (assign/delete) keyed by

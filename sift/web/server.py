@@ -46,7 +46,7 @@ from sift.web import library_ops, photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
-from sift.web.queries import (DEC_ON, TRASH_ON, SORT_COLUMNS, histogram, image_where,
+from sift.web.queries import (DEC_JOIN, DECISION, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
 from sift.web.routes.trash import create_router as create_trash_router
 from sift.web.schemas import (
@@ -259,7 +259,7 @@ def get_images(
 
         base = f"""
             FROM images i
-            LEFT JOIN {DEC_ON}
+            {DEC_JOIN}
             LEFT JOIN {TRASH_ON}
             WHERE {where_sql}
         """
@@ -267,7 +267,7 @@ def get_images(
         total = conn.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0]
 
         rows = conn.execute(
-            f"""SELECT i.*, d.decision, tm.state AS trash_state,
+            f"""SELECT i.*, ({DECISION}) AS decision, tm.state AS trash_state,
                        tm.from_path AS original_path, tm.trashed_at {base}
                 ORDER BY {sort_col} {sort_dir}, i.id ASC
                 LIMIT ? OFFSET ?""",
@@ -783,23 +783,36 @@ def fs_complete(q: str = Query("")):
 
 @app.post("/api/decisions", response_model=OkResponse)
 def set_decision(payload: dict = Body(...)):
-    h = payload.get("hash")
-    decision = payload.get("decision")    # 'keep' | 'del' | None
-    # Backward-compatible fallback: resolve a path to its content hash.
-    if not h and payload.get("path"):
-        with db() as conn:
-            row = conn.execute("SELECT content_hash FROM images WHERE path=?",
-                               (payload["path"],)).fetchone()
-            h = row["content_hash"] if row else None
-    if not h:
-        raise HTTPException(400, "hash required")
+    updates = payload.get("updates", [payload])
+    if not isinstance(updates, list) or any(not isinstance(u, dict) for u in updates):
+        raise HTTPException(400, "expected a list of decision updates")
     with db() as conn:
-        if decision in ("keep", "del"):
-            conn.execute(
-                "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                (h, decision))
-        else:
-            conn.execute("DELETE FROM decisions WHERE hash=?", (h,))
+        conn.execute("BEGIN IMMEDIATE")
+        for update in updates:
+            h, path, image_id = update.get("hash"), update.get("path"), update.get("id")
+            decision = update.get("decision")
+            if decision not in ("keep", "del", None):
+                raise HTTPException(400, "invalid decision")
+            if image_id is not None:
+                row = conn.execute(
+                    f"""SELECT i.path, i.content_hash, ({DECISION}) AS decision, tm.state AS trash_state
+                        FROM images i {DEC_JOIN} LEFT JOIN {TRASH_ON} WHERE i.id=?""",
+                    (image_id,)).fetchone()
+                if not row or row["content_hash"] != h or (path and row["path"] != path):
+                    raise HTTPException(409, "photo changed, refresh and try again")
+                path = row["path"]
+                if "expected_decision" in update and (
+                    row["decision"] != update["expected_decision"] or row["trash_state"] is not None
+                ):
+                    raise HTTPException(409, "Marks changed. Refresh the preview and try again.")
+                if update.get("guard_only") and "expected_decision" in update:
+                    continue
+            elif not h and path:
+                row = conn.execute("SELECT content_hash FROM images WHERE path=?", (path,)).fetchone()
+                h = row["content_hash"] if row else None
+            if not h:
+                raise HTTPException(400, "hash required")
+            library_ops.write_decision(conn, h, decision, path)
         conn.commit()
     return {"ok": True}
 
@@ -950,14 +963,17 @@ def delete_face(face_id: int):
 def export_decisions():
     with db() as conn:
         rows = conn.execute(
-            f"""SELECT i.path, i.filename, i.combined, i.content_hash, d.decision
-               FROM images i LEFT JOIN {DEC_ON}""").fetchall()
+            f"""SELECT i.path, i.filename, i.combined, i.content_hash,
+                       ({DECISION}) AS decision, cd.path AS copy_path
+               FROM images i {DEC_JOIN}""").fetchall()
     out = {"kept": [], "deleted": [], "unmarked": []}
     for r in rows:
         # `hash` is the stable key (decisions are hash-keyed); path/filename are
         # for humans and a fallback when re-importing into a moved library.
         entry = {"hash": r["content_hash"], "path": r["path"],
                  "filename": r["filename"], "combined": r["combined"]}
+        if r["copy_path"] is not None:
+            entry["copy_specific"] = True
         if r["decision"] == "keep":
             out["kept"].append(entry)
         elif r["decision"] == "del":
@@ -974,23 +990,39 @@ def import_decisions(payload: dict = Body(...)):
 
     Each entry is matched by content hash (preferred) or, failing that, by path.
     Additive and non-destructive: it overwrites marks only for hashes present in
-    the file, leaves every other existing mark untouched, and ignores the
-    `unmarked` bucket (it carries no verdict to apply). A hash that isn't in the
+    the file and leaves every other existing mark untouched. Unmarked entries
+    apply only when they explicitly override a copy's inherited decision.
+    A hash that isn't in the
     current catalog is still recorded — it binds if that photo is indexed later,
     exactly like decisions preserved across a rebuild."""
     if "kept" not in payload and "deleted" not in payload:
         raise HTTPException(400, "unrecognized export: expected 'kept'/'deleted' lists")
     buckets = (("keep", payload.get("kept") or []),
-               ("del",  payload.get("deleted") or []))
+               ("del", payload.get("deleted") or []),
+               (None, payload.get("unmarked") or []))
     applied = 0
     unmatched = 0
     with db() as conn:
         for decision, entries in buckets:
             for e in entries:
+                if decision is None and (not isinstance(e, dict) or not e.get("copy_specific")):
+                    continue
                 if not isinstance(e, dict):
                     unmatched += 1
                     continue
                 h = e.get("hash") or e.get("content_hash")
+                if e.get("copy_specific"):
+                    row = conn.execute(
+                        "SELECT 1 FROM images WHERE path=? AND content_hash=?",
+                        (e.get("path"), h)).fetchone()
+                    if row:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO copy_decisions (path, hash, decision) VALUES (?,?,?)",
+                            (e["path"], h, decision))
+                        applied += 1
+                    else:
+                        unmatched += 1
+                    continue
                 if not h and e.get("path"):
                     row = conn.execute(
                         "SELECT content_hash FROM images WHERE path=?",

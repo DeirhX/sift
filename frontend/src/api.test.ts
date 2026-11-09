@@ -38,11 +38,13 @@ describe('fetch wrappers', () => {
   afterEach(() => vi.unstubAllGlobals())
 
   it('setDecision POSTs a JSON body', async () => {
-    await setDecision('hash123', 'keep')
+    await setDecision('hash123', 'keep', 1, '/photos/a.jpg')
     const [url, opts] = vi.mocked(fetch).mock.calls[0]
     expect(url).toBe('/api/decisions')
     expect(opts?.method).toBe('POST')
-    expect(JSON.parse(opts?.body as string)).toEqual({ hash: 'hash123', decision: 'keep' })
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      hash: 'hash123', decision: 'keep', id: 1, path: '/photos/a.jpg',
+    })
   })
 
   it('assignFace posts to the face endpoint and returns JSON', async () => {
