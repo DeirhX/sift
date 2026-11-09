@@ -95,8 +95,8 @@ decoupled.
 - **`clusters`** — `cluster_id → name` (people). Manual people get ids ≥ 100000.
 - **`decisions`** — `content_hash → keep|del`. **Hash-keyed, not path-keyed**, so
   decisions survive file moves/reorg.
-- **`image_tags`** — keyword tags; mirrored into an FTS5 table (`images_fts`) for
-  caption/tag search when available.
+- **`image_tags`** — keyword tags used for exact-match filtering. Captions are
+  indexed in the FTS5 table (`images_fts`) for text search when available.
 - **`face_overrides`** — persisted UI face edits (assign/delete) keyed by
   `(content_hash, bbox)`, replayed by `build_db` on every ingest.
 - **`cluster_name_anchors`** — pins a person's name to its face keys so renames

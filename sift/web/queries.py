@@ -57,6 +57,13 @@ def has_fts(conn) -> bool:
     return row is not None
 
 
+def fts_query(q: str) -> str:
+    """Turn free text into a safe FTS5 query: every word becomes a quoted
+    phrase (implicitly AND'd). Raw user text is FTS5 *syntax*, so "well-lit" or
+    an unbalanced quote would otherwise raise instead of searching."""
+    return " ".join('"' + t.replace('"', '""') + '"' for t in q.split())
+
+
 def histogram(conn, expr: str, bins: int = 24) -> list[int]:
     """Count rows of `expr` into `bins` equal buckets across the [0,1] domain.
     Values are clamped into [0,1]; NULLs are ignored."""
@@ -195,9 +202,10 @@ def image_where(conn, *, score_min, score_max, sharp_min, sharp_max,
         where.append("tm.id IS NULL")
 
     if q:
-        if has_fts(conn):
+        match = fts_query(q) if has_fts(conn) else None
+        if match:
             where.append("i.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)")
-            params.append(q)
+            params.append(match)
         else:
             where.append("i.caption LIKE ?")
             params.append(f"%{q}%")
