@@ -114,3 +114,28 @@ def test_apply_noop_when_nothing_marked(real_library):
     env = real_library(SPECS)
     r = env.client.post("/api/apply").json()
     assert r["moved"] == 0 and r["skipped"] == 0
+
+
+def test_trash_ledger_survives_reindex_renumbering(real_library, rebuild):
+    """`sift index` renumbers image ids. A trashed file drops out of the next
+    report (analyze skips _trash/), so its old id is handed to another photo —
+    which must not inherit the trash state, nor be repointed by a later restore."""
+    import json
+    env = real_library(SPECS)
+    _mark(env, "y.jpg", "del")
+    assert env.client.post("/api/apply").json()["moved"] == 1
+
+    report = json.loads(env.report.read_text(encoding="utf-8"))
+    report["images"] = [im for im in report["images"] if im["filename"] != "y.jpg"]
+    env.report.write_text(json.dumps(report), encoding="utf-8")
+    rebuild(env)
+
+    active = items_by_name(env.client)
+    assert set(active) == {"x.jpg", "z.jpg"}            # z took y's old id
+    assert all(it["trash_state"] is None for it in active.values())
+    assert items_by_name(env.client, "?limit=50&trash=trashed") == {}
+
+    assert env.client.post("/api/apply/undo").json()["restored"] == 1
+    assert (env.lib / "y.jpg").exists()
+    paths = {fn: Path(it["path"]) for fn, it in items_by_name(env.client).items()}
+    assert paths == {"x.jpg": env.lib / "x.jpg", "z.jpg": env.lib / "z.jpg"}

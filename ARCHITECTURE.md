@@ -103,8 +103,9 @@ decoupled.
   survive re-clustering on a fresh audit.
 - **`photo_roots`** — directories the `/api/reveal` guardrail is allowed to open.
 - **`trash_moves`** — file-level recycle-bin ledger (`trashed`, `restored`,
-  `emptied`, `missing`). This is keyed by image/path, not just content hash, so
-  exact byte-identical copies can be trashed/restored independently.
+  `emptied`, `missing`). Rows join to `images` by trash path (never by image id,
+  which `sift index` renumbers), so exact byte-identical copies can be
+  trashed/restored independently and a re-index can't mis-attach a row.
 - **`tasks` / `task_events`** — persisted task snapshots and replayable SSE events
   for analyze/index/trash/restore/empty/autocull operations.
 

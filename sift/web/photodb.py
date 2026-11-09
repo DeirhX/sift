@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS trash_moves (
 CREATE INDEX IF NOT EXISTS idx_trash_state ON trash_moves(state);
 CREATE INDEX IF NOT EXISTS idx_trash_image ON trash_moves(image_id);
 CREATE INDEX IF NOT EXISTS idx_trash_hash ON trash_moves(hash);
+CREATE INDEX IF NOT EXISTS idx_trash_path ON trash_moves(trash_path);
 """
 
 # Long-running web operations (analyze, index, apply, etc.) share one persisted
