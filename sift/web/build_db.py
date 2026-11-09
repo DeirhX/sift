@@ -233,17 +233,38 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     # DB meanwhile. The wipe+insert transaction is opened only afterwards.
     # Reuse the prior hash when a file's (mtime, size) is unchanged; otherwise
     # the worker hashes it. Workers also (re)build any missing thumbnail.
+    # An existing report can still list a photo at its original path after
+    # Trash moved it. Resolve that stale path before rebuilding the catalog.
+    latest_trash = {
+        original: (trash, hash_, state)
+        for original, trash, hash_, state in conn.execute(
+            "SELECT from_path, trash_path, hash, state FROM trash_moves ORDER BY id")
+    }
     jobs: list[tuple] = []
     reused = 0
     for idx, im in enumerate(images):
         src = Path(im["path"])
+        known_hash = None
         try:
             st = src.stat()
-            sig = (st.st_mtime, st.st_size)
+        except FileNotFoundError:
+            st = None
+            entry = latest_trash.get(im["path"])
+            if entry:
+                trash_path, trash_hash, state = entry
+                report_hash = im.get("content_hash")
+                if state != "restored" and (not report_hash or report_hash == trash_hash):
+                    src = Path(trash_path)
+                    known_hash = trash_hash
+                    images[idx] = im = {**im, "path": trash_path}
+                    try:
+                        st = src.stat()
+                    except OSError:
+                        pass
         except OSError:
-            sig = (None, None)
+            st = None
+        sig = (st.st_mtime, st.st_size) if st else (None, None)
         prev = prev_sig.get(im["path"])
-        known_hash = None
         if prev and prev[1] == sig[0] and prev[2] == sig[1]:
             known_hash = prev[0]
             reused += 1
