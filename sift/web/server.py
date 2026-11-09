@@ -25,6 +25,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import string
@@ -37,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager, contextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -76,13 +77,29 @@ async def _lifespan(_app: FastAPI):
     yield
 
 
+LOOPBACK_ORIGIN = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+
 app = FastAPI(title="Photo Audit", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # local single-user tool
+    allow_origin_regex=f"^{LOOPBACK_ORIGIN}$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def guard_browser_writes(request: Request, call_next):
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        if origin is None:
+            trusted = request.headers.get("sec-fetch-site") != "cross-site"
+        else:
+            same_origin = f"{request.url.scheme}://{request.url.netloc}"
+            trusted = origin == same_origin or re.fullmatch(LOOPBACK_ORIGIN, origin)
+        if not trusted:
+            return JSONResponse({"detail": "Cross-origin write blocked"}, status_code=403)
+    return await call_next(request)
 
 
 @contextmanager
