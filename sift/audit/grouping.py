@@ -17,14 +17,11 @@ from .imaging import load_rgb
 # ── Perceptual hashing / duplicate detection ──────────────────────────────────
 
 def compute_phashes(paths: list, progress=None) -> tuple[dict, dict]:
-    """Returns (hashes, sizes). Sizes are raw (pre-EXIF-transpose) (w, h),
-    matching the coordinate space the face detector uses for its bboxes, so
-    the frontend can scale face overlays and lay out aspect-correct tiles.
-
-    The hash itself is taken on the EXIF-corrected (upright) image, so an
-    orientation-variant re-save matches its sibling instead of reading as a
-    90°-rotated stranger. `sizes` stays raw on purpose — it's a coordinate
-    contract with the face overlays, a separate concern from visual similarity.
+    """Returns (hashes, sizes). Both come from the EXIF-corrected (upright)
+    image: the hash so an orientation-variant re-save matches its sibling
+    instead of reading as a 90°-rotated stranger, and the (w, h) size because
+    it is the frame the face boxes and the displayed thumbnail live in, so the
+    frontend can scale overlays and lay out aspect-correct tiles.
 
     `progress`, if given, is called as progress(done, total) after each image so
     a caller can surface live progress — this phase reads every file from disk
@@ -35,9 +32,9 @@ def compute_phashes(paths: list, progress=None) -> tuple[dict, dict]:
     n = len(paths)
     for i, p in enumerate(tqdm(paths, desc="Perceptual hashing"), 1):
         try:
-            im = load_rgb(p)
-            sizes[p] = im.size
-            hashes[p] = imagehash.phash(ImageOps.exif_transpose(im))
+            upright = ImageOps.exif_transpose(load_rgb(p))
+            sizes[p] = upright.size
+            hashes[p] = imagehash.phash(upright)
         except Exception as e:
             print(f"  hash error {p.name}: {e}")
         if progress is not None:

@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS face_overrides (
     PRIMARY KEY (hash, bbox)
 );
 """
+# An 'assign' into a *detector* cluster can't be replayed by cluster id: the
+# clusterer renumbers its ids on every run, so the stored id later names a
+# different person. Such overrides also carry a reference face — one the
+# detector itself put in the target cluster — and replay follows that face to
+# whatever id its cluster has now. (Manual people keep stable ids >=
+# MANUAL_CLUSTER_BASE and need no reference.)
+_OVERRIDE_LATE_COLUMNS = (("target_hash", "TEXT"), ("target_bbox", "TEXT"))
 
 # Runtime-configurable photo roots: the directories the server's file-reveal
 # guardrail is allowed to open into. Persisted here (not in meta) so they
@@ -292,9 +299,13 @@ def create_base_schema(conn) -> None:
 
 
 def ensure_overrides(conn) -> None:
-    """Create just the face_overrides table. Cheap enough to call defensively
-    from write paths that record an override."""
-    conn.executescript(FACE_OVERRIDES_DDL)
+    """Create the face_overrides table and add its late columns. Cheap enough
+    to call defensively from write paths that record an override."""
+    conn.execute(FACE_OVERRIDES_DDL)
+    cols = _table_columns(conn, "face_overrides")
+    for col, decl in _OVERRIDE_LATE_COLUMNS:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE face_overrides ADD COLUMN {col} {decl}")
 
 
 def ensure_anchors(conn) -> None:
@@ -413,6 +424,75 @@ def _iou(a, b) -> float:
     area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
     union = area_a + area_b - inter
     return inter / union if union > 0.0 else 0.0
+
+
+def parse_bbox(key: str) -> tuple:
+    """Inverse of bbox_key: "x1,y1,x2,y2" -> four floats."""
+    x1, y1, x2, y2 = (float(v) for v in key.split(","))
+    return x1, y1, x2, y2
+
+
+def match_face(box, candidates):
+    """The candidate that is the *same face* as `box`: best bbox overlap at or
+    above ANCHOR_IOU_MIN, else None. `candidates` are sequences whose items
+    [1:5] are x1, y1, x2, y2 (e.g. `SELECT id, x1, y1, x2, y2, ...` rows).
+
+    Recorded face edits re-bind through this rather than exact coordinates: a
+    re-detection rarely lands on byte-identical boxes, and an edit that silently
+    fails to re-bind brings a deleted false positive back."""
+    best, best_iou = None, ANCHOR_IOU_MIN
+    for cand in candidates:
+        iou = _iou(box, tuple(float(v) for v in cand[1:5]))
+        if iou >= best_iou:
+            best, best_iou = cand, iou
+    return best
+
+
+def cluster_reference_face(conn, cluster_id, exclude_face_id=None):
+    """(hash, bbox_key) of a face the *detector* placed in `cluster_id`, to pin
+    an assign-override's target across re-clustering (see _OVERRIDE_LATE_COLUMNS).
+    Faces that were themselves manually moved in are skipped — on a rebuild they
+    start out wherever the detector puts them, not here. Returns None for manual
+    people (stable ids) and for clusters with no detector-native member left."""
+    if cluster_id is None or cluster_id < 0 or cluster_id >= MANUAL_CLUSTER_BASE:
+        return None
+    ensure_overrides(conn)
+    rows = conn.execute(
+        """SELECT f.id, f.x1, f.y1, f.x2, f.y2, i.content_hash
+           FROM faces f JOIN images i ON i.id = f.image_id
+           WHERE f.cluster_id = ? AND i.content_hash IS NOT NULL
+           ORDER BY f.prob DESC, f.id""", (cluster_id,)).fetchall()
+    for r in rows:
+        if r[0] == exclude_face_id:
+            continue
+        moved = [(None, *parse_bbox(o[0])) for o in conn.execute(
+            "SELECT bbox FROM face_overrides WHERE hash=? AND action='assign'",
+            (r[5],))]
+        if match_face(tuple(float(v) for v in r[1:5]), moved) is None:
+            return r[5], bbox_key(r[1], r[2], r[3], r[4])
+    return None
+
+
+def record_face_override(conn, hash_, box, action, cluster_id=None,
+                         target_ref=None) -> None:
+    """Persist a manual face edit so build_db can replay it. One edit per face:
+    an earlier override of the same face (matched by overlap, since its recorded
+    box may predate a re-detection) is replaced, not left to replay alongside."""
+    if not hash_:
+        return
+    ensure_overrides(conn)
+    box = tuple(float(v) for v in box)
+    for (old,) in conn.execute(
+            "SELECT bbox FROM face_overrides WHERE hash=?", (hash_,)).fetchall():
+        if _iou(box, parse_bbox(old)) >= ANCHOR_IOU_MIN:
+            conn.execute("DELETE FROM face_overrides WHERE hash=? AND bbox=?",
+                         (hash_, old))
+    t_hash, t_bbox = target_ref if target_ref else (None, None)
+    conn.execute(
+        "INSERT OR REPLACE INTO face_overrides "
+        "(hash, bbox, action, cluster_id, target_hash, target_bbox) "
+        "VALUES (?,?,?,?,?,?)",
+        (hash_, bbox_key(*box), action, cluster_id, t_hash, t_bbox))
 
 
 def portrait_score(face_sharp, face_expr):

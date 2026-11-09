@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from .clip_common import load_openclip_b32, encode_prompt_pairs, bipolar_score
 from .scoring import normalise_sharpness
-from .imaging import load_rgb
+from .imaging import load_upright
 
 # ── Portrait expression bipolar prompts (CLIP ViT-B/32, on face crops) ────────
 # Coarse "is this a flattering expression" signal. CLIP is weak at fine facial
@@ -28,6 +28,7 @@ EXPRESSION_PAIRS = [
 # Face-crop normalisation size so Laplacian variance is comparable across faces
 # of different pixel sizes (detail density, not absolute resolution).
 FACE_SHARP_PX = 160
+FACE_MODEL = "mtcnn+vggface2+upright-v1"
 
 
 def face_laplacian_variance(pil_img, box) -> float:
@@ -154,7 +155,7 @@ def run_faces(paths, device: str,
     for _i, p in enumerate(tqdm(paths, desc="Face detection"), 1):
         _p(0.60 * _i / _n_faces, f"Detecting faces {_i}/{_n_faces}")
         try:
-            img     = load_rgb(p).convert("RGB")
+            img     = load_upright(p).convert("RGB")
             w, h    = img.size
             boxes, probs = mtcnn.detect(img)
             if boxes is None:
@@ -231,7 +232,7 @@ def run_faces(paths, device: str,
         print("  Matching reference photos to clusters...")
         for name, ref_path in face_refs.items():
             try:
-                ref_img   = load_rgb(ref_path).convert("RGB")
+                ref_img   = load_upright(ref_path).convert("RGB")
                 ref_crops = mtcnn(ref_img)
                 if ref_crops is None:
                     print(f"    No face found in reference: {ref_path.name}")

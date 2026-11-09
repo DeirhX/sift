@@ -99,7 +99,10 @@ decoupled.
 - **`image_tags`** — keyword tags used for exact-match filtering. Captions are
   indexed in the FTS5 table (`images_fts`) for text search when available.
 - **`face_overrides`** — persisted UI face edits (assign/delete) keyed by
-  `(content_hash, bbox)`, replayed by `build_db` on every ingest.
+  `(content_hash, bbox)`, replayed by `build_db` on every ingest. Boxes re-bind
+  by overlap, and an assign into a detector cluster carries a reference face
+  (`target_hash/target_bbox`) because detector cluster ids are renumbered on
+  every run.
 - **`cluster_name_anchors`** — pins a person's name to its face keys so renames
   survive re-clustering on a fresh audit.
 - **`photo_roots`** — directories the `/api/reveal` guardrail is allowed to open.
@@ -121,9 +124,11 @@ decoupled.
   90°-rotated pixels. This is what lets a portrait and a landscape reframe of
   the *same* moment land in one near-dup group — measured CLIP cosine ~0.74 raw
   vs ~0.97 upright, the difference between "unrelated" and "above `dup_sim`".
-  The face detector deliberately stays in **raw** sensor coordinates: its bboxes
-  and the stored `imgw/imgh` are a coordinate contract with the frontend face
-  overlays, a separate concern from visual similarity.
+  The face detector sees the same upright pixels, and face boxes and the stored
+  `imgw/imgh` are **upright** coordinates too (report `"coords": "upright"`):
+  the frame thumbnails, `/img` and the overlays are drawn in. Reports and DBs
+  from before this recorded raw sensor coordinates; `sift analyze` upgrades
+  cached sizes and `sift index` migrates recorded face edits once.
 - **Override replay.** UI face edits write to `face_overrides`; `build_db`
   re-applies them after a fresh audit. The API recompute path
   (`server._reaggregate_faces`) and the ingest path both go through
