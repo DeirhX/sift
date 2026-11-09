@@ -76,12 +76,13 @@ export function fetchImages(filters: Filters, offset: number, limit: number): Pr
 }
 
 export function fetchGroups(
-  filters: Filters, offset: number, limit: number, order = 'size',
+  filters: Filters, offset: number, limit: number, order = 'size', dupGroup?: number,
 ): Promise<GroupsResponse> {
   const p = new URLSearchParams()
   p.set('offset', String(offset))
   p.set('limit', String(limit))
   p.set('order', order)
+  if (dupGroup != null) p.set('dup_group', String(dupGroup))
   appendFilters(p, filters)
   return jsonFetch<GroupsResponse>(`/api/groups?${p.toString()}`)
 }
@@ -107,6 +108,12 @@ export function regroupScenes(gap: number): Promise<RegroupResponse> {
 // slider and a full re-analyze (it's stored by image content hash server-side).
 export function mergeScenes(sceneGroups: number[]): Promise<RegroupResponse> {
   return jsonFetch<RegroupResponse>('/api/scenes/merge', jsonBody({ scene_groups: sceneGroups }))
+}
+
+export function splitScene(sceneGroup: number, imageId: number, hash: string): Promise<RegroupResponse> {
+  return jsonFetch<RegroupResponse>('/api/scenes/split', jsonBody({
+    scene_group: sceneGroup, image_id: imageId, hash,
+  }))
 }
 
 // Release a manually merged scene back to automatic time-gap segmentation.

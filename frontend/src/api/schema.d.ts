@@ -243,6 +243,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/scenes/split": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Split Scene
+         * @description Split a scene before the selected photo's capture time.
+         */
+        post: operations["split_scene_api_scenes_split_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/thumb/{image_id}": {
         parameters: {
             query?: never;
@@ -1164,6 +1184,15 @@ export interface components {
             /** Scenes */
             scenes: components["schemas"]["Scene"][];
         };
+        /** SplitSceneRequest */
+        SplitSceneRequest: {
+            /** Scene Group */
+            scene_group: number;
+            /** Image Id */
+            image_id: number;
+            /** Hash */
+            hash: string;
+        };
         /** TagFacet */
         TagFacet: {
             /** Tag */
@@ -1465,6 +1494,7 @@ export interface operations {
                 offset?: number;
                 limit?: number;
                 order?: string;
+                dup_group?: number | null;
                 score_min?: number;
                 score_max?: number;
                 sharp_min?: number;
@@ -1631,6 +1661,39 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["UnmergeSceneRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegroupResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    split_scene_api_scenes_split_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SplitSceneRequest"];
             };
         };
         responses: {

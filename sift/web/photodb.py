@@ -344,6 +344,10 @@ def ensure_schema(conn) -> None:
     )""")
     ensure_anchors(conn)
     ensure_scene_merges(conn)
+    conn.execute("""CREATE TABLE IF NOT EXISTS scene_splits (
+        anchor_hash TEXT NOT NULL, capture_time REAL NOT NULL,
+        PRIMARY KEY (anchor_hash, capture_time)
+    )""")
     # Created after the ALTERs so legacy tables don't index a missing column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_hash ON images(content_hash)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_portrait ON images(portrait)")

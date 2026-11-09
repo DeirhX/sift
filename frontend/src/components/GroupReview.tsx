@@ -35,6 +35,8 @@ interface GroupReviewProps {
   zoom?: boolean
   onSelect: (id: number) => void
   onZoom: (open: boolean) => void
+  onSplitBefore?: (id: number, hash: string) => Promise<void>
+  onOpenGroup?: (dupGroup: number) => void
   // Immediately move this set's del-marked photos to Trash (recoverable). When
   // provided, a "Delete N now" button appears whenever members are marked del.
   onApplyDeletes?: (ids: number[]) => Promise<void>
@@ -67,7 +69,7 @@ export default function GroupReview({
   group, onClose, onDecision,
   onSaveReview, onUndoReview, reviewBusy = false, reviewMessage,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
-  selId = null, zoom = false, onSelect, onZoom, onApplyDeletes,
+  selId = null, zoom = false, onSelect, onZoom, onApplyDeletes, onSplitBefore, onOpenGroup,
   defaultShowDeleted = false, defaultShowCulled = false,
 }: GroupReviewProps) {
   // Two kinds of "removed" member, each hidden by default so the strip reflects
@@ -76,6 +78,8 @@ export default function GroupReview({
   //     these is what makes marking Del shrink the set immediately.
   //   • DELETED — moved to Trash (trash_state set; an optimistic trash patch sets
   //     it the instant "Delete N now" fires).
+  const [splitting, setSplitting] = useState(false)
+  const [splitError, setSplitError] = useState<string | null>(null)
   const [plan, setPlan] = useState<ReviewPlan | null>(null)
   const [showCulled, setShowCulled] = useState(defaultShowCulled)
   const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
@@ -432,7 +436,7 @@ export default function GroupReview({
             {mode === "group" && <span className="review-filternote"> · {groupKind}</span>}
             <span className="review-sub"> · {mode === "group" ? activity.label : `${partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos`} · viewing {sel + 1}/{view.length}</span>
             {subExtra}
-            {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
+            {(applyErr || splitError) && <span className="review-filternote err"> · {applyErr || splitError}</span>}
           </div>
           <div className="review-actions">
             {/* ACT cluster — the real work (decide / delete), emphasised. Only
@@ -640,13 +644,29 @@ export default function GroupReview({
           </div>
           <div className="herobar-btns">
             <RecBadge rec={recById.get(cur.id)} />
+            {onOpenGroup && cur.dup_group != null && (
+              <button className="btn" onClick={() => onOpenGroup(cur.dup_group!)}>Open full duplicate group</button>
+            )}
+            {onSplitBefore && cur.hash != null && !isDeleted(cur) && cur.capture_time != null
+              && group.items.some((it) => it.capture_time != null && it.capture_time < cur.capture_time!) && (
+              <button className="btn" disabled={splitting} onClick={async () => {
+                setSplitting(true)
+                setSplitError(null)
+                try {
+                  await onSplitBefore(cur.id, cur.hash!)
+                } catch (e) {
+                  setSplitError(e instanceof Error ? e.message : 'Could not split scene')
+                  setSplitting(false)
+                }
+              }}>Split scene before this photo</button>
+            )}
             {mode === 'scene' && dupSiblings.length > 1 && (
               <button
                 className="btn"
                 onClick={keepThisDeleteDups}
                 title="Keep this frame, delete its near-duplicates in this scene"
               >
-                Keep · delete {dupSiblings.length - 1} near-dup{dupSiblings.length - 1 > 1 ? 's' : ''}
+                Preview marks for this set
               </button>
             )}
             <DecideButtons item={cur} onDecision={decide} />

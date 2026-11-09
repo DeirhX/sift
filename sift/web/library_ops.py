@@ -126,9 +126,8 @@ def recompute_scenes(conn, gap_seconds: float) -> dict[str, Any]:
     ``gap_seconds`` apart; everything tighter than that stays together. This is
     the "scene granularity" knob: there is no objectively correct gap (the gap
     distribution is a smooth continuum, not bimodal), so the value is a user
-    choice rather than something to detect. Near-duplicate groups are coarsened
-    back inside a single scene afterwards, so a dup set can never straddle a
-    boundary. Only multi-member scenes get an id; lone frames stay scene-less.
+    choice rather than something to detect. Duplicate groups can cross these
+    boundaries and are still browsable from the duplicate view.
 
     Untimed photos (no EXIF capture time) can't be ordered and are left out of
     scenes. Writes the new ``scene_group`` per image and records the chosen gap
@@ -137,7 +136,7 @@ def recompute_scenes(conn, gap_seconds: float) -> dict[str, Any]:
 
     ensure_library_schema(conn)
     rows = conn.execute(
-        "SELECT id, path, capture_time, dup_group FROM images").fetchall()
+        "SELECT id, path, capture_time FROM images").fetchall()
     id_by_path = {r["path"]: r["id"] for r in rows}
     timed = [r for r in rows if r["capture_time"] is not None]
     times = {r["path"]: r["capture_time"] for r in timed}
@@ -149,31 +148,61 @@ def recompute_scenes(conn, gap_seconds: float) -> dict[str, Any]:
     scene_of, _ = group_scenes(
         timed_paths, times, small_gap=gap_seconds, big_gap=gap_seconds)
 
-    dgmap: dict = defaultdict(list)
-    for r in rows:
-        if r["dup_group"] is not None:
-            dgmap[r["dup_group"]].append(r["path"])
-    dup_groups = [v for v in dgmap.values() if len(v) > 1]
-
     # Manual merges are pinned by content hash and re-applied on every recut, so
     # a user-declared "one scene" survives any slider move.
     merge_groups = scene_merge_path_groups(conn)
 
-    scene_assign, count = coarsen_scenes_for_dups(
-        timed_paths, scene_of, dup_groups, times=times,
-        extra_groups=merge_groups)
+    scene_assign, _ = coarsen_scenes_for_dups(
+        timed_paths, scene_of, [], times=times, extra_groups=merge_groups)
 
     conn.execute("UPDATE images SET scene_group = NULL")
     for path, sid in scene_assign.items():
         if sid is not None:
             conn.execute("UPDATE images SET scene_group=? WHERE id=?",
                          (sid, id_by_path[path]))
+    count = apply_scene_splits(conn)
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('scene_gap', ?)",
                  (str(gap_seconds),))
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('scene_groups', ?)",
                  (str(count),))
     conn.commit()
     return {"scene_groups": count, "gap": gap_seconds}
+
+
+def apply_scene_splits(conn) -> int:
+    """Replay cuts in the current scene containing each anchored frame."""
+    next_id = conn.execute("SELECT COALESCE(MAX(scene_group), -1) + 1 FROM images").fetchone()[0]
+    for h, cut in conn.execute("SELECT anchor_hash, capture_time FROM scene_splits ORDER BY capture_time"):
+        scenes = conn.execute(
+            """SELECT DISTINCT scene_group FROM images
+               WHERE content_hash=? AND capture_time=? AND scene_group IS NOT NULL""",
+            (h, cut)).fetchall()
+        for (gid,) in scenes:
+            if conn.execute("SELECT 1 FROM images WHERE scene_group=? AND capture_time<? LIMIT 1",
+                            (gid, cut)).fetchone():
+                conn.execute("UPDATE images SET scene_group=? WHERE scene_group=? AND capture_time>=?",
+                             (next_id, gid, cut))
+                next_id += 1
+    return conn.execute("SELECT COUNT(DISTINCT scene_group) FROM images").fetchone()[0]
+
+
+def split_scene(conn, scene_group: int, image_id: int, hash_: str) -> dict[str, Any] | None:
+    conn.execute("BEGIN IMMEDIATE")
+    row = conn.execute(
+        """SELECT i.capture_time FROM images i
+           WHERE i.id=? AND i.scene_group=? AND i.content_hash=? AND EXISTS (
+               SELECT 1 FROM images prev
+               WHERE prev.scene_group=i.scene_group AND prev.capture_time<i.capture_time)""",
+        (image_id, scene_group, hash_)).fetchone()
+    if row is None:
+        conn.rollback()
+        return None
+    conn.execute("INSERT OR IGNORE INTO scene_splits (anchor_hash, capture_time) VALUES (?,?)",
+                 (hash_, row[0]))
+    count = apply_scene_splits(conn)
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('scene_groups', ?)", (str(count),))
+    conn.commit()
+    return {"scene_groups": count, "gap": current_scene_gap(conn)}
 
 
 def _hashes_in_scenes(conn, scene_groups: list[int]) -> set[str]:
@@ -196,6 +225,17 @@ def merge_scenes(conn, scene_groups: list[int]) -> dict[str, Any]:
     hashes = _hashes_in_scenes(conn, sgs)
     if len(hashes) < 2:
         return recompute_scenes(conn, current_scene_gap(conn))
+
+    # An explicit merge supersedes cuts between the selected scenes.
+    s_ph = ",".join("?" * len(sgs))
+    conn.execute(
+        f"""DELETE FROM scene_splits AS s
+            WHERE EXISTS (SELECT 1 FROM images i WHERE i.content_hash=s.anchor_hash
+                          AND i.capture_time=s.capture_time AND i.scene_group IN ({s_ph})
+                          AND EXISTS (SELECT 1 FROM images j WHERE j.scene_group IN ({s_ph})
+                                      AND j.scene_group<>i.scene_group
+                                      AND j.capture_time<s.capture_time))""",
+        sgs + sgs)
 
     # Fold in any existing pin group that already touches one of these hashes,
     # so repeated merges stay transitive and the table holds disjoint groups.

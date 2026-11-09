@@ -400,7 +400,6 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     # Pinned by content hash (like decisions / face overrides), so a user's
     # "these two bursts are one scene" survives a fresh ingest. Recoarsen the
     # report's scene assignment with the pins folded in; renumbered ids are fine.
-    scene_groups_count = report.get("scene_groups", 0)
     from sift.web import library_ops
     merge_groups = library_ops.scene_merge_path_groups(conn)
     if merge_groups:
@@ -410,11 +409,12 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
         spaths = [r[0] for r in srows]
         scene_of = {r[0]: r[1] for r in srows}
         stimes = {r[0]: r[2] for r in srows}
-        new_assign, scene_groups_count = coarsen_scenes_for_dups(
+        new_assign, _ = coarsen_scenes_for_dups(
             spaths, scene_of, [], times=stimes, extra_groups=merge_groups)
         for p, sid in new_assign.items():
             conn.execute("UPDATE images SET scene_group=? WHERE path=?", (sid, p))
         print(f"  Re-applied {len(merge_groups)} manual scene merge(s)")
+    scene_groups_count = library_ops.apply_scene_splits(conn)
 
     # ── Meta ─────────────────────────────────────────────────────────────────
     for k in ("folder", "backend", "caption_model", "face_model", "scene_model"):

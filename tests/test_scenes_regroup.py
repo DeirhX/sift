@@ -1,5 +1,4 @@
-"""The 'scene granularity' knob: POST /api/scenes/regroup re-segments scenes by
-capture-time gap alone, and near-dup sets stay nested inside one scene."""
+"""Scene regrouping uses capture-time gaps and honors manual edits."""
 
 
 def _report(images):
@@ -28,17 +27,38 @@ def test_regroup_splits_on_gap(make_env):
     assert c.post("/api/scenes/regroup", json={"gap": 5}).json()["scene_groups"] == 0
 
 
-def test_regroup_keeps_dup_set_in_one_scene(make_env):
-    # c,d are a near-dup set straddling the 300s gap: coarsening must pull the
-    # whole thing into a single scene even though time alone would split it.
+def test_regroup_keeps_a_cross_scene_duplicate_link(make_env):
     env = make_env(_report([
         _img("a.jpg", 1000), _img("b.jpg", 1010), _img("c.jpg", 1020, dup=0),
         _img("d.jpg", 1320, dup=0), _img("e.jpg", 1330)]))
     c = env.client
 
-    assert c.post("/api/scenes/regroup", json={"gap": 120}).json()["scene_groups"] == 1
+    assert c.post("/api/scenes/regroup", json={"gap": 120}).json()["scene_groups"] == 2
+    group = c.get("/api/groups", params={"dup_group": 0}).json()["groups"][0]
+    assert {it["scene_group"] for it in group["items"]} == {0, 1}
     # Chosen gap is remembered for the slider to re-open on.
     assert c.get("/api/meta").json()["meta"]["scene_gap"] == "120.0"
+
+
+def test_manual_scene_split_survives_regroup_and_rebuild(make_env, rebuild):
+    images = [_img(f"{i}.jpg", 1000 + i * 10) for i in range(4)]
+    for image in images:
+        image["scene_group"] = 0
+    env = make_env(_report(images))
+    c = env.client
+    first = c.get("/api/scenes").json()["scenes"][0]
+    pivot = next(it for it in first["items"] if it["filename"] == "2.jpg")
+    cut = {"scene_group": first["scene_group"], "image_id": pivot["id"], "hash": pivot["hash"]}
+    assert c.post("/api/scenes/split", json=cut).json()["scene_groups"] == 2
+    assert c.post("/api/scenes/regroup", json={"gap": 600}).json()["scene_groups"] == 2
+    rebuild(env)
+    scenes = c.get("/api/scenes").json()["scenes"]
+    assert [{it["filename"] for it in s["items"]} for s in scenes] == [
+        {"0.jpg", "1.jpg"}, {"2.jpg", "3.jpg"},
+    ]
+    assert c.post("/api/scenes/merge", json={
+        "scene_groups": [s["scene_group"] for s in scenes],
+    }).json()["scene_groups"] == 1
 
 
 def test_merge_scenes_pins_and_survives_finer_regroup(make_env):
