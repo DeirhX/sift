@@ -37,6 +37,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from sift.audit.faces import FACE_MODEL, run_faces
+from sift.audit.grouping import read_capture_time
 from sift.audit.imaging import COORDS, read_upright_size
 
 
@@ -127,6 +128,10 @@ def main() -> None:
           f"min_rel={args.face_min_rel}, "
           f"eps={args.face_eps})")
 
+    capture_times = {
+        p: img.get("capture_time") or read_capture_time(p)
+        for p, img in zip(paths, report["images"])
+    }
     face_data, img_sizes, _ = run_faces(
         paths, device,
         face_refs=refs or None,
@@ -135,6 +140,7 @@ def main() -> None:
         min_face_rel=args.face_min_rel,
         eps=args.face_eps,
         score_expr=bool(report.get("face_expr_model")),
+        capture_times=capture_times,
     )
 
     # ── Patch report records ───────────────────────────────────────────────────
