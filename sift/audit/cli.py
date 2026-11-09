@@ -73,7 +73,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from .scoring import (laplacian_variance, normalise_sharpness,
+from .scoring import (laplacian_variance, calibrated_sharpness,
                       run_clip_iqa, run_para)
 from .tagging import run_caption_and_tags
 from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
@@ -362,7 +362,7 @@ def main():
     for _i, p in enumerate(tqdm(to_process, desc="Sharpness"), 1):
         raw_sharp[p] = laplacian_variance(p)
         emit_step("sharpness", 0.02, 0.12, _i, _n_proc, "Sharpness")
-    norm_sharp = normalise_sharpness([raw_sharp[p] for p in paths])
+    norm_sharp = calibrated_sharpness([raw_sharp[p] for p in paths])
     sharpness  = {p: s for p, s in zip(paths, norm_sharp)}
     emit_progress("sharpness", 0.12, "Sharpness complete", len(paths), len(paths))
 

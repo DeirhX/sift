@@ -44,6 +44,12 @@ def normalise_sharpness(values: list[float]) -> list[float]:
     return [(v - lo) / (hi - lo) for v in log_vals]
 
 
+def calibrated_sharpness(values: list[float]) -> list[float]:
+    """Fixed log scale for images measured at a maximum edge of 1920 px."""
+    lo, hi = np.log1p(40), np.log1p(15000)
+    return np.clip((np.log1p(values) - lo) / (hi - lo), 0.0, 1.0).tolist()
+
+
 # ── CLIP-IQA (ViT-L/14 bipolar prompts) ──────────────────────────────────────
 
 def load_clip_iqa(device: str):

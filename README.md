@@ -144,7 +144,7 @@ marks follow paths moved by Sift's Trash and Restore actions.
 
 ## Scores (all 0–1, higher = better)
 
-- `sharpness` — normalized Laplacian variance (blur detection)
+- `sharpness` — Laplacian variance on a fixed log scale (blur detection)
 - `clip_iqa` — CLIP-IQA bipolar prompt score
 - `para_aesthetic`, `para_*` — PARA model heads (aesthetic/quality/composition/light/color/dof/content)
 - `combined` — `0.4 * sharpness + 0.6 * primary_aesthetic`

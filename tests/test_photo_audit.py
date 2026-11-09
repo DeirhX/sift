@@ -30,6 +30,15 @@ def test_normalise_single_value():
     assert photo_audit.normalise_sharpness([3.0]) == [0.5]
 
 
+def test_calibrated_sharpness_is_stable_when_an_outlier_is_added():
+    from sift.audit.scoring import calibrated_sharpness
+
+    before = calibrated_sharpness([120, 3000])
+    after = calibrated_sharpness([120, 3000, 90000])
+    assert before == after[:2]
+    assert 0 < before[0] < before[1] < after[2] == 1
+
+
 # ── group_duplicates ─────────────────────────────────────────────────────────
 
 def _hashes(mapping):
