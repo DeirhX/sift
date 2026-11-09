@@ -36,7 +36,8 @@ import argparse
 from pathlib import Path
 from collections import defaultdict
 
-from sift.audit.faces import run_faces
+from sift.audit.faces import FACE_MODEL, run_faces
+from sift.audit.imaging import COORDS, read_upright_size
 
 
 def analyse(report: dict) -> None:
@@ -126,13 +127,14 @@ def main() -> None:
           f"min_rel={args.face_min_rel}, "
           f"eps={args.face_eps})")
 
-    face_data, img_sizes = run_faces(
+    face_data, img_sizes, _ = run_faces(
         paths, device,
         face_refs=refs or None,
         min_prob=args.min_prob,
         min_face_size=args.face_min_size,
         min_face_rel=args.face_min_rel,
         eps=args.face_eps,
+        score_expr=bool(report.get("face_expr_model")),
     )
 
     # ── Patch report records ───────────────────────────────────────────────────
@@ -141,6 +143,13 @@ def main() -> None:
         img["faces"] = face_data.get(p, [])
         if p in img_sizes:
             img["imgw"], img["imgh"] = img_sizes[p]
+        elif report.get("coords") != COORDS:
+            # Older report: stored sizes are raw sensor dimensions. Faces are now
+            # upright, so bring every size into the same frame.
+            try:
+                img["imgw"], img["imgh"] = read_upright_size(p)
+            except Exception:
+                pass
 
     n_face_images = sum(1 for img in report["images"] if img.get("faces"))
     cluster_ids = {
@@ -151,7 +160,8 @@ def main() -> None:
     }
     n_clusters = len(cluster_ids)
 
-    report["face_model"]   = "mtcnn+vggface2"
+    report["face_model"]   = FACE_MODEL
+    report["coords"]       = COORDS
     report["faces_images"] = n_face_images
     report["face_clusters"] = n_clusters
 

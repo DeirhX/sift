@@ -79,10 +79,10 @@ from .tagging import run_caption_and_tags
 from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
                        group_scenes, read_capture_time,
                        compute_clip_embeddings)
-from .faces import run_faces
+from .faces import FACE_MODEL, run_faces
 from .hashing import content_hash as compute_content_hash
 from .embed_store import EmbedStore
-from .imaging import RAW_EXTENSIONS
+from .imaging import COORDS, RAW_EXTENSIONS, read_upright_size
 
 AUTO_CULL_BURST_SECONDS = 8
 
@@ -255,6 +255,8 @@ def main():
 
     prev_by_path: dict = {}
     prev_by_hash: dict = {}
+    previous_face_model = None
+    previous_coords = None
     if not args.no_cache and out_path.exists():
         try:
             with open(out_path, encoding="utf-8") as f:
@@ -270,6 +272,8 @@ def main():
                         prev.get("face_expr_model") is not None,
                         prev.get("scene_model") is not None)
             if prev_cfg == cur_cfg:
+                previous_face_model = prev.get("face_model")
+                previous_coords = prev.get("coords")
                 prev_by_path = {r["path"]: r for r in prev.get("images", [])}
                 # Content-hash index: lets a file that moved/renamed reuse its
                 # record by identity (same bytes) even though its path changed.
@@ -420,6 +424,16 @@ def main():
         ) if to_process else ({}, {}))
     hashes.update(new_hashes)
     img_sizes = new_sizes
+    # Reports written before the upright coordinate format stored raw sensor
+    # dimensions. Re-read the (header-only) upright size of every reused record
+    # once, so rotated frames stop laying out sideways.
+    if cached and previous_coords != COORDS:
+        print(f"  Upgrading {len(cached)} cached image sizes to upright coordinates...")
+        for p in cached:
+            try:
+                img_sizes[p] = read_upright_size(p)
+            except Exception:
+                pass
     emit_progress("duplicates", 0.42, "Perceptual hashes complete", len(paths), len(paths))
 
     # ── Capture time (EXIF, mtime fallback; reused from cache when present) ──
@@ -519,7 +533,10 @@ def main():
     # an unchanged folder reuses cached faces.
     face_data: dict = {}
     face_embs: dict = {}
-    faces_global = bool(args.faces and to_process)
+    faces_global = bool(args.faces and (
+        to_process or previous_face_model != FACE_MODEL
+        or set(prev_by_path) != {str(p) for p in paths}
+    ))
     if faces_global:
         refs: dict = {}
         for item in args.face_ref:
@@ -565,6 +582,8 @@ def main():
             rec["dup_central"] = dup_central.get(p)
             rec["dup_cull_safe"] = p in cull_safe
             rec["scene_group"] = scene_assign.get(p)
+            if p in img_sizes:
+                rec["imgw"], rec["imgh"] = img_sizes[p]
             if use_para and use_clip_iqa:
                 rec["combined_clip_iqa"] = round(
                     0.4 * sharpness[p] + 0.6 * rec.get("clip_iqa", 0.5), 4)
@@ -633,7 +652,8 @@ def main():
             "folders":          [str(f) for f in folders],
             "backend":          "none" if args.no_clip else args.backend,
             "caption_model":    "blip-base+qwen3vl-8b-nf4" if args.caption else None,
-            "face_model":       "mtcnn+vggface2" if args.faces else None,
+            "coords":           COORDS,
+            "face_model":       FACE_MODEL if args.faces else None,
             "face_expr_model":  "clip-b32-expr" if (args.faces and args.face_expr) else None,
             "scene_model":      (None if not use_scenes
                                  else "exif+clip-b32" if not args.no_clip

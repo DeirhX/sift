@@ -43,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from sift.web import library_ops, photodb
-from sift.web.photodb import bbox_key, largest_face_aggregate, MANUAL_CLUSTER_BASE
+from sift.web.photodb import largest_face_aggregate, MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
 from sift.web.queries import (DEC_JOIN, DECISION, TRASH_ON, SORT_COLUMNS, histogram, image_where,
@@ -448,6 +448,8 @@ def serve_full(image_id: int, face_id: int | None = None):
                                 (face_id, image_id)).fetchone()
             if face is None:
                 raise HTTPException(404, "face not found on this photo")
+            coords = conn.execute("SELECT value FROM meta WHERE key='coords'").fetchone()
+            upright_boxes = bool(coords and coords[0] == "upright")
     if not row:
         raise HTTPException(404, "image not found")
     path = Path(row["path"])
@@ -464,15 +466,23 @@ def serve_full(image_id: int, face_id: int | None = None):
             from io import BytesIO
             from PIL import ImageOps
             from sift.audit.imaging import load_rgb
+            def face_crop(im):
+                x1, y1, x2, y2 = face
+                edge = max(x2 - x1, y2 - y1) * 2.6
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                return im.crop((max(0, cx - edge / 2), max(0, cy - edge / 2),
+                                min(im.width, cx + edge / 2),
+                                min(im.height, cy + edge / 2)))
+
             with load_rgb(path) as original:
-                if face is not None:
-                    x1, y1, x2, y2 = face
-                    edge = max(x2 - x1, y2 - y1) * 2.6
-                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                    original = original.crop((max(0, cx - edge / 2), max(0, cy - edge / 2),
-                                              min(original.width, cx + edge / 2),
-                                              min(original.height, cy + edge / 2)))
+                # Boxes are upright coordinates (crop after rotating); a library
+                # not re-analyzed since that change still holds raw-sensor boxes
+                # (crop first, then rotate).
+                if face is not None and not upright_boxes:
+                    original = face_crop(original)
                 img = ImageOps.exif_transpose(original).convert("RGB")
+                if face is not None and upright_boxes:
+                    img = face_crop(img)
             buf = BytesIO()
             img.save(buf, format="JPEG", quality=90)
         except Exception as e:
@@ -868,15 +878,6 @@ def rename_cluster(payload: dict = Body(...)):
     return {"ok": True}
 
 
-def _record_override(conn, hash_, bbox, action, cluster_id=None):
-    if not hash_:
-        return
-    photodb.ensure_overrides(conn)
-    conn.execute(
-        "INSERT OR REPLACE INTO face_overrides (hash, bbox, action, cluster_id) "
-        "VALUES (?,?,?,?)", (hash_, bbox, action, cluster_id))
-
-
 def _reanchor_cluster(conn, cid: int) -> None:
     """Re-pin a cluster's current name across all of its faces. Called after
     membership changes (merge/assign) so the name follows the cluster on a
@@ -921,9 +922,13 @@ def merge_clusters(payload: dict = Body(...)):
             f"""SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2
                 FROM faces f JOIN images i ON i.id = f.image_id
                 WHERE f.cluster_id IN ({ph})""", frm).fetchall()
+        # Pinned to a face the detector put in `into`, so the merge still lands
+        # on the same person after re-clustering renumbers the ids.
+        target_ref = photodb.cluster_reference_face(conn, into)
         for r in moving:
-            _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
-                             "assign", into)
+            photodb.record_face_override(
+                conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]),
+                "assign", into, target_ref)
         cur = conn.execute(
             f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
         moved = cur.rowcount
@@ -966,9 +971,11 @@ def assign_face(face_id: int, payload: dict = Body(...)):
             target = int(cid)
             conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
                          (target,))
+        target_ref = photodb.cluster_reference_face(conn, target, exclude_face_id=face_id)
         conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
-        _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
-                         "assign", target)
+        photodb.record_face_override(
+            conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]),
+            "assign", target, target_ref)
         # Keep the target's name anchors in step with its new membership.
         _reanchor_cluster(conn, target)
         conn.commit()
@@ -985,8 +992,8 @@ def delete_face(face_id: int):
             raise HTTPException(404, "face not found")
         conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
         _reaggregate_faces(conn, r["img"])
-        _record_override(conn, r["h"], bbox_key(r["x1"], r["y1"], r["x2"], r["y2"]),
-                         "delete")
+        photodb.record_face_override(
+            conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]), "delete")
         conn.commit()
     return {"ok": True}
 

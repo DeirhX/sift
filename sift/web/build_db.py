@@ -46,7 +46,7 @@ from tqdm import tqdm
 
 from sift.web import photodb
 from sift.web.photodb import bbox_key, largest_face_aggregate
-from sift.audit.imaging import load_rgb
+from sift.audit.imaging import COORDS, exif_orientation, load_rgb, upright_box
 
 HASH_CHUNK = 1 << 20   # 1 MiB read blocks when hashing file contents
 
@@ -65,35 +65,88 @@ def hash_file(path: Path) -> str:
         return hashlib.blake2b(str(path).encode("utf-8"), digest_size=16).hexdigest()
 
 
-def process_image(args: tuple) -> tuple:
+def process_image(args: tuple, upright: bool = False) -> tuple:
     """Worker: ensure an image's content hash and WebP thumbnail exist.
 
     Computes the content hash only when not already known (i.e. the file is new
     or changed), and generates the thumbnail only when it's missing or --force.
     Thumbnails are named by content hash so they're stable across re-sorts.
 
-    Returns (idx, content_hash, raw_size|None, status, err) where status is
-    "made" | "skip" | "fail". raw_size is (w, h) before EXIF transpose — the
-    same coordinate space the face detector uses — and is None when the source
-    wasn't opened (thumbnail skipped)."""
+    Returns (idx, content_hash, image_size|None, status, err) where status is
+    "made" | "skip" | "fail". Dimensions match the report coordinates and are
+    used only when the report carries no dimensions. They are None when the
+    source was not opened."""
     idx, src_path, known_hash, thumb_dir, size, quality, force, skip_thumbs = args
     try:
         content_hash = known_hash or hash_file(src_path)
-        raw_size = None
+        image_size = None
         status = "skip"
         if not skip_thumbs:
             dst = thumb_dir / f"{content_hash}.webp"
             if force or not dst.exists():
                 with load_rgb(src_path) as im:
-                    raw_size = im.size                      # pre-transpose (w, h)
                     out = ImageOps.exif_transpose(im)       # honour camera rotation
+                    image_size = out.size if upright else im.size
                     out = out.convert("RGB")
                     out.thumbnail((size, size), Image.LANCZOS)
                     out.save(dst, "WEBP", quality=quality, method=4)
                 status = "made"
-        return idx, content_hash, raw_size, status, None
+        return idx, content_hash, image_size, status, None
     except Exception as e:
         return idx, known_hash, None, "fail", str(e)
+
+
+def _migrate_face_edits_to_upright(conn, path_by_hash: dict) -> int:
+    """One-time: rewrite recorded face edits (overrides + name anchors) from raw
+    sensor coordinates into the upright frame the report now uses, so edits on
+    rotated photos (EXIF orientation != 1) can still re-bind by overlap. Edits
+    on photos that are no longer in the library are left as they are."""
+    hashes = {r[0] for r in conn.execute("SELECT DISTINCT hash FROM face_overrides")}
+    hashes |= {r[0] for r in conn.execute("SELECT DISTINCT hash FROM cluster_name_anchors")}
+    hashes |= {r[0] for r in conn.execute(
+        "SELECT DISTINCT target_hash FROM face_overrides WHERE target_bbox IS NOT NULL")}
+    moved = 0
+    for h in hashes:
+        path = path_by_hash.get(h)
+        if not path:
+            continue
+        try:
+            with load_rgb(path) as im:
+                size, orientation = im.size, exif_orientation(im)
+        except Exception:
+            continue
+        if orientation == 1:
+            continue
+        references = conn.execute(
+            "SELECT rowid, target_bbox FROM face_overrides "
+            "WHERE target_hash=? AND target_bbox IS NOT NULL", (h,)).fetchall()
+        for rowid, box in references:
+            target_bbox = bbox_key(*upright_box(photodb.parse_bbox(box), size, orientation))
+            conn.execute("UPDATE face_overrides SET target_bbox=? WHERE rowid=?",
+                         (target_bbox, rowid))
+        moved += len(references)
+
+        rows = conn.execute(
+            "SELECT bbox, action, cluster_id, target_hash, target_bbox "
+            "FROM face_overrides WHERE hash=?", (h,)).fetchall()
+        conn.execute("DELETE FROM face_overrides WHERE hash=?", (h,))
+        for bbox, action, cid, th, tb in rows:
+            new = bbox_key(*upright_box(photodb.parse_bbox(bbox), size, orientation))
+            conn.execute(
+                "INSERT OR REPLACE INTO face_overrides "
+                "(hash, bbox, action, cluster_id, target_hash, target_bbox) "
+                "VALUES (?,?,?,?,?,?)", (h, new, action, cid, th, tb))
+        anchors = conn.execute(
+            "SELECT x1, y1, x2, y2, name FROM cluster_name_anchors WHERE hash=?",
+            (h,)).fetchall()
+        conn.execute("DELETE FROM cluster_name_anchors WHERE hash=?", (h,))
+        for x1, y1, x2, y2, name in anchors:
+            conn.execute(
+                "INSERT OR REPLACE INTO cluster_name_anchors "
+                "(hash, x1, y1, x2, y2, name) VALUES (?,?,?,?,?,?)",
+                (h, *upright_box((x1, y1, x2, y2), size, orientation), name))
+        moved += len(rows) + len(anchors)
+    return moved
 
 
 def _columns(conn, table: str) -> list[str]:
@@ -153,6 +206,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
     # ── Snapshot prior state before wiping ───────────────────────────────────
     prev_names = dict(conn.execute("SELECT cluster_id, name FROM clusters").fetchall())
+    prev_coords = conn.execute("SELECT value FROM meta WHERE key='coords'").fetchone()
+    prev_coords = prev_coords[0] if prev_coords else None
 
     # Prior per-path signature so we can reuse content hashes for unchanged
     # files instead of re-reading their bytes. Guarded for pre-incremental DBs.
@@ -200,17 +255,18 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     emit_progress("hash", 0.15, f"Reusing {reused}/{len(images)} hashes", reused, len(images))
 
     hashes: dict[int, str] = {}
-    raw_sizes: dict[int, tuple] = {}
+    image_sizes: dict[int, tuple] = {}
     made = skipped = failed = 0
     if jobs:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [ex.submit(process_image, tuple(j[:8])) for j in jobs]
+            upright = report.get("coords") == COORDS
+            futures = [ex.submit(process_image, tuple(j[:8]), upright) for j in jobs]
             for fut in tqdm(as_completed(futures), total=len(futures),
                             desc="Hash + thumbnails"):
                 idx, h, rsize, status, err = fut.result()
                 hashes[idx] = h
                 if rsize:
-                    raw_sizes[idx] = rsize
+                    image_sizes[idx] = rsize
                 if status == "made":
                     made += 1
                 elif status == "skip":
@@ -240,7 +296,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     for idx, im in enumerate(images):
         chash = hashes.get(idx)
         thumb_name = f"{chash}.webp" if chash else None
-        rw, rh = raw_sizes.get(idx, (None, None))
+        rw, rh = image_sizes.get(idx, (None, None))
         imgw = im.get("imgw") if im.get("imgw") is not None else rw
         imgh = im.get("imgh") if im.get("imgh") is not None else rh
 
@@ -296,32 +352,57 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
 
     # ── Re-apply persisted manual face edits (reassign / delete) ─────────────
     # Faces were just rebuilt from the report, wiping any prior manual edits.
-    # Replay overrides, matched by (image content hash + bbox), so corrections
-    # survive a fresh ingest. Detection is deterministic, so the same image
-    # yields the same bbox and the override re-binds to the same face.
+    # Replay overrides so corrections survive a fresh ingest. A recorded box
+    # re-binds to the detected face it overlaps (photodb.match_face), not by
+    # exact coordinates: re-detection shifts boxes slightly.
+    hash_to_id = {h: i for i, h in hashes.items()}
+    if report.get("coords") == COORDS and prev_coords != COORDS:
+        migrated = _migrate_face_edits_to_upright(
+            conn, {h: images[i]["path"] for h, i in hash_to_id.items()})
+        if migrated:
+            print(f"  Migrated {migrated} face edits to upright coordinates")
     overrides = list(conn.execute(
-        "SELECT hash, bbox, action, cluster_id FROM face_overrides"))
+        "SELECT hash, bbox, action, cluster_id, target_hash, target_bbox "
+        "FROM face_overrides ORDER BY rowid"))
     if overrides:
-        hash_to_id = {h: i for i, h in hashes.items()}
-        affected: set[int] = set()
-        applied = dropped = 0
-        for h, bbox, action, cid in overrides:
+        def detected(h, bbox):
+            """The freshly-ingested face row (id, x1, y1, x2, y2, cluster_id,
+            image_id) a recorded (hash, bbox) refers to, or None."""
             img_id = hash_to_id.get(h)
             if img_id is None:
+                return None
+            return photodb.match_face(photodb.parse_bbox(bbox), conn.execute(
+                "SELECT id, x1, y1, x2, y2, cluster_id, image_id FROM faces "
+                "WHERE image_id=?", (img_id,)).fetchall())
+
+        # Resolve every edit against the untouched detector output first, so a
+        # target reference reads its face's own cluster, not one an earlier
+        # override in this same replay just moved it to.
+        plan = []
+        unresolved = 0
+        for h, bbox, action, cid, t_hash, t_bbox in overrides:
+            face = detected(h, bbox)
+            if face is None:
                 continue
-            match = None
-            for fr in conn.execute(
-                "SELECT id, x1, y1, x2, y2 FROM faces WHERE image_id=?", (img_id,)):
-                if bbox_key(fr[1], fr[2], fr[3], fr[4]) == bbox:
-                    match = fr[0]
-                    break
-            if match is None:
-                continue
+            if action != "delete" and t_hash:
+                # Target is a detector cluster: its id was renumbered, so follow
+                # the reference face. If that face is gone, leave the detector's
+                # own assignment rather than guess a person.
+                ref = detected(t_hash, t_bbox)
+                if ref is None or ref[5] is None or ref[5] < 0:
+                    unresolved += 1
+                    continue
+                cid = ref[5]
+            plan.append((face[0], face[6], action, cid))
+
+        affected: set[int] = set()
+        applied = dropped = 0
+        for fid, img_id, action, cid in plan:
             if action == "delete":
-                conn.execute("DELETE FROM faces WHERE id=?", (match,))
+                conn.execute("DELETE FROM faces WHERE id=?", (fid,))
                 dropped += 1
             else:  # assign
-                conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (cid, match))
+                conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (cid, fid))
                 if cid is not None and cid >= 0:
                     cluster_ids_seen.add(cid)
                 applied += 1
@@ -336,7 +417,9 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
             conn.execute(
                 "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
                 (n, fs, fe, portrait, img_id))
-        print(f"  Re-applied {applied} reassign + {dropped} delete face overrides")
+        print(f"  Re-applied {applied} reassign + {dropped} delete face overrides"
+              + (f" ({unresolved} skipped: target person's reference photo is gone)"
+                 if unresolved else ""))
 
     # ── Re-seed clusters: re-bind names to people, add any new cluster ids ───
     # Names are anchored to member faces (by content hash + bbox overlap), so
@@ -417,7 +500,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     scene_groups_count = library_ops.apply_scene_splits(conn)
 
     # ── Meta ─────────────────────────────────────────────────────────────────
-    for k in ("folder", "backend", "caption_model", "face_model", "scene_model"):
+    for k in ("folder", "backend", "caption_model", "face_model", "scene_model",
+              "coords"):
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
                      (k, str(report.get(k))))
     # The full onboarded source set, as JSON, for the UI's "Library folders" view.
