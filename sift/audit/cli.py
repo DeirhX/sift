@@ -77,7 +77,7 @@ from .scoring import (laplacian_variance, calibrated_sharpness,
                       run_clip_iqa, run_para)
 from .tagging import run_caption_and_tags
 from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
-                       coarsen_scenes_for_dups, group_scenes, read_capture_time,
+                       group_scenes, read_capture_time,
                        compute_clip_embeddings)
 from .faces import run_faces
 from .hashing import content_hash as compute_content_hash
@@ -489,22 +489,18 @@ def main():
     emit_progress("grouping", 0.66, f"Found {len(dup_groups)} duplicate groups",
                   len(dup_groups), len(dup_groups))
 
-    # 2) Rough scenes, then coarsen so every dup group nests inside one scene
-    #    (a near-dup spanning the sequential segmenter's boundary merges them).
+    # 2) Rough scenes. Duplicate links are kept independently across boundaries.
     if not use_scenes:
         scene_assign: dict = {p: None for p in paths}
         scene_count = 0
     else:
         emit_progress("scenes", 0.66, "Detecting scenes…")
-        scene_assign, _ = group_scenes(
+        scene_assign, scene_count = group_scenes(
             paths, capture_time,
             embeddings=embeddings, hashes=hashes,
             big_gap=args.scene_time_gap * 60.0,
             small_gap=args.scene_small_gap * 60.0,
             sim=args.scene_sim,
-        )
-        scene_assign, scene_count = coarsen_scenes_for_dups(
-            paths, scene_assign, dup_groups, times=capture_time,
         )
         emit_progress("scenes", 0.70, f"Found {scene_count} scenes",
                       scene_count, scene_count)

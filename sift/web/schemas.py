@@ -124,6 +124,12 @@ class MergeScenesRequest(BaseModel):
     scene_groups: list[int]           # scenes to pin into a single scene
 
 
+class SplitSceneRequest(BaseModel):
+    scene_group: int
+    image_id: int
+    hash: str
+
+
 class UnmergeSceneRequest(BaseModel):
     scene_group: int                  # a (possibly merged) scene to unpin
 

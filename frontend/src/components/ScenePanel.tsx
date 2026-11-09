@@ -16,6 +16,8 @@ interface ScenePanelProps {
   reviewBusy?: boolean
   reviewMessage?: string
   onApplyDeletes?: (ids: number[]) => Promise<void>
+  onSplitScene?: (sceneGroup: number, imageId: number, hash: string) => Promise<void>
+  onOpenGroup?: (dupGroup: number) => void
   defaultShowDeleted?: boolean
   defaultShowCulled?: boolean
 }
@@ -28,7 +30,7 @@ interface ScenePanelProps {
 // hidden, since a scene's members aren't all duplicates of each other.
 export default function ScenePanel({
   scene, selId, zoom, onSelect, onZoom, onClose, onDecision,
-  onApplyDeletes, defaultShowDeleted, defaultShowCulled,
+  onApplyDeletes, onSplitScene, onOpenGroup, defaultShowDeleted, defaultShowCulled,
   onSaveReview, onUndoReview, reviewBusy, reviewMessage,
 }: ScenePanelProps) {
   const when = fmtTimeRange(scene.time_start, scene.time_end)
@@ -50,6 +52,8 @@ export default function ScenePanel({
       reviewBusy={reviewBusy}
       reviewMessage={reviewMessage}
       onApplyDeletes={onApplyDeletes}
+      onSplitBefore={onSplitScene ? (id, hash) => onSplitScene(scene.scene_group, id, hash) : undefined}
+      onOpenGroup={onOpenGroup}
       defaultShowDeleted={defaultShowDeleted}
       defaultShowCulled={defaultShowCulled}
     />

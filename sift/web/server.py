@@ -54,7 +54,7 @@ from sift.web.schemas import (
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
     MergeResponse, AssignFaceResponse, AutocullResponse, AnalyzeStatus,
     TaskStartRequest, TaskSnapshot, TaskListResponse,
-    RegroupRequest, RegroupResponse, MergeScenesRequest, UnmergeSceneRequest)
+    RegroupRequest, RegroupResponse, MergeScenesRequest, SplitSceneRequest, UnmergeSceneRequest)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -286,6 +286,7 @@ def get_groups(
     offset: int = 0,
     limit:  int = Query(40, le=200),
     order:  str = "size",          # size | id | review
+    dup_group: int | None = None,
     score_min: float = 0.0, score_max: float = 1.0,
     sharp_min: float = 0.0, sharp_max: float = 1.0,
     aes_min:   float = 0.0, aes_max:   float = 1.0,
@@ -317,6 +318,9 @@ def get_groups(
             portrait_min=portrait_min, portrait_max=portrait_max,
             tags=tags, people=people, q=q, decision=decision, trash=trash,
             folder=folder, folder_recursive=folder_recursive)
+        if dup_group is not None:
+            where.append("i.dup_group = ?")
+            params.append(dup_group)
         total, page = grouped_page(conn, "dup_group", where, params,
                                    order_sql, offset, limit, agg_extra, agg_join)
         groups = [
@@ -407,6 +411,16 @@ def unmerge_scene(req: UnmergeSceneRequest):
     time-gap segmentation."""
     with db() as conn:
         return library_ops.unmerge_scene(conn, req.scene_group)
+
+
+@app.post("/api/scenes/split", response_model=RegroupResponse)
+def split_scene(req: SplitSceneRequest):
+    """Split a scene before the selected photo's capture time."""
+    with db() as conn:
+        result = library_ops.split_scene(conn, req.scene_group, req.image_id, req.hash)
+    if result is None:
+        raise HTTPException(409, "choose a later photo in this scene")
+    return result
 
 
 # ── Image serving ─────────────────────────────────────────────────────────────

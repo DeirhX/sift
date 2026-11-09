@@ -222,6 +222,12 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(review.locator('.strip-flatgroup')).toHaveCount(1)
     await expect(review.locator('.strip-flatgroup .strip-thumb')).toHaveCount(2)
 
+    // The duplicate group remains accessible from the scene view.
+    await review.getByRole('button', { name: 'Open full duplicate group' }).click()
+    await expect(review).toContainText('Duplicate group #0')
+    await page.goBack()
+    await expect(review).toContainText('Scene #0')
+
     await review.getByRole('button', { name: 'Close' }).click()
     await expect(review).toHaveCount(0)
   })

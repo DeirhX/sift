@@ -126,7 +126,8 @@ npm run typecheck                # tsc --noEmit; also runs as part of `npm run b
 
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
 captions; review duplicate groups; preview auto-cull for exact copies and tight
-groups with a clear keeper; and move `del`-marked files into `<library>/_trash/`. Trash is
+groups with a clear keeper; split scenes while retaining cross-scene duplicate links;
+and move `del`-marked files into `<library>/_trash/`. Trash is
 recoverable via Restore; permanent deletion happens only when you Empty Trash.
 
 **Face editing** (sidebar "manage" + clicking a face box on a tile): rename or

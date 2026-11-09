@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask, regroupScenes, mergeScenes, unmergeScene } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask, regroupScenes, mergeScenes, splitScene, unmergeScene } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
 import { applyTrashHide } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
@@ -125,9 +125,16 @@ export default function App() {
   // be null right after a deep-link/reload until the relevant page arrives;
   // the overlay simply waits rather than rendering against missing data. The
   // review itself live-hides culled/trashed members (with reveal toggles).
-  const openGroupObj = nav?.kind === 'group'
+  const groupInPage = nav?.kind === 'group'
     ? (groups.data?.pages.flatMap((p) => p.groups) ?? []).find((g) => g.dup_group === nav.refId) ?? null
     : null
+  const openGroupId = nav?.kind === 'group' ? nav.refId : null
+  const groupDetail = useQuery({
+    queryKey: ['groups', 'detail', openGroupId, filters],
+    queryFn: async () => ({ pages: [await fetchGroups(filters, 0, 1, 'id', openGroupId!)] }),
+    enabled: openGroupId != null && groupInPage == null,
+  })
+  const openGroupObj = groupInPage ?? groupDetail.data?.pages[0]?.groups[0] ?? null
   const openSceneObj = nav?.kind === 'scene'
     ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) ?? null
     : null
@@ -187,6 +194,12 @@ export default function App() {
     qc.invalidateQueries({ queryKey: ['scenes'] })
     qc.invalidateQueries({ queryKey: ['meta'] })
   }, [qc])
+
+  const onSplitScene = useCallback(async (sceneGroup: number, imageId: number, hash: string) => {
+    await splitScene(sceneGroup, imageId, hash)
+    closeOverlay()
+    invalidateRoots(qc, PHOTO_DATA_QUERY_ROOTS)
+  }, [closeOverlay, qc])
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
@@ -366,6 +379,8 @@ export default function App() {
           onDecision={setDecision}
           {...reviewActions}
           onApplyDeletes={applyDeletes}
+          onSplitScene={onSplitScene}
+          onOpenGroup={openGroup}
           // The scene's member count tracks the active filters, so the panel opens
           // showing every member that passes them — del-marked photos included
           // (they're still in the library until trashed), so it agrees with the
