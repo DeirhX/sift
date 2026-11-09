@@ -3,7 +3,7 @@ status accounting, restore, and emptying. Uses real files on disk."""
 import sqlite3
 from pathlib import Path
 
-from conftest import items_by_name
+from conftest import items_by_name, tiny_jpeg
 
 
 SPECS = [
@@ -139,3 +139,59 @@ def test_trash_ledger_survives_reindex_renumbering(real_library, rebuild):
     assert (env.lib / "y.jpg").exists()
     paths = {fn: Path(it["path"]) for fn, it in items_by_name(env.client).items()}
     assert paths == {"x.jpg": env.lib / "x.jpg", "z.jpg": env.lib / "z.jpg"}
+
+
+def test_reindex_same_report_keeps_trashed_photo_in_trash(real_library, rebuild):
+    env = real_library(SPECS)
+    client = env.client
+    _mark(env, "y.jpg", "del")
+    assert client.post("/api/apply").json()["moved"] == 1
+    rebuild(env)
+
+    assert set(items_by_name(client)) == {"x.jpg", "z.jpg"}
+    trashed = items_by_name(client, "?limit=50&trash=trashed")["y.jpg"]
+    assert Path(trashed["path"]).is_file()
+    assert client.post("/api/apply/undo").json()["restored"] == 1
+    assert Path(items_by_name(client)["y.jpg"]["path"]) == env.lib / "y.jpg"
+
+
+def test_reindex_does_not_hide_replacement_at_original_path(real_library, rebuild):
+    env = real_library(SPECS)
+    client = env.client
+    _mark(env, "y.jpg", "del")
+    assert client.post("/api/apply").json()["moved"] == 1
+    tiny_jpeg(env.lib / "y.jpg", color=(253, 100, 47))
+    rebuild(env)
+
+    replacement = items_by_name(client)["y.jpg"]
+    assert Path(replacement["path"]) == env.lib / "y.jpg"
+    assert replacement["decision"] is None
+
+
+def test_reindex_same_report_handles_reused_trash_filename(tmp_path, make_env, rebuild):
+    from sift.web.library_ops import empty_trash
+
+    originals = [tmp_path / folder / "shared.jpg" for folder in ("first", "second")]
+    for i, path in enumerate(originals):
+        path.parent.mkdir()
+        tiny_jpeg(path, color=(30 + 100 * i, 100, 47))
+    env = make_env({"folder": str(tmp_path), "images": [
+        {"path": str(path), "filename": path.name, "combined": 0.5, "faces": []}
+        for path in originals
+    ]})
+    client = env.client
+    photos = {item["path"]: item for item in client.get("/api/images").json()["items"]}
+
+    for i, path in enumerate(originals):
+        client.post("/api/decisions", json={"hash": photos[str(path)]["hash"], "decision": "del"})
+        assert client.post("/api/apply").json()["moved"] == 1
+        if i == 0:
+            with sqlite3.connect(env.db) as conn:
+                conn.row_factory = sqlite3.Row
+                assert empty_trash(conn)["deleted"] == 1
+
+    rebuild(env)
+    trashed = client.get("/api/images", params={"trash": "trashed"}).json()["items"]
+    assert [item["hash"] for item in trashed] == [photos[str(originals[1])]["hash"]]
+    assert client.post("/api/apply/undo").json()["restored"] == 1
+    assert originals[1].exists() and not originals[0].exists()

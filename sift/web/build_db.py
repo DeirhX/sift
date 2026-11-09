@@ -233,23 +233,52 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
     # DB meanwhile. The wipe+insert transaction is opened only afterwards.
     # Reuse the prior hash when a file's (mtime, size) is unchanged; otherwise
     # the worker hashes it. Workers also (re)build any missing thumbnail.
+    # An existing report can still list a photo at its original path after
+    # Trash moved it. Resolve that stale path before rebuilding the catalog.
+    trash_moves = conn.execute(
+        "SELECT id, from_path, trash_path, hash, state FROM trash_moves ORDER BY id"
+    ).fetchall()
+    latest_trash = {row[1]: row for row in trash_moves}
+    latest_trash_path = {row[2]: row[0] for row in trash_moves}
+    indexed_images: list[dict] = []
     jobs: list[tuple] = []
     reused = 0
-    for idx, im in enumerate(images):
+    for im in images:
         src = Path(im["path"])
+        known_hash = None
         try:
             st = src.stat()
-            sig = (st.st_mtime, st.st_size)
+        except FileNotFoundError:
+            st = None
+            entry = latest_trash.get(im["path"])
+            if entry:
+                move_id, _, trash_path, trash_hash, state = entry
+                report_hash = im.get("content_hash")
+                if state in {"trashed", "emptied", "missing"} and (
+                        not report_hash or report_hash == trash_hash):
+                    # A later move can reuse this trash filename. Omit the old
+                    # report entry when the path belongs to another ledger row.
+                    if latest_trash_path[trash_path] != move_id:
+                        continue
+                    src = Path(trash_path)
+                    known_hash = trash_hash
+                    im = {**im, "path": trash_path}
+                    try:
+                        st = src.stat()
+                    except OSError:
+                        pass
         except OSError:
-            sig = (None, None)
+            st = None
+        sig = (st.st_mtime, st.st_size) if st else (None, None)
         prev = prev_sig.get(im["path"])
-        known_hash = None
         if prev and prev[1] == sig[0] and prev[2] == sig[1]:
             known_hash = prev[0]
             reused += 1
-        jobs.append([idx, src, known_hash, thumb_dir, thumb_size,
+        jobs.append([len(indexed_images), src, known_hash, thumb_dir, thumb_size,
                      thumb_quality, force_thumbs, skip_thumbs,
                      sig[0], sig[1]])
+        indexed_images.append(im)
+    images = indexed_images
 
     print(f"  Hash reuse: {reused}/{len(images)} unchanged files")
     emit_progress("hash", 0.15, f"Reusing {reused}/{len(images)} hashes", reused, len(images))
