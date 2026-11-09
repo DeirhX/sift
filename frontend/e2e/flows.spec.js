@@ -42,9 +42,9 @@ const cards = (page) => page.locator('.card')
 test.describe('sidebar filters', () => {
   test('sort direction reorders the grid', async ({ page }) => {
     await page.goto('/')
-    await expect(cards(page).first()).toContainText('a sunny beach') // desc: 0.95 first
+    await expect(cards(page).first()).toContainText('beach.jpg') // desc: 0.95 first
     await sidebar(page).getByRole('button', { name: 'Low → High' }).click()
-    await expect(cards(page).first()).toContainText('a blurry shot')  // asc: 0.20 first
+    await expect(cards(page).first()).toContainText('blurry.jpg')  // asc: 0.20 first
   })
 
   test('dup-mode "only duplicates" shows just the group members', async ({ page }) => {
@@ -69,13 +69,13 @@ test.describe('sidebar filters', () => {
     await page.goto('/')
     await sidebar(page).locator('.chip', { hasText: 'Alice' }).first().click()
     await expect(cards(page)).toHaveCount(1) // only the portrait has Alice
-    await expect(cards(page).first()).toContainText('a portrait of a person')
+    await expect(cards(page).first()).toContainText('portrait.jpg')
   })
 
   test('decision filter shows only matching verdicts', async ({ page }) => {
     await page.goto('/')
     const first = cards(page).first()
-    await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => first.getByRole('button', { name: 'Mark for Trash' }).click())
 
     // Decision is multi-select (None/Keep/Del all lit = "all"); peel off the
     // other two so only Del-marked photos remain.
@@ -86,7 +86,7 @@ test.describe('sidebar filters', () => {
 
     // cleanup: clear the mark (DB must be pristine for later tests; the verdict
     // filter itself resets on the next test's reload).
-    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Mark for Trash' }).click())
   })
 })
 
@@ -94,10 +94,10 @@ test.describe('decisions', () => {
   test('delete then toggle-clear', async ({ page }) => {
     await page.goto('/')
     const first = cards(page).first()
-    await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => first.getByRole('button', { name: 'Mark for Trash' }).click())
     await expect(first.locator('.badge-decision.del')).toBeVisible()
     // Clicking the active verdict again clears it.
-    await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => first.getByRole('button', { name: 'Mark for Trash' }).click())
     await expect(first.locator('.badge-decision')).toHaveCount(0)
   })
 })
@@ -130,7 +130,7 @@ test.describe('lightbox', () => {
     await page.keyboard.press('Escape')
     await expect(cards(page).first().locator('.badge-decision.del')).toBeVisible()
     // cleanup
-    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Mark for Trash' }).click())
   })
 })
 
@@ -144,6 +144,14 @@ test.describe('group review', () => {
 
     // Bulk: keep best, delete the rest. Del'd members are live-culled from the
     // strip the instant they're marked, so reveal them to verify both flag types.
+    await panel.getByRole('button', { name: 'Compare', exact: true }).click()
+    const compare = panel.getByRole('region', { name: 'Burst comparison' })
+    await expect(compare.getByRole('img')).toHaveCount(2)
+    await compare.getByRole('button', { name: 'Zoom both in' }).click()
+    for (const photo of await compare.getByRole('img').all()) {
+      await expect(photo).toHaveAttribute('style', /scale\(1\.25\)/)
+    }
+    await panel.getByRole('button', { name: 'Compare', exact: true }).click()
     await panel.getByRole('button', { name: 'Preview keeper marks' }).click()
     await expect(panel.getByRole('region', { name: 'Preview changes' })).toBeVisible()
     await expect(panel.locator('.strip-flag')).toHaveCount(0)
@@ -444,18 +452,22 @@ test.describe('apply / undo', () => {
   test('move del-marked files to Trash and restore', async ({ page }) => {
     await page.goto('/')
     const first = cards(page).first()
-    await decideAndWait(page, () => first.getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => first.getByRole('button', { name: 'Mark for Trash' }).click())
 
     // Apply status is queried independently; reload so it sees the pending mark.
     await page.reload()
     const apply = page.locator('.apply-panel')
     await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
+    await expect(apply.getByRole('button', { name: 'Empty Trash' })).toHaveCount(0)
+    await apply.getByRole('button', { name: /Open Trash/ }).click()
     await expect(apply.getByRole('button', { name: /Restore \d+/ })).toBeVisible()
+    await expect(apply.getByRole('button', { name: 'Empty Trash' })).toBeVisible()
 
     await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \d+/ }).click())
+    await apply.getByRole('button', { name: 'Back to Library' }).click()
     await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 
     // cleanup: clear the restored del mark.
-    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Delete' }).click())
+    await decideAndWait(page, () => cards(page).first().getByRole('button', { name: 'Mark for Trash' }).click())
   })
 })

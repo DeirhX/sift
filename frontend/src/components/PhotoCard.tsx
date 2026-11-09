@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api'
-import { fmt, aestheticScore, qualityColor } from '../format'
+import { fmt } from '../format'
 import type { ImageItem, ClusterFacet } from '../api/types'
 import type { DecisionFn, PersonName } from '../types'
 import DecisionBadge from './DecisionBadge'
@@ -12,6 +12,7 @@ interface PhotoCardProps {
   colWidth: number
   thumbH: number
   onOpen: () => void
+  onInspect?: () => void
   onDecision: DecisionFn
   personName: PersonName
   people?: ClusterFacet[]
@@ -29,9 +30,8 @@ interface PhotoCardProps {
 // false-positive box. These are pure DB edits, persisted as face overrides and
 // name anchors that survive the next build_db ingest.
 export default function PhotoCard(
-  { item, colWidth, thumbH, onOpen, onDecision, personName, people = [], onFaceChange }: PhotoCardProps,
+  { item, colWidth, thumbH, onOpen, onInspect, onDecision, personName, people = [], onFaceChange }: PhotoCardProps,
 ) {
-  const aes = aestheticScore(item)
   const [editFace, setEditFace] = useState<number | null>(null)   // index into item.faces
   const [busy, setBusy] = useState(false)
 
@@ -39,7 +39,7 @@ export default function PhotoCard(
   // displayed thumbnail (centered cover-crop for any leftover overflow).
   const iw = item.imgw || 1
   const ih = item.imgh || 1
-  const scale = Math.max(colWidth / iw, thumbH / ih)
+  const scale = Math.min(colWidth / iw, thumbH / ih)
   const dispW = iw * scale
   const dispH = ih * scale
   const offX = (dispW - colWidth) / 2
@@ -56,8 +56,8 @@ export default function PhotoCard(
       onFaceChange?.()
     } catch (e) {
       console.error(e)
-      setBusy(false)
     }
+    finally { setBusy(false) }
   }
 
   const onSelect = (e: ChangeEvent<HTMLSelectElement>) => {
@@ -96,19 +96,9 @@ export default function PhotoCard(
       </div>
 
       <div className="meta">
-        <div className="scores">
-          <span className="q-pill" style={{ background: qualityColor(item.combined) }} title="Composite quality">
-            Q {fmt(item.combined)}
-          </span>
-          <span className="score-sub">Sh <b>{fmt(item.sharpness)}</b></span>
-          <span className="score-sub">Ae <b>{fmt(aes)}</b></span>
+        <div className="card-title"><span title={item.filename}>{item.filename}</span>
+          {onInspect && <button className="btn" onClick={onInspect} aria-label={`Details for ${item.filename}`}>Details</button>}
         </div>
-        {item.caption && <div className="caption">{item.caption}</div>}
-        {item.tags.length > 0 && (
-          <div className="tags">
-            {item.tags.slice(0, 5).map((t) => <span key={t} className="tag">{t}</span>)}
-          </div>
-        )}
         <div className="actions">
           <DecideButtons item={item} onDecision={onDecision} />
         </div>

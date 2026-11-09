@@ -1750,7 +1750,9 @@ export interface operations {
     };
     serve_full_img__image_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                face_id?: number | null;
+            };
             header?: never;
             path: {
                 image_id: number;

@@ -23,11 +23,11 @@ const baseProps = {
 }
 
 describe('PhotoCard', () => {
-  it('renders formatted scores', () => {
-    render(<PhotoCard item={makeItem()} onDecision={() => {}} {...baseProps} />)
-    expect(screen.getByText('Q 0.80')).toBeInTheDocument()  // composite quality pill
-    expect(screen.getByText('0.70')).toBeInTheDocument()    // sharpness
-    expect(screen.getByText('0.75')).toBeInTheDocument()    // aesthetic
+  it('opens the inspector from a photo tile', async () => {
+    const onInspect = vi.fn()
+    render(<PhotoCard item={makeItem()} onInspect={onInspect} onDecision={() => {}} {...baseProps} />)
+    await userEvent.click(screen.getByRole('button', { name: 'Details for a.jpg' }))
+    expect(onInspect).toHaveBeenCalledOnce()
   })
 
   it('shows the duplicate-group badge', () => {
@@ -45,13 +45,13 @@ describe('PhotoCard', () => {
     const onDecision = vi.fn()
     render(<PhotoCard item={item} onDecision={onDecision} {...baseProps} />)
     await userEvent.click(screen.getByRole('button', { name: 'Keep' }))
-    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Mark for Trash' }))
     expect(onDecision).toHaveBeenNthCalledWith(1, item, 'keep')
     expect(onDecision).toHaveBeenNthCalledWith(2, item, 'del')
   })
 
   it('surfaces the decision badge once decided', () => {
     render(<PhotoCard item={makeItem({ decision: 'del' })} onDecision={() => {}} {...baseProps} />)
-    expect(screen.getByText('DEL')).toBeInTheDocument()
+    expect(screen.getByText('MARKED')).toBeInTheDocument()
   })
 })

@@ -8,14 +8,14 @@ describe('DecideButtons', () => {
   it('marks the active decision', () => {
     render(<DecideButtons item={{ decision: 'keep' } as unknown as ImageItem} onDecision={() => {}} />)
     expect(screen.getByRole('button', { name: 'Keep' })).toHaveClass('active')
-    expect(screen.getByRole('button', { name: 'Delete' })).not.toHaveClass('active')
+    expect(screen.getByRole('button', { name: 'Mark for Trash' })).not.toHaveClass('active')
   })
 
   it('fires onDecision with the item and verdict', async () => {
     const item = { id: 3, decision: null } as unknown as ImageItem
     const onDecision = vi.fn()
     render(<DecideButtons item={item} onDecision={onDecision} />)
-    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Mark for Trash' }))
     expect(onDecision).toHaveBeenCalledWith(item, 'del')
   })
 })

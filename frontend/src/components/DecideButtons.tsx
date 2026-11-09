@@ -16,17 +16,19 @@ interface DecideButtonsProps {
 // The Keep / Delete button pair, highlighting the active decision. Returns a
 // fragment so each caller keeps its own wrapping container/styling.
 export default function DecideButtons(
-  { item, onDecision, className = '', keepLabel = 'Keep', delLabel = 'Delete' }: DecideButtonsProps,
+  { item, onDecision, className = '', keepLabel = 'Keep', delLabel = 'Mark for Trash' }: DecideButtonsProps,
 ) {
   const extra = className ? ' ' + className : ''
   return (
     <>
       <button
         className={'keep' + extra + (item.decision === 'keep' ? ' active' : '')}
+        aria-pressed={item.decision === 'keep'}
         onClick={() => onDecision(item, 'keep')}
       >{keepLabel}</button>
       <button
         className={'del' + extra + (item.decision === 'del' ? ' active' : '')}
+        aria-pressed={item.decision === 'del'}
         onClick={() => onDecision(item, 'del')}
       >{delLabel}</button>
     </>

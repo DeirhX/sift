@@ -337,4 +337,9 @@ export async function fsComplete(q: string): Promise<FsCompleteResponse> {
 // content hash as a cache-buster so the URL changes exactly when the underlying
 // image does (and stays stable — cacheable — when it doesn't).
 export const thumbUrl = (id: number, v?: string | null): string => `/thumb/${id}${v ? `?v=${v}` : ''}`
-export const fullUrl = (id: number, v?: string | null): string => `/img/${id}${v ? `?v=${v}` : ''}`
+export const fullUrl = (id: number, v?: string | null, faceId?: number): string => {
+  const params = new URLSearchParams()
+  if (v) params.set('v', v)
+  if (faceId != null) params.set('face_id', String(faceId))
+  return `/img/${id}${params.size ? `?${params}` : ''}`
+}

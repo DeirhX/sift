@@ -80,7 +80,7 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   await Promise.all([
     page.waitForResponse((r) =>
       r.url().includes('/api/decisions') && r.request().method() === 'POST'),
-    first.getByRole('button', { name: 'Delete' }).click(),
+    first.getByRole('button', { name: 'Mark for Trash' }).click(),
   ])
 
   // Apply status is queried independently; reload so it sees the pending mark.

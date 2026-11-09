@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { thumbUrl, fullUrl } from '../api'
-import { fmt, aestheticScore, groupByDup, repFirst, isDeleted, rankKeepers, groupActivity } from '../format'
+import { fmt, aestheticScore, groupActivity, groupByDup, repFirst, isDeleted, rankKeepers } from '../format'
 import type { DupSet } from '../format'
 import type { GroupedImageItem } from '../api/types'
 import type { Decision, DecisionFn, ReviewMark, ReviewPlan, SetLightboxIndex } from '../types'
@@ -9,7 +9,27 @@ import Lightbox from './Lightbox'
 import DecisionBadge from './DecisionBadge'
 import DecideButtons from './DecideButtons'
 import RecBadge from './RecBadge'
+import BurstCompare from './BurstCompare'
 import MarkPreview from './MarkPreview'
+import { useImageZoom } from '../hooks/useImageZoom'
+import { usePersistentBool } from '../hooks/usePersistentBool'
+
+// Eye / eye-with-slash glyph for the culled/deleted visibility toggles. Drawn
+// inline (not an emoji) so it inherits the button's currentColor — amber when a
+// hide-filter is active, dim otherwise.
+function VisibilityIcon({ hidden }: { hidden: boolean }) {
+  return (
+    <svg
+      className="vis-eye" width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+      <circle cx="12" cy="12" r="3" />
+      {hidden && <line x1="3" y1="3" x2="21" y2="21" />}
+    </svg>
+  )
+}
 
 // A group or scene for review: only the member list and an optional id label
 // are needed (Group carries dup_group, Scene carries scene_group).
@@ -27,6 +47,7 @@ interface GroupReviewProps {
   onUndoReview?: () => void
   reviewBusy?: boolean
   reviewMessage?: string
+  onNextGroup?: () => void
   mode?: 'group' | 'scene'
   title?: ReactNode
   subExtra?: ReactNode
@@ -35,11 +56,11 @@ interface GroupReviewProps {
   zoom?: boolean
   onSelect: (id: number) => void
   onZoom: (open: boolean) => void
-  onSplitBefore?: (id: number, hash: string) => Promise<void>
-  onOpenGroup?: (dupGroup: number) => void
   // Immediately move this set's del-marked photos to Trash (recoverable). When
   // provided, a "Delete N now" button appears whenever members are marked del.
   onApplyDeletes?: (ids: number[]) => Promise<void>
+  onSplitBefore?: (id: number, hash: string) => Promise<void>
+  onOpenGroup?: (dupGroup: number) => void
   // Start with trashed members visible — used when the app's global filter is set
   // to Trash, so an opened set shows the deleted photos it qualified on.
   defaultShowDeleted?: boolean
@@ -67,7 +88,7 @@ interface GroupReviewProps {
 // group-wide actions.
 export default function GroupReview({
   group, onClose, onDecision,
-  onSaveReview, onUndoReview, reviewBusy = false, reviewMessage,
+  onSaveReview, onUndoReview, reviewBusy = false, reviewMessage, onNextGroup,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
   selId = null, zoom = false, onSelect, onZoom, onApplyDeletes, onSplitBefore, onOpenGroup,
   defaultShowDeleted = false, defaultShowCulled = false,
@@ -78,11 +99,17 @@ export default function GroupReview({
   //     these is what makes marking Del shrink the set immediately.
   //   • DELETED — moved to Trash (trash_state set; an optimistic trash patch sets
   //     it the instant "Delete N now" fires).
+  // Whether culled (Del-marked) members are shown is a GLOBAL, remembered
+  // preference: persisted to localStorage so the choice carries across every
+  // scene/group you open and across sessions. `defaultShowCulled` only seeds the
+  // very first open before any choice is stored. (Deleted/trashed visibility
+  // stays a per-open, context-driven default — it's tied to the Trash filter.)
+  const [showCulled, setShowCulled] = usePersistentBool('sift.review.showCulled', defaultShowCulled)
+  const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
+  const [comparing, setComparing] = useState(false)
+  const [plan, setPlan] = useState<ReviewPlan | null>(null)
   const [splitting, setSplitting] = useState(false)
   const [splitError, setSplitError] = useState<string | null>(null)
-  const [plan, setPlan] = useState<ReviewPlan | null>(null)
-  const [showCulled, setShowCulled] = useState(defaultShowCulled)
-  const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
   const culledCount = useMemo(
     () => group.items.filter((it) => it.decision === 'del' && !isDeleted(it)).length,
     [group.items])
@@ -158,6 +185,15 @@ export default function GroupReview({
     return i == null ? 0 : i
   })()
   const full = !!zoom
+  const pinned = groupKeepers[0]
+  const alternatives = groupKeepers.filter((item) => item.id !== pinned?.id)
+  const comparePosition = Math.max(0, alternatives.findIndex((item) => item.id === selId))
+  const alternative = alternatives[comparePosition]
+  const compareOpen = comparing && pinned != null && alternative != null
+  const stepCompare = (delta: number) => {
+    const next = alternatives[comparePosition + delta]
+    if (next) onSelect(next.id)
+  }
   const selectIdx = (i: number | undefined) => {
     if (i == null || i < 0 || i >= view.length) return
     onSelect(view[i].id)
@@ -254,24 +290,100 @@ export default function GroupReview({
   const viewMatch = view.filter((it) => it.matches !== false).length
   const viewLabel = viewMatch < view.length ? `${viewMatch} of ${view.length}` : `${view.length}`
 
-  // Keyboard: arrows switch members, k/d decide, Esc closes — but only when
-  // the full-size viewer isn't open (it handles its own keys).
+  // The photos actually visible in the strip, in render order. With grouping on,
+  // a COLLAPSED near-dup set contributes only its representative (the single tile
+  // you can see); an EXPANDED set contributes every frame. This is the order the
+  // ← / → keys walk, so arrow navigation can never land on a hidden member —
+  // stepping onto a collapsed set lands on its lone visible photo.
+  const visibleView = useMemo(() => {
+    if (!(canGroup && grouped)) return view
+    const out: GroupedImageItem[] = []
+    for (const s of sets) {
+      if (expanded.has(s.dup_group)) out.push(...s.items)
+      else if (s.items[0]) out.push(s.items[0])
+    }
+    out.push(...loose)
+    return out
+  }, [canGroup, grouped, sets, loose, expanded, view])
+  const visIndex = useMemo(
+    () => new Map(visibleView.map((it, i) => [it.id, i] as const)),
+    [visibleView],
+  )
+  // Which near-dup set (if any) a member id belongs to — lets the keys expand/
+  // collapse the set under the selection and map a hidden member to its
+  // visible representative.
+  const setByMember = useMemo(() => {
+    const m = new Map<number, DupSet<GroupedImageItem>>()
+    for (const s of sets) for (const it of s.items) m.set(it.id, s)
+    return m
+  }, [sets])
+  // The selection's slot in the visible strip. A selection hidden inside a
+  // collapsed set resolves to that set's visible representative.
+  const visPosOf = (id: number): number => {
+    const i = visIndex.get(id)
+    if (i != null) return i
+    const repId = setByMember.get(id)?.items[0]?.id
+    return (repId != null ? visIndex.get(repId) : undefined) ?? 0
+  }
+
+  // Keyboard (the full-size viewer handles its own keys, so skip when zoomed):
+  //   ← / →  move between *visible* photos (a collapsed set is one stop: its rep)
+  //   ↓ / ↑  expand / collapse the near-dup set under the selection
+  //   k/+/=  keep · d/-  delete · Esc closes
   useEffect(() => {
     if (full) return
+    const grouping = canGroup && grouped
     const onKey = (e: KeyboardEvent) => {
-      if (plan) {
-        if (e.key === 'Escape') setPlan(null)
+      if (e.key === 'Escape') {
+        if (plan) setPlan(null)
+        else if (compareOpen) setComparing(false)
+        else onClose()
         return
       }
-      if (e.key === 'Escape') onClose()
-      else if (e.key === 'ArrowRight') selectIdx(Math.min(sel + 1, view.length - 1))
-      else if (e.key === 'ArrowLeft') selectIdx(Math.max(sel - 1, 0))
-      else if (e.key === 'k' || e.key === '+' || e.key === '=') decide(view[sel], 'keep')
-      else if (e.key === 'd' || e.key === '-') decide(view[sel], 'del')
+      if (plan || /^(INPUT|SELECT|TEXTAREA)$/.test((e.target as HTMLElement | null)?.tagName ?? '')) return
+      if (compareOpen && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        stepCompare(e.key === 'ArrowLeft' ? -1 : 1)
+        return
+      }
+      if (e.key.toLowerCase() === 'n' && onNextGroup) {
+        e.preventDefault()
+        onNextGroup()
+        return
+      }
+      if (compareOpen && !['k', '+', '=', 'd', '-', 'Delete'].includes(e.key)) return
+      const curItem = compareOpen ? alternative : view[sel] ?? view[0]
+      if (!curItem) return
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault()
+        if (!visibleView.length) return
+        const pos = visPosOf(curItem.id)
+        const ni = e.key === 'ArrowRight'
+          ? Math.min(pos + 1, visibleView.length - 1)
+          : Math.max(pos - 1, 0)
+        onSelect(visibleView[ni].id)
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!grouping) return
+        const s = setByMember.get(curItem.id)
+        if (!s) return
+        e.preventDefault()
+        if (e.key === 'ArrowDown') {
+          if (!expanded.has(s.dup_group)) toggleExpand(s.dup_group)
+        } else if (expanded.has(s.dup_group)) {
+          toggleExpand(s.dup_group)
+          // Keep the selection visible after collapsing: snap it to the rep.
+          if (s.items[0] && curItem.id !== s.items[0].id) onSelect(s.items[0].id)
+        }
+      } else if (e.key === 'k' || e.key === '+' || e.key === '=') {
+        decide(curItem, 'keep')
+      } else if (e.key === 'd' || e.key === '-' || e.key === 'Delete') {
+        decide(curItem, 'del')
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [plan, full, view, sel, onClose, decide])
+  }, [full, canGroup, grouped, expanded, visibleView, visIndex, setByMember,
+      view, sel, onClose, onSelect, decide, plan, compareOpen, stepCompare, onNextGroup])
 
   // Follow the selection: when arrow keys move it past the rendered edge of the
   // strip, scroll the active member back into view (horizontal only, no page
@@ -283,18 +395,22 @@ export default function GroupReview({
   }, [sel, grouped, expanded])
 
   const cur = view[sel] ?? view[0]
-  const aes = aestheticScore(cur)
+  const detail = compareOpen ? alternative : cur
+  const aes = aestheticScore(detail)
+  // Wheel-zoom + drag-pan the inline hero in place (a quick pixel-peek without
+  // opening the full viewer); resets to fit whenever the selected photo changes.
+  const heroZoom = useImageZoom(cur?.id, { dblZoom: false })
 
   // Metric bars for whatever scores this image has (all on a 0–1 scale).
   const metrics = ([
-    ['Quality', cur.combined],
-    ['Sharpness', cur.sharpness],
+    ['Quality', detail.combined],
+    ['Sharpness', detail.sharpness],
     ['Aesthetic', aes],
-    ['Composition', cur.para_composition],
-    ['Light', cur.para_light],
-    ['Portrait', cur.portrait],
-    ['Face sharp', cur.face_sharp],
-    ['Expression', cur.face_expr],
+    ['Composition', detail.para_composition],
+    ['Light', detail.para_light],
+    ['Portrait', detail.portrait],
+    ['Face sharp', detail.face_sharp],
+    ['Expression', detail.face_expr],
   ] as [string, number | null | undefined][]).filter((m): m is [string, number] => m[1] != null)
   // Red (low) → amber → green (high), so quality reads at a glance.
   const barColor = (v: number): string => `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 65%, 45%)`
@@ -433,8 +549,8 @@ export default function GroupReview({
         <div className="review-head">
           <div>
             <b>{title ?? `Duplicate group #${group.dup_group}`}</b>
-            {mode === "group" && <span className="review-filternote"> · {groupKind}</span>}
-            <span className="review-sub"> · {mode === "group" ? activity.label : `${partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos`} · viewing {sel + 1}/{view.length}</span>
+            {mode === 'group' && <span className="review-filternote"> · {groupKind}</span>}
+            <span className="review-sub"> · {mode === 'group' ? activity.label : `${partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos`}{!compareOpen && ` · viewing ${sel + 1}/${view.length}`}</span>
             {subExtra}
             {(applyErr || splitError) && <span className="review-filternote err"> · {applyErr || splitError}</span>}
           </div>
@@ -457,7 +573,7 @@ export default function GroupReview({
                     disabled={applying}
                     title="Move this scene's photos marked Del to Trash now (recoverable)"
                   >
-                    {applying ? 'Deleting…' : `Delete ${delIds.length} now`}
+                    {applying ? 'Moving…' : `Move ${delIds.length} to Trash`}
                   </button>
                 )}
               </div>
@@ -466,6 +582,11 @@ export default function GroupReview({
                 toggle unit so these read as one group of view options, not as
                 more actions. */}
             <div className="review-viewseg">
+              {mode === 'group' && alternatives.length > 0 && (
+                <button className={'btn' + (compareOpen ? ' active' : '')}
+                  aria-pressed={compareOpen} onClick={() => setComparing((value) => !value)}>Compare</button>
+              )}
+              {onNextGroup && <button className="btn" title="Next group (N)" onClick={onNextGroup}>Next group</button>}
               {canGroup && !showList && (
                 <button
                   className={'btn' + (grouped ? ' active' : '')}
@@ -477,27 +598,31 @@ export default function GroupReview({
               )}
               {culledCount > 0 && (
                 <button
-                  className={'btn' + (showCulled ? ' active' : '')}
+                  className={'btn vis-toggle' + (!showCulled ? ' filtering' : '')}
                   onClick={() => setShowCulled((v) => !v)}
+                  aria-label={showCulled ? 'Hide culled photos' : 'Show culled photos'}
                   title={showCulled
-                    ? 'Hide photos you marked Del'
-                    : 'Show photos marked Del (hidden as you cull; not yet trashed)'}
+                    ? `${culledCount} culled photo${culledCount > 1 ? 's' : ''} (marked Del) shown — click to hide`
+                    : `${culledCount} culled photo${culledCount > 1 ? 's' : ''} (marked Del) hidden from this view — click to show`}
                 >
-                  {showCulled ? 'Hide culled' : `Show culled (${culledCount})`}
+                  <VisibilityIcon hidden={!showCulled} />
+                  {culledCount} culled {showCulled ? 'shown' : 'hidden'}
                 </button>
               )}
               {deletedCount > 0 && (
                 <button
-                  className={'btn' + (showDeleted ? ' active' : '')}
+                  className={'btn vis-toggle' + (!showDeleted ? ' filtering' : '')}
                   onClick={() => setShowDeleted((v) => !v)}
+                  aria-label={showDeleted ? 'Hide deleted photos' : 'Show deleted photos'}
                   title={showDeleted
-                    ? 'Hide photos that are in Trash'
-                    : 'Show this set\u2019s photos that have been moved to Trash'}
+                    ? `${deletedCount} trashed photo${deletedCount > 1 ? 's' : ''} shown — click to hide`
+                    : `${deletedCount} trashed photo${deletedCount > 1 ? 's' : ''} hidden from this view — click to show`}
                 >
-                  {showDeleted ? 'Hide deleted' : `Show deleted (${deletedCount})`}
+                  <VisibilityIcon hidden={!showDeleted} />
+                  {deletedCount} deleted {showDeleted ? 'shown' : 'hidden'}
                 </button>
               )}
-              <button className={'btn' + (showList ? ' active' : '')} onClick={() => setShowList((v) => !v)}>
+              <button className={'btn' + (showList ? ' active' : '')} onClick={() => { setComparing(false); setShowList((v) => !v) }}>
                 {showList ? 'Preview' : 'List'}
               </button>
             </div>
@@ -571,7 +696,10 @@ export default function GroupReview({
         </div>
 
         {/* Large preview of the selected member, or a list of all members */}
-        {showList ? (
+        {compareOpen ? (
+          <BurstCompare pinned={pinned} alternative={alternative} position={comparePosition}
+            count={alternatives.length} onStep={stepCompare} />
+        ) : showList ? (
           <div className="review-list">
             {view.map((it) => {
               const i = idIndex.get(it.id)
@@ -611,21 +739,35 @@ export default function GroupReview({
             })}
           </div>
         ) : (
-          <div className="review-hero" onClick={() => onZoom(true)} title="Click to zoom">
-            <img key={cur.id} src={fullUrl(cur.id, cur.hash)} alt={cur.filename} />
+          <div
+            className={'review-hero' + (heroZoom.zoomed ? ' zoomed' : '')}
+            onClick={() => { if (!heroZoom.zoomed) onZoom(true) }}
+            title={heroZoom.zoomed ? 'Drag to pan · double-click to reset' : 'Click to open · scroll to zoom'}
+          >
+            <img
+              key={cur.id}
+              ref={heroZoom.ref}
+              className={heroZoom.zoomed ? 'hero-zoomed' : undefined}
+              style={{ transform: heroZoom.transform }}
+              src={fullUrl(cur.id, cur.hash)}
+              alt={cur.filename}
+              draggable={false}
+              onMouseDown={heroZoom.onMouseDown}
+              onDoubleClick={heroZoom.onDoubleClick}
+            />
             {bestIds.has(cur.id) && <span className="badge-best">★ best</span>}
             {cur.matches === false && <span className="badge-filtered">outside filter</span>}
             <DecisionBadge decision={cur.decision} />
-            <span className="hero-hint">Click to zoom</span>
+            <span className="hero-hint">{heroZoom.zoomed ? 'Scroll to zoom · double-click to reset' : 'Scroll to zoom · click to open'}</span>
           </div>
         )}
 
         {/* Selected member info + decide */}
         <div className="review-herobar">
           <div className="herobar-info">
-            <span className="herobar-name">{cur.filename}</span>
-            <div className={'herobar-caption' + (cur.caption ? '' : ' empty')}>
-              {cur.caption || 'no description'}
+            <span className="herobar-name">{detail.filename}</span>
+            <div className={'herobar-caption' + (detail.caption ? '' : ' empty')}>
+              {detail.caption || 'no description'}
             </div>
             <div className="metric-bars">
               {metrics.map(([label, v]) => (
@@ -643,7 +785,8 @@ export default function GroupReview({
             </div>
           </div>
           <div className="herobar-btns">
-            <RecBadge rec={recById.get(cur.id)} />
+            <DecisionBadge decision={(compareOpen ? alternative : cur).decision} detailed />
+            <RecBadge rec={recById.get((compareOpen ? alternative : cur).id)} />
             {onOpenGroup && cur.dup_group != null && (
               <button className="btn" onClick={() => onOpenGroup(cur.dup_group!)}>Open full duplicate group</button>
             )}
@@ -669,7 +812,7 @@ export default function GroupReview({
                 Preview marks for this set
               </button>
             )}
-            <DecideButtons item={cur} onDecision={decide} />
+            <DecideButtons item={compareOpen ? alternative : cur} onDecision={decide} />
           </div>
         </div>
       </div>

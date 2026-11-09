@@ -6,8 +6,8 @@
 export default function RecBadge({ rec }: { rec?: 'keep' | 'del' | null }) {
   if (!rec) return null
   return (
-    <span className={'rec-badge ' + rec} title="Suggestion — not applied; click Keep/Delete to decide">
-      {rec === 'keep' ? '✓ suggest keep' : '✕ suggest delete'}
+    <span className={'rec-badge ' + rec} title="A recommendation from Sift">
+      {rec === 'keep' ? 'Sift suggests: Keep' : 'Sift suggests: Mark for Trash'}
     </span>
   )
 }
