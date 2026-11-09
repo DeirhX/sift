@@ -129,6 +129,9 @@ decoupled.
   the frame thumbnails, `/img` and the overlays are drawn in. Reports and DBs
   from before this recorded raw sensor coordinates; `sift analyze` upgrades
   cached sizes and `sift index` migrates recorded face edits once.
+- **Face acceptance.** Large detections can stand on their own. Smaller
+  detections need strong confidence, a match to a person in another photo,
+  or a face at the same spot in a nearby burst frame.
 - **Override replay.** UI face edits write to `face_overrides`; `build_db`
   re-applies them after a fresh audit. The API recompute path
   (`server._reaggregate_faces`) and the ingest path both go through

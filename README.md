@@ -65,7 +65,8 @@ Useful flags (full list in `sift analyze --help`):
 - `--no-clip` — sharpness + duplicates only (fast, no models)
 - `--caption` — add BLIP captions + CLIP keyword tags
 - `--faces` — detect and cluster faces (needs `facenet-pytorch`). Also scores
-  each face's **region sharpness** (blur), normalized across all faces.
+  each face's **region sharpness** and retries likely missed faces using
+  nearby, similarly composed burst photos.
 - `--face-expr` — also score **portrait expression** quality per face via
   zero-shot CLIP (coarse pleasant-vs-grimace; requires `--faces`)
 - `--face-ref "Alice=alice.jpg"` — auto-name the cluster matching a reference

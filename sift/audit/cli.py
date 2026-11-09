@@ -29,6 +29,10 @@ Options:
   --faces               Detect + cluster faces (requires facenet-pytorch)
                         Uses MTCNN detection + VGGFace2/InceptionResnetV1 embeddings
                         + DBSCAN identity clustering.  Stores bbox, cluster_id, name.
+                        Runs on the upright (EXIF-rotated) image. Small faces are
+                        kept when the detector is near-certain, or when they match
+                        a person found in other photos (leniently for photos taken
+                        within minutes), or a neighbouring burst frame.
   --face-ref NAME=PATH  Reference photo for a named person (repeatable).
                         e.g.  --face-ref "Aja=aja_reference.jpg"
                         The cluster closest to the reference (cosine dist < 0.40)
@@ -82,7 +86,7 @@ from .grouping import (compute_phashes, assign_dup_groups, dup_centrality,
 from .faces import FACE_MODEL, run_faces
 from .hashing import content_hash as compute_content_hash
 from .embed_store import EmbedStore
-from .imaging import COORDS, RAW_EXTENSIONS, read_upright_size
+from .imaging import RAW_EXTENSIONS, COORDS, read_upright_size
 
 AUTO_CULL_BURST_SECONDS = 8
 
@@ -145,9 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--face-ref",       action="append", default=[], metavar="NAME=PATH",
                     help="Named reference photo, e.g. --face-ref 'Aja=photo.jpg'")
     ap.add_argument("--face-min-size",  type=int,   default=80, metavar="PX",
-                    help="Min face width in pixels for MTCNN (default: 80)")
+                    help="Face width in pixels a missed burst face is magnified "
+                         "to for re-detection (default: 80)")
     ap.add_argument("--face-min-rel",   type=float, default=0.04, metavar="F",
-                    help="Min face width as fraction of image width (default: 0.04)")
+                    help="Face width as a fraction of image width above which a "
+                         "detection is accepted on its own; smaller faces need "
+                         "more evidence (default: 0.04)")
     ap.add_argument("--face-eps",       type=float, default=0.50, metavar="F",
                     help="DBSCAN cosine-distance epsilon for clustering (default: 0.50)")
     ap.add_argument("--face-expr",      action="store_true",
@@ -553,6 +560,7 @@ def main():
             min_face_rel=args.face_min_rel,
             eps=args.face_eps,
             score_expr=bool(args.face_expr),
+            capture_times=capture_time,
             progress=lambda frac, msg: emit_frac("faces", 0.80, 0.96, frac, msg),
         )
         emit_progress("faces", 0.96, "Face analysis complete")
@@ -743,17 +751,16 @@ def main():
 
     if dup_groups:
         print(f"\n{'='*80}")
-        print(f"DUPLICATE GROUPS  ({len(dup_groups)} groups — keep highest combined score)")
+        print(f"DUPLICATE GROUPS  ({len(dup_groups)} groups, sorted by composite score)")
         print(f"{'='*80}")
         for gid, group in enumerate(dup_groups):
             ranked = sorted(group, key=lambda p: -combined[p])
             print(f"\n  Group {gid}  ({len(group)} images):")
             for p in ranked:
-                marker = "KEEP" if p == ranked[0] else "del?"
                 cap = ""
                 if show_caption and captions.get(p, {}).get("caption"):
                     cap = "  — " + captions[p]["caption"][:60]
-                print(f"    [{marker}] {combined[p]:.3f}  {p.name}{cap}")
+                print(f"    {combined[p]:.3f}  {p.name}{cap}")
 
     # ── Move junk ──
     if args.move_junk:
