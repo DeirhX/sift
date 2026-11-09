@@ -242,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_merges_hash ON scene_merges(hash);
 # Columns introduced after the initial release. CREATE IF NOT EXISTS can't add a
 # column to an existing table, so ensure_schema() adds them with ALTER on demand.
 _IMAGE_LATE_COLUMNS = (
+    ("dup_cull_safe", "INTEGER"),
     ("content_hash", "TEXT"), ("mtime", "REAL"), ("fsize", "INTEGER"),
     ("face_sharp", "REAL"), ("face_expr", "REAL"), ("portrait", "REAL"),
     ("scene_group", "INTEGER"), ("capture_time", "REAL"),

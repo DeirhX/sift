@@ -84,6 +84,8 @@ from .hashing import content_hash as compute_content_hash
 from .embed_store import EmbedStore
 from .imaging import RAW_EXTENSIONS
 
+AUTO_CULL_BURST_SECONDS = 8
+
 # Ordinary raster formats Pillow opens directly, plus the RAW formats decoded via
 # their embedded preview (see sift/audit/imaging.py — the single source).
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff', '.tif'} | RAW_EXTENSIONS
@@ -474,6 +476,16 @@ def main():
     )
     # Centrality per member -> the UI leads each group with its medoid frame.
     dup_central = dup_centrality(dup_groups, embeddings)
+    # A broad comparison group can still contain distinct compositions. Only
+    # enable automatic culling for a short set with close pairwise hashes.
+    cull_safe = {
+        p for group in dup_groups
+        if max(capture_time[p] for p in group) - min(capture_time[p] for p in group) <= AUTO_CULL_BURST_SECONDS
+        and all(capture_time[p] > 0 for p in group)
+        and all(hashes[a] - hashes[b] <= min(args.dup_threshold, 6)
+                for i, a in enumerate(group) for b in group[i + 1:])
+        for p in group
+    }
     emit_progress("grouping", 0.66, f"Found {len(dup_groups)} duplicate groups",
                   len(dup_groups), len(dup_groups))
 
@@ -555,6 +567,7 @@ def main():
             rec["combined"]  = round(combined[p], 4)
             rec["dup_group"] = path_to_group.get(p)
             rec["dup_central"] = dup_central.get(p)
+            rec["dup_cull_safe"] = p in cull_safe
             rec["scene_group"] = scene_assign.get(p)
             if use_para and use_clip_iqa:
                 rec["combined_clip_iqa"] = round(
@@ -573,6 +586,7 @@ def main():
             "combined":      round(combined[p], 4),
             "dup_group":     path_to_group.get(p),
             "dup_central":   dup_central.get(p),
+            "dup_cull_safe": p in cull_safe,
             "scene_group":   scene_assign.get(p),
             "raw_laplacian": round(raw_sharp[p], 2),
         }

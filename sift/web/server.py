@@ -285,7 +285,7 @@ def get_images(
 def get_groups(
     offset: int = 0,
     limit:  int = Query(40, le=200),
-    order:  str = "size",          # size | id
+    order:  str = "size",          # size | id | review
     score_min: float = 0.0, score_max: float = 1.0,
     sharp_min: float = 0.0, sharp_max: float = 1.0,
     aes_min:   float = 0.0, aes_max:   float = 1.0,
@@ -303,6 +303,12 @@ def get_groups(
     a group is included when at least one of its members matches, but every
     member is returned so the full duplicate set stays reviewable."""
     order_sql = "c DESC, dup_group ASC" if order == "size" else "dup_group ASC"
+    agg_extra = agg_join = ""
+    if order == "review":
+        agg_extra = (f", SUM(tm.id IS NULL) AS active_count,"
+                     f" SUM(tm.id IS NULL AND ({DECISION}) IS NULL) AS undecided")
+        agg_join = f"{DEC_JOIN} LEFT JOIN {TRASH_ON}"
+        order_sql = "(active_count > 1 AND undecided > 0) DESC, active_count DESC, dup_group ASC"
     with db() as conn:
         where, params = image_where(
             conn, score_min=score_min, score_max=score_max,
@@ -312,7 +318,7 @@ def get_groups(
             tags=tags, people=people, q=q, decision=decision, trash=trash,
             folder=folder, folder_recursive=folder_recursive)
         total, page = grouped_page(conn, "dup_group", where, params,
-                                   order_sql, offset, limit)
+                                   order_sql, offset, limit, agg_extra, agg_join)
         groups = [
             {"dup_group": gr["dup_group"], "count": len(items),
              "match_count": sum(it["matches"] for it in items), "items": items}
@@ -1041,11 +1047,16 @@ def import_decisions(payload: dict = Body(...)):
 
 # ── Bulk auto-cull duplicate groups ───────────────────────────────────────────
 
+@app.get("/api/groups/autocull/preview")
+def preview_autocull_groups():
+    with db() as conn:
+        conn.execute("BEGIN")
+        return library_ops.preview_autocull(conn)
+
+
 @app.post("/api/groups/autocull", response_model=AutocullResponse)
 def autocull_groups():
-    """For every duplicate group, mark the best-scoring photo 'keep' and the
-    rest 'del'. Overwrites existing marks within groups. Marks only — files
-    are not touched until /api/apply."""
+    """Mark exact copies and clear winners in tight, active duplicate sets."""
     with db() as conn:
         return library_ops.autocull_duplicates(conn)
 

@@ -466,8 +466,8 @@ class TaskManager:
             except library_ops.OperationCancelled:
                 raise TaskCancelled()
         ctx.line(
-            f"Autoculled {result['groups']} groups: kept {result['kept']}, "
-            f"deleted {result['deleted']}")
+            f"Checked {result['groups']} groups: kept {result['kept']}, "
+            f"marked {result['deleted']} for Trash, {result['review']} groups for review")
         return result
 
     def _run_trash_decisions(self, ctx: TaskContext, _params: TaskParams) -> dict[str, Any]:

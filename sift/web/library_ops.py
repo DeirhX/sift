@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sift.web import photodb
-from sift.web.queries import DEC_JOIN, DECISION, TRASHED_ON
+from sift.web.queries import DEC_JOIN, DECISION, TRASH_ON, TRASHED_ON, keeper_score
 
 ProgressFn = Callable[[int, int, str], None]
 LogFn = Callable[[str], None]
@@ -254,31 +254,81 @@ def write_decision(conn, hash_, decision, path=None):
                      (hash_, decision))
 
 
+def _duplicate_group_ids(conn):
+    return [row[0] for row in conn.execute(
+        "SELECT DISTINCT dup_group FROM images WHERE dup_group IS NOT NULL ORDER BY dup_group")]
+
+
+def _autocull_group_plan(conn, gid):
+    members = conn.execute(
+        f"""SELECT i.*, ({DECISION}) AS decision FROM images i
+            {DEC_JOIN} LEFT JOIN {TRASH_ON}
+            WHERE i.dup_group=? AND tm.id IS NULL AND i.content_hash IS NOT NULL""",
+        (gid,)).fetchall()
+    exact = defaultdict(list)
+    for member in members:
+        exact[member["content_hash"]].append(member)
+
+    def rank(row):
+        score = keeper_score(row["combined"], row["portrait"])
+        return score if score is not None else -1, -row["id"]
+
+    def prefer_kept(row):
+        return row["decision"] == "keep", rank(row)
+
+    representatives = sorted(
+        (max(copies, key=prefer_kept) for copies in exact.values()),
+        key=rank, reverse=True)
+    safe = False
+    if len(representatives) > 1:
+        winner, runner_up = representatives[:2]
+        safe = (all(row["dup_cull_safe"] for row in members)
+                and runner_up["combined"] is not None
+                and round(rank(winner)[0] - rank(runner_up)[0], 6) >= 0.02
+                and all(row["id"] == winner["id"] or row["decision"] != "keep"
+                        for row in members))
+    sets = [members] if safe else [copies for copies in exact.values() if len(copies) > 1]
+    plan = []
+    for subset in sets:
+        winner = max(subset, key=prefer_kept)
+        plan.extend((member, "keep" if member["id"] == winner["id"] else "del")
+                    for member in subset
+                    if member["id"] == winner["id"] or member["decision"] != "keep")
+    return plan, len(representatives) > 1 and not safe
+
+
+def preview_autocull(conn):
+    changes = []
+    review = 0
+    for gid in _duplicate_group_ids(conn):
+        plan, needs_review = _autocull_group_plan(conn, gid)
+        review += needs_review
+        changes.extend({
+            "id": row["id"], "hash": row["content_hash"], "path": row["path"],
+            "filename": row["filename"], "previous": row["decision"], "decision": decision,
+        } for row, decision in plan if row["decision"] != decision or decision == "keep")
+    return {"changes": changes, "review": review}
+
+
 def autocull_duplicates(conn, *, progress: ProgressFn | None = None,
                         cancelled: CancelFn | None = None) -> dict[str, int]:
-    gids = [row["dup_group"] for row in conn.execute(
-        "SELECT DISTINCT dup_group FROM images WHERE dup_group IS NOT NULL")]
-    kept = deleted = 0
+    gids = _duplicate_group_ids(conn)
+    kept = deleted = review = 0
     total = len(gids)
     for idx, gid in enumerate(gids):
         if cancelled and cancelled():
             raise OperationCancelled()
-        members = conn.execute(
-            """SELECT content_hash FROM images WHERE dup_group=?
-               ORDER BY combined DESC, id ASC""", (gid,)).fetchall()
-        for i, member in enumerate(members):
-            if not member["content_hash"]:
-                continue
-            decision = "keep" if i == 0 else "del"
-            conn.execute(
-                "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                (member["content_hash"], decision))
-            kept += i == 0
-            deleted += i != 0
+        conn.execute("BEGIN IMMEDIATE")
+        plan, needs_review = _autocull_group_plan(conn, gid)
+        review += needs_review
+        for member, decision in plan:
+            kept += decision == "keep"
+            deleted += decision == "del"
+            write_decision(conn, member["content_hash"], decision, member["path"])
         conn.commit()
         if progress:
             progress(idx + 1, total, f"Culled group {idx + 1}/{total}")
-    return {"groups": total, "kept": kept, "deleted": deleted}
+    return {"groups": total, "kept": kept, "deleted": deleted, "review": review}
 
 
 def trash_decisions(conn, *, image_ids: list[int] | None = None,

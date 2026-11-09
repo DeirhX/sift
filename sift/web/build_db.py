@@ -256,8 +256,8 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
                 para_color, para_dof, para_content, clip_iqa, caption,
                 imgw, imgh, thumb, content_hash, mtime, fsize, n_faces,
                 face_sharp, face_expr, portrait, scene_group, capture_time,
-                dup_central)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                dup_central, dup_cull_safe)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (idx, im["path"], im["filename"],
              im.get("sharpness"), im.get("combined"), im.get("raw_laplacian"),
              im.get("dup_group"),
@@ -268,7 +268,7 @@ def build(report_path: Path, db_path: Path, thumb_dir: Path,
              imgw, imgh, thumb_name, chash, jobs[idx][8], jobs[idx][9],
              len(faces_list), face_sharp, face_expr, portrait,
              im.get("scene_group"), im.get("capture_time"),
-             im.get("dup_central")),
+             im.get("dup_central"), im.get("dup_cull_safe")),
         )
 
         for f in faces_list:

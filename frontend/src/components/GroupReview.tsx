@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { thumbUrl, fullUrl } from '../api'
-import { fmt, aestheticScore, groupByDup, repFirst, isDeleted } from '../format'
+import { fmt, aestheticScore, groupByDup, repFirst, isDeleted, rankKeepers, groupActivity } from '../format'
 import type { DupSet } from '../format'
 import type { GroupedImageItem } from '../api/types'
 import type { Decision, DecisionFn, ReviewMark, ReviewPlan, SetLightboxIndex } from '../types'
@@ -113,30 +113,37 @@ export default function GroupReview({
   // a single stacked representative tile you can click to expand inline — and an
   // "Ungroup" toggle flattens it to every photo (with group rails).
   const canGroup = mode === 'scene' && sets.length > 0
-  // ★ marks each group's representative (the medoid hero), which is now the
-  // first member of every reordered set / of `view` in group mode.
+  const groupKeepers = useMemo(() => rankKeepers(group.items), [group.items])
+  const activity = groupActivity(group.items)
+  const groupKind = groupKeepers.length > 1 && groupKeepers.every((it) => it.hash === groupKeepers[0].hash)
+    ? 'Exact copies'
+    : groupKeepers.length > 1 && groupKeepers.every((it) => it.dup_cull_safe)
+      ? 'Close matches'
+      : 'Alternate frames'
+  const sceneKeepers = useMemo(
+    () => mode === 'scene' ? groupByDup(groupKeepers).sets.map((s) => s.items).filter((s) => s.length > 1) : [],
+    [mode, groupKeepers],
+  )
+  // ★ marks the recommended keeper, independently of the cover frame.
   const bestIds = useMemo(
     () => (mode === 'scene'
-      ? new Set(sets.map((s) => s.items[0]?.id))
-      : new Set(view.length ? [view[0].id] : [])),
-    [mode, sets, view],
+      ? new Set(sceneKeepers.map((s) => s[0].id))
+      : new Set(groupKeepers.length ? [groupKeepers[0].id] : [])),
+    [mode, sceneKeepers, groupKeepers],
   )
   const idIndex = useMemo(() => new Map(view.map((it, i) => [it.id, i] as const)), [view])
 
   // Per-photo keep/delete *recommendation* (a hint, never auto-applied). The
-  // logic mirrors "keep best · delete rest": the representative (the ★ medoid)
-  // is the suggested keep, its peers the suggested deletes. In scene mode this is
-  // scoped PER near-duplicate set — a scene's loose, one-off shots aren't
-  // redundant, so they get no recommendation at all.
+  // In scene mode recommendations apply only within each comparison set.
   const recById = useMemo(() => {
     const m = new Map<number, 'keep' | 'del'>()
     if (mode === 'scene') {
-      for (const s of sets) s.items.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+      for (const s of sceneKeepers) s.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
     } else {
-      view.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
+      groupKeepers.forEach((it, i) => m.set(it.id, i === 0 ? 'keep' : 'del'))
     }
     return m
-  }, [mode, sets, view])
+  }, [mode, sceneKeepers, groupKeepers])
 
   // Selection + zoom are controlled by the app (so they live in the URL and
   // browser history). `selId` null → show the default hero (view[0], the
@@ -288,7 +295,6 @@ export default function GroupReview({
   // Red (low) → amber → green (high), so quality reads at a glance.
   const barColor = (v: number): string => `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 65%, 45%)`
 
-  const groupKeepers = items.filter((item) => !isDeleted(item) && item.hash != null)
   const previewKeep = (keep: GroupedImageItem, pool: GroupedImageItem[]) => {
     const changes: ReviewMark[] = pool.flatMap((item) => {
       const decision: Decision = item.id === keep.id ? 'keep' : 'del'
@@ -297,8 +303,8 @@ export default function GroupReview({
         filename: item.filename, decision, previous }]
     })
     const rival = pool.find((it) => it.hash !== keep.hash)
-    const a = keep.combined
-    const b = rival?.combined
+    const a = keep.keeper_score ?? keep.combined
+    const b = rival?.keeper_score ?? rival?.combined
     const close = rival && (a == null || b == null || Math.abs(a - b) < 0.02)
     setPlan({ title: `Keep ${keep.filename}`, changes,
       note: close ? 'Close call. Compare the frames before deciding.' : 'These changes update your marks.' })
@@ -423,7 +429,8 @@ export default function GroupReview({
         <div className="review-head">
           <div>
             <b>{title ?? `Duplicate group #${group.dup_group}`}</b>
-            <span className="review-sub"> · {partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos · viewing {sel + 1}/{view.length}</span>
+            {mode === "group" && <span className="review-filternote"> · {groupKind}</span>}
+            <span className="review-sub"> · {mode === "group" ? activity.label : `${partial ? `${memberMatch} of ${memberTotal}` : memberTotal} photos`} · viewing {sel + 1}/{view.length}</span>
             {subExtra}
             {applyErr && <span className="review-filternote err"> · {applyErr}</span>}
           </div>
