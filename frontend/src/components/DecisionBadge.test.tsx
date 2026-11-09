@@ -8,9 +8,9 @@ describe('DecisionBadge', () => {
     expect(screen.getByText('KEEP')).toBeInTheDocument()
   })
 
-  it('shows DEL for a deleted photo', () => {
+  it('shows MARKED for a photo marked for Trash', () => {
     render(<DecisionBadge decision="del" />)
-    expect(screen.getByText('DEL')).toBeInTheDocument()
+    expect(screen.getByText('MARKED')).toBeInTheDocument()
   })
 
   it('renders nothing when undecided', () => {

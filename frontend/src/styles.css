@@ -25,6 +25,7 @@
   /* ── Decorative / status ──────────────────────────────────────── */
   --gold: #f5c518;        /* "best of group" marker */
   --amber: #ffd27f;       /* duplicate / filtered badge text */
+  --amber-rgb: 255, 210, 127;
   --info: #6cb6ff;        /* duplicate-in-scene pill text */
   --info-rgb: 52, 152, 219;
   --thumb-bg: #000;       /* backdrop behind any image/thumbnail */
@@ -461,8 +462,68 @@ select:focus, input:focus {
 .card img.thumb {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+}
+
+.photo-workspace {
+  display: flex;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.photo-workspace > .grid-scroll { flex: 1; min-width: 0; }
+.grid-size { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.grid-size select { color: var(--text); background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px; }
+.card-title, .photo-inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.card-title > span, .photo-inspector-head > strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.card-title { font-size: 12px; color: var(--text-dim); }
+.card-title .btn { padding: 2px 6px; font-size: 11px; }
+.photo-inspector {
+  width: clamp(220px, 23vw, 310px);
+  flex: 0 0 auto;
+  overflow: auto;
+  padding: 14px;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.inspector-preview { display: grid; place-items: center; width: 100%; margin: 12px 0; padding: 0; cursor: zoom-in; background: var(--thumb-bg); border: 0; }
+.inspector-preview img { max-width: 100%; max-height: 210px; object-fit: contain; }
+.photo-inspector dl { margin: 12px 0; font-variant-numeric: tabular-nums; }
+.photo-inspector dl div { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.photo-inspector dd { margin: 0; }
+.photo-inspector p { line-height: 1.45; }
+.inspector-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.inspector-tags span { color: var(--text-dim); font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; }
+.pile-group-status { color: var(--text-dim); font-size: 12px; padding: 3px 1px 0; }
+.mark-preview, .review-notice { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 8px 14px; }
+.mark-preview-summary, .review-notice { display: flex; align-items: center; gap: 8px; }
+.mark-preview-summary > div, .review-notice > span { flex: 1; }
+.mark-preview-summary > div > div, .mark-preview summary, .mark-preview li { color: var(--text-dim); font-size: 12px; }
+.mark-preview details { margin-top: 5px; }
+.mark-preview summary { cursor: pointer; width: fit-content; }
+.mark-preview ul { margin: 6px 0; max-height: 110px; overflow: auto; padding: 0; }
+.mark-preview li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.review-notice { flex: 0 0 auto; font-size: 13px; }
+.burst-compare { display: flex; flex-direction: column; flex: 1; min-height: 0; background: var(--thumb-bg); }
+.compare-controls, .compare-label { display: flex; align-items: center; gap: 7px; padding: 6px 9px; background: var(--bg-panel); font-size: 12px; }
+.compare-controls { flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+.compare-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--border); flex: 1; min-height: 0; }
+.compare-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.compare-label > span { color: var(--text-dim); }
+.compare-label > span:nth-child(2) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-right: auto; }
+.compare-image { position: relative; display: grid; place-items: center; overflow: hidden; min-height: 0; flex: 1; background: var(--thumb-bg); }
+.compare-image img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; touch-action: none; user-select: none; }
+.compare-image img.pannable { cursor: grab; }
+.compare-image img.pannable:active { cursor: grabbing; }
+.compare-label .badge-decision, .herobar-btns .badge-decision { position: static; align-self: center; white-space: nowrap; }
+.sift-review-ux .herobar-btns { flex-wrap: wrap; justify-content: flex-end; max-width: 68%; }
+@media (max-width: 840px) {
+  .photo-inspector { position: absolute; z-index: 2; right: 0; top: 0; bottom: 0; box-shadow: -8px 0 30px #0007; }
+  .grid-size span { display: none; }
+  .compare-label { flex-wrap: wrap; }
+  .sift-review-ux .herobar-btns { max-width: 60%; }
 }
 .face-box {
   position: absolute;
@@ -633,12 +694,22 @@ select:focus, input:focus {
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 .lightbox img {
   max-width: 96%;
   max-height: 96vh;
   object-fit: contain;
 }
+.lb-img {
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+  cursor: zoom-in;
+}
+.lb-img.zoomed { cursor: grab; }
+.lb-img.zoomed:active { cursor: grabbing; }
 /* Decision made visible on the photo itself (not just the side-panel button):
    a coloured ring around the image plus an edge vignette flooding the stage, so
    a marked-for-deletion frame is unmistakable while flicking through. Keep gets
@@ -1084,6 +1155,21 @@ select:focus, input:focus {
   color: var(--text);
   box-shadow: inset 0 -2px 0 var(--accent);
 }
+.review-viewseg .btn.vis-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.vis-toggle .vis-eye { flex-shrink: 0; opacity: 0.9; }
+/* A hide-filter that is actively REMOVING photos from view reads in amber (the
+   "filtered" hue) rather than the blue accent used by view-arrangement toggles
+   like Ungroup — so "photos are hidden right now" is unmistakable, not just
+   another lit segment. The non-filtering (shown) state stays quiet/neutral. */
+.review-viewseg .btn.vis-toggle.filtering {
+  color: var(--amber);
+  background: rgba(var(--amber-rgb), 0.12);
+  box-shadow: inset 0 -2px 0 var(--amber);
+}
+.review-viewseg .btn.vis-toggle.filtering:hover {
+  color: var(--amber);
+  background: rgba(var(--amber-rgb), 0.18);
+}
 /* Conventional X dismiss — square icon button set slightly apart from the
    functional actions (List/Group) so it reads unambiguously as "close", not as
    another toggle. Esc still closes; this is the discoverable affordance. */
@@ -1391,7 +1477,10 @@ select:focus, input:focus {
   background: var(--thumb-bg);
   cursor: zoom-in;
   padding: 12px;
+  overflow: hidden;
 }
+.review-hero.zoomed { cursor: grab; }
+.review-hero.zoomed:active { cursor: grabbing; }
 
 /* List-of-previews view (toggled from the header) */
 .review-list {
@@ -1448,6 +1537,10 @@ select:focus, input:focus {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .hero-hint {
   position: absolute;
@@ -2126,14 +2219,3 @@ select:focus, input:focus {
   cursor: default;
 }
 .folder-suggest-more:hover { background: transparent !important; }
-
-.pile-group-status { color: var(--text-dim); font-size: 12px; padding: 3px 1px 0; }
-.mark-preview, .review-notice { background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 8px 14px; }
-.mark-preview-summary, .review-notice { display: flex; align-items: center; gap: 8px; }
-.mark-preview-summary > div, .review-notice > span { flex: 1; }
-.mark-preview-summary > div > div, .mark-preview summary, .mark-preview li { color: var(--text-dim); font-size: 12px; }
-.mark-preview details { margin-top: 5px; }
-.mark-preview summary { cursor: pointer; width: fit-content; }
-.mark-preview ul { margin: 6px 0; max-height: 110px; overflow: auto; padding: 0; }
-.mark-preview li { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
-.review-notice { flex: 0 0 auto; font-size: 13px; }

@@ -439,9 +439,15 @@ def serve_thumb(image_id: int):
 
 
 @app.get("/img/{image_id}")
-def serve_full(image_id: int):
+def serve_full(image_id: int, face_id: int | None = None):
     with db() as conn:
         row = conn.execute("SELECT path FROM images WHERE id=?", (image_id,)).fetchone()
+        face = None
+        if face_id is not None:
+            face = conn.execute("SELECT x1, y1, x2, y2 FROM faces WHERE id=? AND image_id=?",
+                                (face_id, image_id)).fetchone()
+            if face is None:
+                raise HTTPException(404, "face not found on this photo")
     if not row:
         raise HTTPException(404, "image not found")
     path = Path(row["path"])
@@ -453,16 +459,24 @@ def serve_full(image_id: int):
     # decodes (orientation-corrected, re-encoded to JPEG in-memory) so the large
     # view matches the thumbnail. Non-RAW originals are streamed straight off disk.
     from sift.audit.imaging import is_raw
-    if is_raw(path):
+    if is_raw(path) or face is not None:
         try:
             from io import BytesIO
             from PIL import ImageOps
             from sift.audit.imaging import load_rgb
-            img = ImageOps.exif_transpose(load_rgb(path)).convert("RGB")
+            with load_rgb(path) as original:
+                if face is not None:
+                    x1, y1, x2, y2 = face
+                    edge = max(x2 - x1, y2 - y1) * 2.6
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    original = original.crop((max(0, cx - edge / 2), max(0, cy - edge / 2),
+                                              min(original.width, cx + edge / 2),
+                                              min(original.height, cy + edge / 2)))
+                img = ImageOps.exif_transpose(original).convert("RGB")
             buf = BytesIO()
             img.save(buf, format="JPEG", quality=90)
         except Exception as e:
-            raise HTTPException(500, f"failed to decode RAW preview: {e}")
+            raise HTTPException(500, f"failed to decode image preview: {e}")
         return Response(content=buf.getvalue(), media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
 

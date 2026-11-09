@@ -6,6 +6,7 @@ import { fmt, aestheticScore, fmtTime, qualityColor } from '../format'
 import type { ImageItem, LocationsResponse } from '../api/types'
 import type { DecisionFn, SetLightboxIndex } from '../types'
 import DecideButtons from './DecideButtons'
+import { useImageZoom } from '../hooks/useImageZoom'
 
 // Normalise a path for prefix comparison against the configured roots: lower
 // case, forward slashes, no trailing slash (mirrors the server's normcase).
@@ -90,13 +91,16 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
     })
   }, [items.length, setIndex])
 
+  // Wheel-zoom + drag-pan the full-res image; resets to fit on each navigation.
+  const zoom = useImageZoom(item?.id)
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setIndex(null)
       else if (e.key === 'ArrowLeft') go(-1)
       else if (e.key === 'ArrowRight') go(1)
       else if (e.key === 'k' || e.key === '+' || e.key === '=') onDecision(item, 'keep')
-      else if (e.key === 'd' || e.key === '-') onDecision(item, 'del')
+      else if (e.key === 'd' || e.key === '-' || e.key === 'Delete') onDecision(item, 'del')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -161,7 +165,17 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
         {index < items.length - 1 && (
           <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
         )}
-        <img src={fullUrl(item.id, item.hash)} alt={item.filename} onClick={(e) => e.stopPropagation()} />
+        <img
+          ref={zoom.ref}
+          className={'lb-img' + (zoom.zoomed ? ' zoomed' : '')}
+          style={{ transform: zoom.transform }}
+          src={fullUrl(item.id, item.hash)}
+          alt={item.filename}
+          draggable={false}
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={zoom.onMouseDown}
+          onDoubleClick={zoom.onDoubleClick}
+        />
         {item.decision && (
           <span className={'lb-decision ' + item.decision}>
             {item.decision === 'del' ? '✕ Marked for deletion' : '✓ Marked to keep'}
@@ -201,7 +215,7 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
             onDecision={onDecision}
             className="btn lb-act"
             keepLabel="Keep (k / +)"
-            delLabel="Delete (d / −)"
+            delLabel="Mark for Trash (D)"
           />
         </div>
 

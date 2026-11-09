@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask, regroupScenes, mergeScenes, splitScene, unmergeScene } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
-import { applyTrashHide } from './format'
+import { applyTrashHide, groupActivity } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
 import { useDecisions } from './hooks/useDecisions'
 import { useTaskInvalidation } from './hooks/useTaskInvalidation'
@@ -42,6 +42,10 @@ export default function App() {
   const [view, setView] = useState<View>(INITIAL.view)   // 'grid' | 'groups' | 'scenes'
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [tileSize, setTileSize] = useState(() => {
+    const saved = Number(localStorage.getItem('sift.grid.tileSize'))
+    return [210, 285, 370].includes(saved) ? saved : 285
+  })
   const qc = useQueryClient()
   const searchRef = useRef<HTMLInputElement>(null)
   const { setDecision, patchTrashed, saveReview, reviewBusy,
@@ -135,6 +139,22 @@ export default function App() {
     enabled: openGroupId != null && groupInPage == null,
   })
   const openGroupObj = groupInPage ?? groupDetail.data?.pages[0]?.groups[0] ?? null
+  const loadedGroups = groups.data?.pages.flatMap((page) => page.groups) ?? []
+  const nextGroup = (catalog: typeof loadedGroups) => {
+    const current = catalog.findIndex((group) => group.dup_group === openGroupId)
+    const rest = catalog.slice(current + 1)
+    return rest.find((group) => groupActivity(group.items).needsReview)
+      ?? catalog.slice(0, Math.max(0, current)).find((group) => groupActivity(group.items).needsReview)
+      ?? rest[0]
+  }
+  const openNextGroup = async () => {
+    let next = nextGroup(loadedGroups)
+    if (!next && groups.hasNextPage) {
+      const result = await groups.fetchNextPage()
+      next = nextGroup(result.data?.pages.flatMap((page) => page.groups) ?? [])
+    }
+    if (next) openGroup(next.dup_group)
+  }
   const openSceneObj = nav?.kind === 'scene'
     ? (scenes.data?.pages.flatMap((p) => p.scenes) ?? []).find((s) => s.scene_group === nav.refId) ?? null
     : null
@@ -220,13 +240,14 @@ export default function App() {
   const activeTaskPct = activeTask?.progress == null
     ? null : Math.round(Math.max(0, Math.min(1, activeTask.progress)) * 100)
   const activeTaskLabel = activeTask ? (TASK_LABELS[activeTask.type] ?? activeTask.type) : null
+  const currentQuery = view === 'grid' ? images : view === 'groups' ? groups : scenes
   const reviewActions = {
     onSaveReview: saveReview, onUndoReview: canUndoReview ? undoReview : undefined,
     reviewBusy, reviewMessage,
   }
 
   return (
-    <div className="app">
+    <div className="app sift-review-ux">
       <Sidebar
         meta={meta.data}
         filters={filters}
@@ -237,6 +258,10 @@ export default function App() {
         shownLabel={headerLabel}
         onPeopleChange={refetchPeople}
         onTaskDone={invalidateAfterTask}
+        onOpenTrash={() => {
+          setView('grid')
+          updateFilter({ trash: 'trashed', decision: 'all' })
+        }}
       />
       <div className="main">
         <div className="topbar">
@@ -256,8 +281,18 @@ export default function App() {
             />
           )}
           <span className="result-count">
-            {headerCount.toLocaleString()} {headerLabel}
+            {currentQuery.isError ? 'Connection problem' : `${headerCount.toLocaleString()} ${headerLabel}`}
           </span>
+          {view === 'grid' && <label className="grid-size">
+            <span>Thumbnails</span>
+            <select aria-label="Thumbnail size" value={tileSize} onChange={(event) => {
+              const size = Number(event.currentTarget.value)
+              setTileSize(size)
+              localStorage.setItem('sift.grid.tileSize', String(size))
+            }}>
+              <option value={210}>Small</option><option value={285}>Medium</option><option value={370}>Large</option>
+            </select>
+          </label>}
           {view === 'scenes' && (
             <SceneGranularity
               gap={Number(meta.data?.meta?.scene_gap) || 120}
@@ -296,7 +331,13 @@ export default function App() {
           </div>
         )}
 
-        {view === 'grid' ? (
+        {currentQuery.isError ? (
+          <div className="empty" role="alert">
+            <p>Couldn’t load {headerLabel}. Check that the Sift server is running.</p>
+            <button className="btn primary" disabled={currentQuery.isFetching}
+              onClick={() => void currentQuery.refetch()}>{currentQuery.isFetching ? 'Retrying…' : 'Retry'}</button>
+          </div>
+        ) : view === 'grid' ? (
           images.isLoading ? (
             <div className="spinner">Loading…</div>
           ) : items.length === 0 ? (
@@ -320,6 +361,7 @@ export default function App() {
               onDecision={setDecision}
               people={people}
               onFaceChange={refetchPeople}
+              tileSize={tileSize}
             />
           )
         ) : view === 'scenes' ? (
@@ -355,6 +397,7 @@ export default function App() {
 
       {nav?.kind === 'group' && openGroupObj && (
         <GroupReview
+          key={openGroupObj.dup_group}
           group={openGroupObj}
           selId={nav.imgId}
           zoom={!!nav.zoom}
@@ -363,6 +406,7 @@ export default function App() {
           onClose={closeOverlay}
           onDecision={setDecision}
           {...reviewActions}
+          onNextGroup={nextGroup(loadedGroups) || groups.hasNextPage ? () => void openNextGroup() : undefined}
           defaultShowDeleted={filters.trash === 'trashed'}
           defaultShowCulled={filters.decision === 'del'}
         />

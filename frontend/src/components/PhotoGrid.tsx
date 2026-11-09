@@ -1,12 +1,13 @@
 import { useRef, useState, useLayoutEffect, useEffect, useCallback, useMemo } from 'react'
 import type { UIEvent, KeyboardEvent } from 'react'
 import PhotoCard from './PhotoCard'
+import { aestheticScore, fmt } from '../format'
+import { thumbUrl } from '../api'
 import type { ImageItem, ClusterFacet } from '../api/types'
 import type { DecisionFn, PersonName } from '../types'
 
-const MIN_COL = 240   // min card width before adding another column
 const GAP = 14
-const META_H = 128    // fixed height reserved for the card meta block
+const META_H = 67     // filename, details, and decisions
 const OVERSCAN = 600  // px rendered above/below the viewport
 // Clamp tile aspect so panoramas / towers don't wreck the column rhythm.
 const MIN_RATIO = 0.56   // widest (landscape): thumb height ≥ 0.56 * width
@@ -32,13 +33,14 @@ interface PhotoGridProps {
   onDecision: DecisionFn
   people: ClusterFacet[]
   onFaceChange?: () => void
+  tileSize?: number
 }
 
 // Aspect-preserving masonry: each tile keeps its photo's proportions and tiles
 // flow into the shortest column. Layout positions are precomputed from image
 // dimensions so we can window (virtualize) by absolute Y without a row grid.
 export default function PhotoGrid(
-  { items, hasNext, isFetchingNext, fetchNext, onOpen, onDecision, people, onFaceChange }: PhotoGridProps,
+  { items, hasNext, isFetchingNext, fetchNext, onOpen, onDecision, people, onFaceChange, tileSize = 285 }: PhotoGridProps,
 ) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
@@ -47,6 +49,7 @@ export default function PhotoGrid(
   // Index of the keyboard-focused tile (roving focus). null until the grid is
   // first navigated; arrows then drive it and scroll it into view.
   const [focusIdx, setFocusIdx] = useState<number | null>(null)
+  const [inspecting, setInspecting] = useState(false)
 
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -61,8 +64,8 @@ export default function PhotoGrid(
     return () => ro.disconnect()
   }, [])
 
-  const inner = Math.max(width - 28, MIN_COL) // minus grid-scroll padding
-  const cols = Math.max(1, Math.floor((inner + GAP) / (MIN_COL + GAP)))
+  const inner = Math.max(width - 28, 120)
+  const cols = Math.max(1, Math.floor((inner + GAP) / (tileSize + GAP)))
   const colWidth = Math.floor((inner - GAP * (cols - 1)) / cols)
 
   // Precompute the masonry layout: shortest-column packing.
@@ -151,7 +154,8 @@ export default function PhotoGrid(
 
   const onKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>) => {
     // Don't hijack typing in the search box, face-editor select, etc.
-    if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target as HTMLElement).tagName)) return
+    const tag = (e.target as HTMLElement).tagName
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (tag === 'BUTTON' && ['Enter', ' '].includes(e.key))) return
     const last = items.length - 1
     if (last < 0) return
     const move = (next: number) => {
@@ -173,11 +177,16 @@ export default function PhotoGrid(
       case 'Enter':
         if (focusIdx != null) { e.preventDefault(); onOpen(focusIdx) }
         return
+      case 'i': case 'I':
+        e.preventDefault()
+        if (focusIdx == null) setFocusIdx(0)
+        setInspecting((open) => !open)
+        return
       // + (keep) / − (delete) mirror k/d; '=' is the unshifted main-row + key.
       case 'k': case 'K': case '+': case '=':
         if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'keep') }
         return
-      case 'd': case 'D': case '-':
+      case 'd': case 'D': case '-': case 'Delete':
         if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'del') }
         return
       default: return
@@ -194,7 +203,9 @@ export default function PhotoGrid(
     return c?.name?.trim() ? c.name : null
   }, [people])
 
+  const selected = inspecting && focusIdx != null ? items[focusIdx] : null
   return (
+    <div className="photo-workspace">
     <div
       className="grid-scroll"
       ref={scrollRef}
@@ -202,7 +213,7 @@ export default function PhotoGrid(
       onKeyDown={onKeyDown}
       tabIndex={0}
       role="grid"
-      aria-label="Photo results — arrow keys to move, Enter to open, k/d to keep/delete"
+      aria-label="Photo results — arrow keys to move, Enter to open, I for details, K to keep, D to mark for Trash"
     >
       <div style={{ height: totalHeight, position: 'relative' }}>
         {visible.map((l) => (
@@ -224,6 +235,7 @@ export default function PhotoGrid(
               colWidth={colWidth}
               thumbH={l.thumbH}
               onOpen={() => { setFocusIdx(l.index); onOpen(l.index) }}
+              onInspect={() => { setFocusIdx(l.index); setInspecting(true) }}
               onDecision={onDecision}
               personName={personName}
               people={people}
@@ -233,6 +245,26 @@ export default function PhotoGrid(
         ))}
       </div>
       {isFetchingNext && <div className="spinner">Loading more…</div>}
+    </div>
+    {selected && (
+      <aside className="photo-inspector" aria-label="Photo details">
+        <div className="photo-inspector-head">
+          <strong title={selected.filename}>{selected.filename}</strong>
+          <button className="btn" aria-label="Close photo details" onClick={() => setInspecting(false)}>✕</button>
+        </div>
+        <button className="inspector-preview" onClick={() => onOpen(focusIdx!)} aria-label="Open full photo">
+          <img src={thumbUrl(selected.id, selected.hash)} alt="" />
+        </button>
+        <dl>
+          <div><dt>Quality</dt><dd>{fmt(selected.combined)}</dd></div>
+          <div><dt>Sharpness</dt><dd>{fmt(selected.sharpness)}</dd></div>
+          <div><dt>Aesthetic</dt><dd>{fmt(aestheticScore(selected))}</dd></div>
+          {selected.portrait != null && <div><dt>Portrait</dt><dd>{fmt(selected.portrait)}</dd></div>}
+        </dl>
+        {selected.caption && <p>{selected.caption}</p>}
+        {selected.tags.length > 0 && <div className="inspector-tags">{selected.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>}
+      </aside>
+    )}
     </div>
   )
 }

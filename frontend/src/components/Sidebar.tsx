@@ -156,13 +156,15 @@ interface SidebarProps {
   shownLabel: string
   onPeopleChange?: () => void
   onTaskDone?: (task: TaskSnapshot) => void
+  onOpenTrash: () => void
 }
 
 const PEOPLE_CAP = 10
 const TAG_CAP = 14
 
 export default function Sidebar(
-  { meta, filters, updateFilter, toggleInList, resetFilters, shownCount, shownLabel, onPeopleChange, onTaskDone }: SidebarProps,
+  { meta, filters, updateFilter, toggleInList, resetFilters, shownCount, shownLabel,
+    onPeopleChange, onTaskDone, onOpenTrash }: SidebarProps,
 ) {
   const clusters = meta?.clusters ?? []
   const tags = meta?.tags ?? []
@@ -524,7 +526,8 @@ export default function Sidebar(
 
       <button className="btn full" onClick={resetFilters}>Reset filters</button>
 
-      <ApplyPanel onTaskDone={onTaskDone} />
+      <ApplyPanel onTaskDone={onTaskDone} showTrash={filters.trash === 'trashed'} onOpenTrash={onOpenTrash}
+        onOpenLibrary={() => updateFilter({ trash: 'active' })} />
 
       <div className="stats">
         Showing <b>{shownCount.toLocaleString()}</b> {shownLabel}

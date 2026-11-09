@@ -125,9 +125,10 @@ npm run typecheck                # tsc --noEmit; also runs as part of `npm run b
 ```
 
 In the UI you can filter by score/sharpness/aesthetic/portrait, people, tags and
-captions; review duplicate groups; preview auto-cull for exact copies and tight
-groups with a clear keeper; split scenes while retaining cross-scene duplicate links;
-and move `del`-marked files into `<library>/_trash/`. Trash is
+captions; compare duplicate groups; and auto-cull exact copies and tight
+groups with a clear keeper. Close calls stay available for review. Scenes
+can be split at a selected photo and can link to a duplicate group across
+scene boundaries. You can move `del`-marked files into `<library>/_trash/`. Trash is
 recoverable via Restore; permanent deletion happens only when you Empty Trash.
 
 **Face editing** (sidebar "manage" + clicking a face box on a tile): rename or

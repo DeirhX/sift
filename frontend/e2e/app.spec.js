@@ -15,9 +15,9 @@ test('caption search narrows the grid', async ({ page }) => {
   await page.goto('/')
   await page.getByPlaceholder('Search captions…').fill('cat')
   await page.getByPlaceholder('Search captions…').press('Enter')
-  await expect(page.getByText('a cat on a sofa')).toBeVisible()
-  await expect(page.getByText('a sunny beach')).toHaveCount(0)
   await expect(page.locator('.card')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Details for cat.jpg' }).click()
+  await expect(page.getByRole('complementary', { name: 'Photo details' })).toContainText('a cat on a sofa')
 })
 
 test('keep decision persists across reload', async ({ page }) => {
