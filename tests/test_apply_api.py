@@ -166,3 +166,32 @@ def test_reindex_does_not_hide_replacement_at_original_path(real_library, rebuil
     replacement = items_by_name(client)["y.jpg"]
     assert Path(replacement["path"]) == env.lib / "y.jpg"
     assert replacement["decision"] is None
+
+
+def test_reindex_same_report_handles_reused_trash_filename(tmp_path, make_env, rebuild):
+    from sift.web.library_ops import empty_trash
+
+    originals = [tmp_path / folder / "shared.jpg" for folder in ("first", "second")]
+    for i, path in enumerate(originals):
+        path.parent.mkdir()
+        tiny_jpeg(path, color=(30 + 100 * i, 100, 47))
+    env = make_env({"folder": str(tmp_path), "images": [
+        {"path": str(path), "filename": path.name, "combined": 0.5, "faces": []}
+        for path in originals
+    ]})
+    client = env.client
+    photos = {item["path"]: item for item in client.get("/api/images").json()["items"]}
+
+    for i, path in enumerate(originals):
+        client.post("/api/decisions", json={"hash": photos[str(path)]["hash"], "decision": "del"})
+        assert client.post("/api/apply").json()["moved"] == 1
+        if i == 0:
+            with sqlite3.connect(env.db) as conn:
+                conn.row_factory = sqlite3.Row
+                assert empty_trash(conn)["deleted"] == 1
+
+    rebuild(env)
+    trashed = client.get("/api/images", params={"trash": "trashed"}).json()["items"]
+    assert [item["hash"] for item in trashed] == [photos[str(originals[1])]["hash"]]
+    assert client.post("/api/apply/undo").json()["restored"] == 1
+    assert originals[1].exists() and not originals[0].exists()
