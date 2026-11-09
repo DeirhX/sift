@@ -115,8 +115,14 @@ export function unmergeScene(sceneGroup: number): Promise<RegroupResponse> {
 }
 
 // Fire-and-forget: optimistic UI owns rollback, so these don't await a result.
-export async function setDecision(hash: string, decision: string | null): Promise<void> {
-  await fetch('/api/decisions', jsonBody({ hash, decision }))
+export async function setDecision(hash: string, decision: string | null, id: number, path: string): Promise<void> {
+  await jsonFetch('/api/decisions', jsonBody({ hash, decision, id, path }))
+}
+
+export async function setDecisions(updates: {
+  id: number; hash: string; path?: string; decision: string | null; expected_decision?: string | null; guard_only?: boolean
+}[]): Promise<void> {
+  await jsonFetch('/api/decisions', jsonBody({ updates }))
 }
 
 export async function renameCluster(cluster_id: number, name: string | null): Promise<void> {

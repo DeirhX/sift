@@ -144,13 +144,16 @@ test.describe('group review', () => {
 
     // Bulk: keep best, delete the rest. Del'd members are live-culled from the
     // strip the instant they're marked, so reveal them to verify both flag types.
-    await panel.getByRole('button', { name: 'Keep best · delete rest' }).click()
+    await panel.getByRole('button', { name: 'Preview keeper marks' }).click()
+    await expect(panel.getByRole('region', { name: 'Preview changes' })).toBeVisible()
+    await expect(panel.locator('.strip-flag')).toHaveCount(0)
+    await panel.getByRole('button', { name: 'Apply marks' }).click()
     await panel.getByRole('button', { name: /Show culled/ }).click()
     await expect(panel.locator('.strip-flag.keep')).toBeVisible()
     await expect(panel.locator('.strip-flag.del')).toBeVisible()
 
     // Clear wipes the marks back out (keeps DB clean for later tests).
-    await panel.getByRole('button', { name: 'Clear', exact: true }).click()
+    await panel.getByRole('button', { name: 'Undo marks', exact: true }).click()
     await expect(panel.locator('.strip-flag')).toHaveCount(0)
 
     // Filmstrip selection swaps the hero preview.
@@ -195,7 +198,7 @@ test.describe('scenes (rough hierarchy)', () => {
     await expect(review.locator('.strip-grouptile')).toHaveCount(0)
     await expect(review.locator('.strip-flatgroup')).toHaveCount(0)
     // The whole-scene "keep best · delete rest" must NOT be offered.
-    await expect(review.getByRole('button', { name: 'Keep best · delete rest' }))
+    await expect(review.getByRole('button', { name: 'Preview keeper marks' }))
       .toHaveCount(0)
 
     // The "▾ N" badge on the cluster collapses it to the medoid tile, which

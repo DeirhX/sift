@@ -4,11 +4,12 @@ import { thumbUrl, fullUrl } from '../api'
 import { fmt, aestheticScore, groupByDup, repFirst, isDeleted } from '../format'
 import type { DupSet } from '../format'
 import type { GroupedImageItem } from '../api/types'
-import type { DecisionFn, BulkDecisionFn, SetLightboxIndex } from '../types'
+import type { Decision, DecisionFn, ReviewMark, ReviewPlan, SetLightboxIndex } from '../types'
 import Lightbox from './Lightbox'
 import DecisionBadge from './DecisionBadge'
 import DecideButtons from './DecideButtons'
 import RecBadge from './RecBadge'
+import MarkPreview from './MarkPreview'
 
 // A group or scene for review: only the member list and an optional id label
 // are needed (Group carries dup_group, Scene carries scene_group).
@@ -22,7 +23,10 @@ interface GroupReviewProps {
   group: ReviewGroup
   onClose: () => void
   onDecision: DecisionFn
-  onDecisionsBulk: BulkDecisionFn
+  onSaveReview: (changes: ReviewMark[]) => Promise<void>
+  onUndoReview?: () => void
+  reviewBusy?: boolean
+  reviewMessage?: string
   mode?: 'group' | 'scene'
   title?: ReactNode
   subExtra?: ReactNode
@@ -60,7 +64,8 @@ interface GroupReviewProps {
 // `title`/`subExtra` let the caller label the header; `showGroupBulk` gates the
 // group-wide actions.
 export default function GroupReview({
-  group, onClose, onDecision, onDecisionsBulk,
+  group, onClose, onDecision,
+  onSaveReview, onUndoReview, reviewBusy = false, reviewMessage,
   mode = 'group', title = null, subExtra = null, showGroupBulk = true,
   selId = null, zoom = false, onSelect, onZoom, onApplyDeletes,
   defaultShowDeleted = false, defaultShowCulled = false,
@@ -71,6 +76,7 @@ export default function GroupReview({
   //     these is what makes marking Del shrink the set immediately.
   //   • DELETED — moved to Trash (trash_state set; an optimistic trash patch sets
   //     it the instant "Delete N now" fires).
+  const [plan, setPlan] = useState<ReviewPlan | null>(null)
   const [showCulled, setShowCulled] = useState(defaultShowCulled)
   const [showDeleted, setShowDeleted] = useState(defaultShowDeleted)
   const culledCount = useMemo(
@@ -242,6 +248,10 @@ export default function GroupReview({
   useEffect(() => {
     if (full) return
     const onKey = (e: KeyboardEvent) => {
+      if (plan) {
+        if (e.key === 'Escape') setPlan(null)
+        return
+      }
       if (e.key === 'Escape') onClose()
       else if (e.key === 'ArrowRight') selectIdx(Math.min(sel + 1, view.length - 1))
       else if (e.key === 'ArrowLeft') selectIdx(Math.max(sel - 1, 0))
@@ -250,7 +260,7 @@ export default function GroupReview({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [full, view, sel, onClose, decide])
+  }, [plan, full, view, sel, onClose, decide])
 
   // Follow the selection: when arrow keys move it past the rendered edge of the
   // strip, scroll the active member back into view (horizontal only, no page
@@ -278,25 +288,37 @@ export default function GroupReview({
   // Red (low) → amber → green (high), so quality reads at a glance.
   const barColor = (v: number): string => `hsl(${Math.round(Math.max(0, Math.min(1, v)) * 120)}, 65%, 45%)`
 
-  const keepBestDeleteRest = () => {
-    const keepId = view[0]?.id
-    onDecisionsBulk(items.map((it) => ({
-      id: it.id, hash: it.hash ?? null, decision: it.id === keepId ? 'keep' : 'del',
-    })))
+  const groupKeepers = items.filter((item) => !isDeleted(item) && item.hash != null)
+  const previewKeep = (keep: GroupedImageItem, pool: GroupedImageItem[]) => {
+    const changes: ReviewMark[] = pool.flatMap((item) => {
+      const decision: Decision = item.id === keep.id ? 'keep' : 'del'
+      const previous = item.decision === 'keep' || item.decision === 'del' ? item.decision : null
+      return decision === previous && decision !== 'keep' ? [] : [{ id: item.id, path: item.path, hash: item.hash ?? null,
+        filename: item.filename, decision, previous }]
+    })
+    const rival = pool.find((it) => it.hash !== keep.hash)
+    const a = keep.combined
+    const b = rival?.combined
+    const close = rival && (a == null || b == null || Math.abs(a - b) < 0.02)
+    setPlan({ title: `Keep ${keep.filename}`, changes,
+      note: close ? 'Close call. Compare the frames before deciding.' : 'These changes update your marks.' })
   }
   const clearGroup = () => {
-    onDecisionsBulk(items.map((it) => ({ id: it.id, hash: it.hash ?? null, decision: null })))
+    const changes: ReviewMark[] = groupKeepers.flatMap((item) =>
+      item.decision === 'keep' || item.decision === 'del'
+        ? [{ id: item.id, path: item.path, hash: item.hash ?? null, filename: item.filename,
+            decision: null, previous: item.decision }]
+        : [])
+    setPlan({ title: 'Clear the group’s active marks', changes })
   }
 
   // The selected photo's near-duplicate siblings (scene mode): keep the current
   // frame and drop just its twins, without touching the rest of the scene — the
   // dedupe workflow, scoped to one branch of the tree.
-  const dupSiblings = cur.dup_group == null
-    ? [] : items.filter((it) => it.dup_group === cur.dup_group)
+  const dupSiblings = cur.dup_group == null || isDeleted(cur) || cur.hash == null
+    ? [] : groupKeepers.filter((it) => it.dup_group === cur.dup_group)
   const keepThisDeleteDups = () => {
-    onDecisionsBulk(dupSiblings.map((it) => ({
-      id: it.id, hash: it.hash ?? null, decision: it.id === cur.id ? 'keep' : 'del',
-    })))
+    previewKeep(cur, dupSiblings)
   }
 
   // Adapt Lightbox's setIndex (number to navigate, null to close the zoom).
@@ -412,8 +434,9 @@ export default function GroupReview({
               <div className="review-actgroup">
                 {showGroupBulk && (
                   <>
-                    <button className="btn primary" onClick={keepBestDeleteRest}>Keep best · delete rest</button>
-                    <button className="btn" onClick={clearGroup}>Clear</button>
+                    <button className="btn primary" disabled={groupKeepers.length < 2 || reviewBusy}
+                      onClick={() => previewKeep(groupKeepers[0], groupKeepers)}>Preview keeper marks</button>
+                    <button className="btn" disabled={reviewBusy} onClick={clearGroup}>Clear marks…</button>
                   </>
                 )}
                 {onApplyDeletes && delIds.length > 0 && (
@@ -470,6 +493,17 @@ export default function GroupReview({
             <button className="review-close" onClick={onClose} aria-label="Close" title="Close (Esc)">✕</button>
           </div>
         </div>
+        {plan && (
+          <MarkPreview plan={plan} busy={reviewBusy}
+            onCancel={() => setPlan(null)}
+            onApply={() => { void onSaveReview(plan.changes).then(() => setPlan(null)).catch(() => {}) }} />
+        )}
+        {(reviewMessage || onUndoReview) && (
+          <div className="review-notice" role="status">
+            <span>{reviewMessage}</span>
+            {onUndoReview && <button className="btn" disabled={reviewBusy} onClick={onUndoReview}>Undo marks</button>}
+          </div>
+        )}
 
         {/* Filmstrip — flat by default; "Group dups" collapses each near-dup
             set into a stacked tile that expands inline on click. */}

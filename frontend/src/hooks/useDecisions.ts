@@ -1,9 +1,9 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { setDecision as apiSetDecision } from '../api'
+import { setDecision as apiSetDecision, setDecisions as apiSetDecisions } from '../api'
 import { invalidateRoots, PHOTO_LIST_QUERY_ROOTS, queryRootIn } from '../queryKeys'
 import type { ImageItem } from '../api/types'
-import type { BulkDecision, Decision } from '../types'
+import type { Decision, ReviewMark } from '../types'
 
 interface CachePage {
   items?: ImageItem[]
@@ -17,6 +17,9 @@ interface CacheData {
 
 export function useDecisions() {
   const qc = useQueryClient()
+  const [undo, setUndo] = useState<ReviewMark[] | null>(null)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [reviewMessage, setReviewMessage] = useState('')
 
   const invalidateLists = useCallback(() => {
     invalidateRoots(qc, PHOTO_LIST_QUERY_ROOTS)
@@ -67,22 +70,41 @@ export function useDecisions() {
     patchDecision(item.id, next)
     if (item.hash == null) return
     try {
-      await apiSetDecision(item.hash, next)
+      await apiSetDecision(item.hash, next, item.id, item.path)
+      qc.invalidateQueries({ queryKey: ['applyStatus'] })
     } catch {
       invalidateLists()
     }
-  }, [patchDecision, invalidateLists])
+  }, [patchDecision, invalidateLists, qc])
 
-  const setDecisionsBulk = useCallback(async (updates: BulkDecision[]) => {
-    updates.forEach((u) => patchDecision(u.id, u.decision))
+  const saveReview = async (changes: ReviewMark[], reversing = false) => {
+    setReviewBusy(true)
+    setReviewMessage('')
     try {
-      await Promise.all(updates
-        .filter((u): u is BulkDecision & { hash: string } => u.hash != null)
-        .map((u) => apiSetDecision(u.hash, u.decision)))
-    } catch {
+      await apiSetDecisions(changes.flatMap(({ id, hash, path, previous, decision }) =>
+        hash == null ? [] : [{ id, hash, path,
+          decision: reversing ? previous : decision,
+          expected_decision: reversing ? decision : previous,
+          guard_only: decision === previous,
+        }]))
+      const marks = new Map(changes.map((change) => [change.id, reversing ? change.previous : change.decision]))
+      patchCache((it) => marks.has(it.id) ? { ...it, decision: marks.get(it.id) } : it)
       invalidateLists()
+      qc.invalidateQueries({ queryKey: ['applyStatus'] })
+      setUndo(reversing ? null : changes)
+      const changed = changes.filter(({ previous, decision }) => previous !== decision).length
+      setReviewMessage(reversing ? 'Previous marks restored.' : `Updated ${changed} marks.`)
+    } catch (error) {
+      invalidateLists()
+      setReviewMessage(error instanceof Error ? error.message : 'Could not save these marks.')
+      throw error
+    } finally {
+      setReviewBusy(false)
     }
-  }, [patchDecision, invalidateLists])
+  }
 
-  return { invalidateLists, patchDecision, patchTrashed, patchTrashedDel, setDecision, setDecisionsBulk }
+  return { invalidateLists, patchDecision, patchTrashed, patchTrashedDel, setDecision,
+    saveReview, reviewBusy, reviewMessage, canUndoReview: undo != null,
+    undoReview: () => { if (undo) void saveReview(undo, true).catch(() => {}) },
+  }
 }

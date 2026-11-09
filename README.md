@@ -138,9 +138,9 @@ the detector's clusters.
 
 ## Decisions survive moves
 
-Keep/delete decisions are keyed by a **content hash**, not by file path. If you
-reorganize folders and re-run the audit, your decisions follow the actual file
-content rather than being orphaned.
+Keep/delete decisions normally follow the **content hash** when you reorganize
+folders. Byte-identical files can have different marks. Those copy-specific
+marks follow paths moved by Sift's Trash and Restore actions.
 
 ## Scores (all 0–1, higher = better)
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sift.web import photodb
-from sift.web.queries import DEC_ON, TRASHED_ON
+from sift.web.queries import DEC_JOIN, DECISION, TRASHED_ON
 
 ProgressFn = Callable[[int, int, str], None]
 LogFn = Callable[[str], None]
@@ -61,9 +61,9 @@ def trash_counts(conn) -> dict[str, int]:
     pending = 0
     for row in conn.execute(
         f"""SELECT i.path FROM images i
-           JOIN {DEC_ON}
+           {DEC_JOIN}
            LEFT JOIN {TRASHED_ON}
-           WHERE d.decision='del' AND tm.id IS NULL"""
+           WHERE ({DECISION})='del' AND tm.id IS NULL"""
     ):
         if not str(row["path"]).startswith(trash_str):
             pending += 1
@@ -237,6 +237,23 @@ def unmerge_scene(conn, scene_group: int) -> dict[str, Any]:
     return recompute_scenes(conn, current_scene_gap(conn))
 
 
+def write_decision(conn, hash_, decision, path=None):
+    """Use a path override only when a content hash identifies multiple copies."""
+    if path is not None and conn.execute(
+        """SELECT 1 FROM images WHERE content_hash=? AND path<>?
+           UNION ALL SELECT 1 FROM copy_decisions WHERE hash=? AND path=? LIMIT 1""",
+        (hash_, path, hash_, path),
+    ).fetchone():
+        conn.execute(
+            "INSERT OR REPLACE INTO copy_decisions (path, hash, decision) VALUES (?,?,?)",
+            (path, hash_, decision))
+    elif decision is None:
+        conn.execute("DELETE FROM decisions WHERE hash=?", (hash_,))
+    else:
+        conn.execute("INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
+                     (hash_, decision))
+
+
 def autocull_duplicates(conn, *, progress: ProgressFn | None = None,
                         cancelled: CancelFn | None = None) -> dict[str, int]:
     gids = [row["dup_group"] for row in conn.execute(
@@ -281,9 +298,9 @@ def trash_decisions(conn, *, image_ids: list[int] | None = None,
     else:
         rows = conn.execute(
             f"""SELECT i.id, i.path, i.content_hash FROM images i
-               JOIN {DEC_ON}
+               {DEC_JOIN}
                LEFT JOIN {TRASHED_ON}
-               WHERE d.decision='del' AND tm.id IS NULL""").fetchall()
+               WHERE ({DECISION})='del' AND tm.id IS NULL""").fetchall()
 
     moved = skipped = 0
     total = len(rows)
@@ -307,6 +324,8 @@ def trash_decisions(conn, *, image_ids: list[int] | None = None,
                     log(f"[skip] {src}: {exc}")
             else:
                 conn.execute("UPDATE images SET path=? WHERE id=?", (str(dest), row["id"]))
+                conn.execute("UPDATE OR REPLACE copy_decisions SET path=? WHERE path=? AND hash=?",
+                             (str(dest), str(src), row["content_hash"]))
                 conn.execute(
                     """INSERT INTO trash_moves
                        (image_id, hash, from_path, trash_path, state, trashed_at)
@@ -325,7 +344,7 @@ def restore_trash(conn, *, progress: ProgressFn | None = None,
                   log: LogFn | None = None) -> dict[str, int]:
     ensure_library_schema(conn)
     rows = conn.execute(
-        """SELECT id, image_id, from_path, trash_path
+        """SELECT id, hash, from_path, trash_path
            FROM trash_moves WHERE state='trashed' ORDER BY id DESC"""
     ).fetchall()
     restored = skipped = 0
@@ -354,6 +373,8 @@ def restore_trash(conn, *, progress: ProgressFn | None = None,
                     log(f"[skip] {src}: {exc}")
             else:
                 conn.execute("UPDATE images SET path=? WHERE path=?", (str(dst), str(src)))
+                conn.execute("UPDATE OR REPLACE copy_decisions SET path=? WHERE path=? AND hash=?",
+                             (str(dst), str(src), row["hash"]))
                 conn.execute(
                     "UPDATE trash_moves SET state=?, restored_at=? WHERE id=?",
                     ("restored", _now(), row["id"]))

@@ -533,8 +533,9 @@ export interface paths {
          *
          *     Each entry is matched by content hash (preferred) or, failing that, by path.
          *     Additive and non-destructive: it overwrites marks only for hashes present in
-         *     the file, leaves every other existing mark untouched, and ignores the
-         *     `unmarked` bucket (it carries no verdict to apply). A hash that isn't in the
+         *     the file and leaves every other existing mark untouched. Unmarked entries
+         *     apply only when they explicitly override a copy's inherited decision.
+         *     A hash that isn't in the
          *     current catalog is still recorded — it binds if that photo is indexed later,
          *     exactly like decisions preserved across a rebuild.
          */

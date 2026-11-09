@@ -44,7 +44,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const qc = useQueryClient()
   const searchRef = useRef<HTMLInputElement>(null)
-  const { setDecision, setDecisionsBulk, patchTrashed } = useDecisions()
+  const { setDecision, patchTrashed, saveReview, reviewBusy,
+    reviewMessage, canUndoReview, undoReview } = useDecisions()
   const { activeTask, invalidateAfterTask } = useTaskInvalidation()
 
   const focusGrid = useCallback(() => {
@@ -206,6 +207,10 @@ export default function App() {
   const activeTaskPct = activeTask?.progress == null
     ? null : Math.round(Math.max(0, Math.min(1, activeTask.progress)) * 100)
   const activeTaskLabel = activeTask ? (TASK_LABELS[activeTask.type] ?? activeTask.type) : null
+  const reviewActions = {
+    onSaveReview: saveReview, onUndoReview: canUndoReview ? undoReview : undefined,
+    reviewBusy, reviewMessage,
+  }
 
   return (
     <div className="app">
@@ -271,6 +276,12 @@ export default function App() {
             <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
           </div>
         </div>
+        {nav == null && (reviewMessage || canUndoReview) && (
+          <div className="review-notice" role="status">
+            <span>{reviewMessage}</span>
+            {canUndoReview && <button className="btn" disabled={reviewBusy} onClick={undoReview}>Undo marks</button>}
+          </div>
+        )}
 
         {view === 'grid' ? (
           images.isLoading ? (
@@ -337,7 +348,7 @@ export default function App() {
           onZoom={setZoom}
           onClose={closeOverlay}
           onDecision={setDecision}
-          onDecisionsBulk={setDecisionsBulk}
+          {...reviewActions}
           defaultShowDeleted={filters.trash === 'trashed'}
           defaultShowCulled={filters.decision === 'del'}
         />
@@ -352,7 +363,7 @@ export default function App() {
           onZoom={setZoom}
           onClose={closeOverlay}
           onDecision={setDecision}
-          onDecisionsBulk={setDecisionsBulk}
+          {...reviewActions}
           onApplyDeletes={applyDeletes}
           // The scene's member count tracks the active filters, so the panel opens
           // showing every member that passes them — del-marked photos included

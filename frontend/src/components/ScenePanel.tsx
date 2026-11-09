@@ -1,6 +1,6 @@
 import { fmtTimeRange } from '../format'
 import type { Scene } from '../api/types'
-import type { DecisionFn, BulkDecisionFn } from '../types'
+import type { DecisionFn, ReviewMark } from '../types'
 import GroupReview from './GroupReview'
 
 interface ScenePanelProps {
@@ -11,7 +11,10 @@ interface ScenePanelProps {
   onZoom: (open: boolean) => void
   onClose: () => void
   onDecision: DecisionFn
-  onDecisionsBulk: BulkDecisionFn
+  onSaveReview: (changes: ReviewMark[]) => Promise<void>
+  onUndoReview?: () => void
+  reviewBusy?: boolean
+  reviewMessage?: string
   onApplyDeletes?: (ids: number[]) => Promise<void>
   defaultShowDeleted?: boolean
   defaultShowCulled?: boolean
@@ -24,8 +27,9 @@ interface ScenePanelProps {
 // near-dups" action. The whole-scene "keep best · delete rest" is intentionally
 // hidden, since a scene's members aren't all duplicates of each other.
 export default function ScenePanel({
-  scene, selId, zoom, onSelect, onZoom, onClose, onDecision, onDecisionsBulk,
+  scene, selId, zoom, onSelect, onZoom, onClose, onDecision,
   onApplyDeletes, defaultShowDeleted, defaultShowCulled,
+  onSaveReview, onUndoReview, reviewBusy, reviewMessage,
 }: ScenePanelProps) {
   const when = fmtTimeRange(scene.time_start, scene.time_end)
   return (
@@ -41,7 +45,10 @@ export default function ScenePanel({
       onZoom={onZoom}
       onClose={onClose}
       onDecision={onDecision}
-      onDecisionsBulk={onDecisionsBulk}
+      onSaveReview={onSaveReview}
+      onUndoReview={onUndoReview}
+      reviewBusy={reviewBusy}
+      reviewMessage={reviewMessage}
       onApplyDeletes={onApplyDeletes}
       defaultShowDeleted={defaultShowDeleted}
       defaultShowCulled={defaultShowCulled}
