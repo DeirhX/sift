@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sift.web import photodb
-from sift.web.queries import DEC_ON
+from sift.web.queries import DEC_ON, TRASHED_ON
 
 ProgressFn = Callable[[int, int, str], None]
 LogFn = Callable[[str], None]
@@ -62,7 +62,7 @@ def trash_counts(conn) -> dict[str, int]:
     for row in conn.execute(
         f"""SELECT i.path FROM images i
            JOIN {DEC_ON}
-           LEFT JOIN trash_moves tm ON tm.image_id=i.id AND tm.state='trashed'
+           LEFT JOIN {TRASHED_ON}
            WHERE d.decision='del' AND tm.id IS NULL"""
     ):
         if not str(row["path"]).startswith(trash_str):
@@ -276,15 +276,13 @@ def trash_decisions(conn, *, image_ids: list[int] | None = None,
         ph = ",".join("?" * len(ids))
         rows = conn.execute(
             f"""SELECT i.id, i.path, i.content_hash FROM images i
-               LEFT JOIN trash_moves tm
-                 ON tm.image_id=i.id AND tm.state='trashed'
+               LEFT JOIN {TRASHED_ON}
                WHERE i.id IN ({ph}) AND tm.id IS NULL""", ids).fetchall()
     else:
         rows = conn.execute(
             f"""SELECT i.id, i.path, i.content_hash FROM images i
                JOIN {DEC_ON}
-               LEFT JOIN trash_moves tm
-                 ON tm.image_id=i.id AND tm.state='trashed'
+               LEFT JOIN {TRASHED_ON}
                WHERE d.decision='del' AND tm.id IS NULL""").fetchall()
 
     moved = skipped = 0
@@ -355,7 +353,7 @@ def restore_trash(conn, *, progress: ProgressFn | None = None,
                 if log:
                     log(f"[skip] {src}: {exc}")
             else:
-                conn.execute("UPDATE images SET path=? WHERE id=?", (str(dst), row["image_id"]))
+                conn.execute("UPDATE images SET path=? WHERE path=?", (str(dst), str(src)))
                 conn.execute(
                     "UPDATE trash_moves SET state=?, restored_at=? WHERE id=?",
                     ("restored", _now(), row["id"]))

@@ -16,8 +16,17 @@ import os
 # keep/del state joins on it the same way. One definition so the join key can't
 # drift across the half-dozen queries that use it.
 DEC_ON = "decisions d ON d.hash = i.content_hash"
-TRASH_ON = ("trash_moves tm ON tm.image_id = i.id "
-            "AND tm.state IN ('trashed', 'emptied', 'missing')")
+# The ledger is matched by the file's trash path, never by image id: `sift index`
+# renumbers images on every rebuild, so an id recorded at trash time later
+# belongs to an unrelated photo. A trashed image's `path` IS its trash path, and
+# the newest row wins if a trash filename was ever reused.
+TRASH_ACTIVE_STATES = "('trashed', 'emptied', 'missing')"
+TRASH_ON = ("trash_moves tm ON tm.id = (SELECT MAX(t2.id) FROM trash_moves t2 "
+            "WHERE t2.trash_path = i.path "
+            f"AND t2.state IN {TRASH_ACTIVE_STATES})")
+# Same rule, narrowed to files that are in Trash right now.
+TRASHED_ON = ("trash_moves tm ON tm.id = (SELECT MAX(t2.id) FROM trash_moves t2 "
+              "WHERE t2.trash_path = i.path AND t2.state = 'trashed')")
 
 # Whitelisted sort columns for /api/images. Keys are the public API values;
 # values are the SQL expressions (aliased to `i`, the images table).
