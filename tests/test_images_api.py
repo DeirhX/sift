@@ -198,3 +198,16 @@ def test_item_shape(env):
     face = a["faces"][0]
     assert set(face) >= {"id", "bbox", "prob", "cluster_id", "sharp", "expr"}
     assert len(face["bbox"]) == 4
+
+
+def test_search_treats_punctuation_as_text_not_fts_syntax(make_env):
+    """Raw text is FTS5 syntax: a hyphen, a stray quote or a trailing operator
+    used to raise instead of searching."""
+    report = default_report()
+    report["images"][0]["caption"] = "a well-lit room with a dog"
+    env = make_env(report)
+    for q in ("well-lit", '"well', "dog AND", "room (", "lit*"):
+        r = env.client.get("/api/images", params={"limit": 50, "q": q})
+        assert r.status_code == 200, q
+    assert names(env.client, "?limit=50&q=well-lit") == {"a.jpg"}
+    assert names(env.client, "?limit=50&q=dog%20room") == {"a.jpg"}
