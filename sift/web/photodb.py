@@ -448,7 +448,7 @@ def match_face(box, candidates):
     return best
 
 
-def cluster_reference_face(conn, cluster_id, exclude_face_id=None):
+def cluster_reference_face(conn, cluster_id, exclude_face_ids=()):
     """(hash, bbox_key) of a face the *detector* placed in `cluster_id`, to pin
     an assign-override's target across re-clustering (see _OVERRIDE_LATE_COLUMNS).
     Faces that were themselves manually moved in are skipped — on a rebuild they
@@ -463,7 +463,7 @@ def cluster_reference_face(conn, cluster_id, exclude_face_id=None):
            WHERE f.cluster_id = ? AND i.content_hash IS NOT NULL
            ORDER BY f.prob DESC, f.id""", (cluster_id,)).fetchall()
     for r in rows:
-        if r[0] == exclude_face_id:
+        if r[0] in exclude_face_ids:
             continue
         moved = [(None, *parse_bbox(o[0])) for o in conn.execute(
             "SELECT bbox FROM face_overrides WHERE hash=? AND action='assign'",

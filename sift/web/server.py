@@ -43,13 +43,14 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from sift.web import library_ops, photodb
-from sift.web.photodb import largest_face_aggregate, MANUAL_CLUSTER_BASE
+from sift.web import face_ops, library_ops, photodb
+from sift.web.photodb import MANUAL_CLUSTER_BASE
 
 from sift.web import tasks
 from sift.web.queries import (DEC_JOIN, DECISION, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
 from sift.web.routes.trash import create_router as create_trash_router
+from sift.web.routes.people import create_router as create_people_router
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
@@ -139,6 +140,8 @@ def _configure_tasks():
 
 
 app.include_router(create_trash_router(db))
+app.include_router(create_people_router(
+    db, thumb_dir=lambda: THUMB_DIR, db_path=lambda: DB_PATH))
 
 
 # ── Metadata + facets ─────────────────────────────────────────────────────────
@@ -895,28 +898,6 @@ def rename_cluster(payload: dict = Body(...)):
     return {"ok": True}
 
 
-def _reanchor_cluster(conn, cid: int) -> None:
-    """Re-pin a cluster's current name across all of its faces. Called after
-    membership changes (merge/assign) so the name follows the cluster on a
-    rebuild and stale source-cluster anchors on moved faces are cleared."""
-    row = conn.execute("SELECT name FROM clusters WHERE cluster_id=?", (cid,)).fetchone()
-    photodb.set_cluster_name_anchors(conn, cid, row[0] if row else None)
-
-
-def _reaggregate_faces(conn, image_id) -> None:
-    """Recompute an image's face count + portrait fields from its current faces.
-    Mirrors build_db's override-replay recompute via the same
-    largest_face_aggregate, so an API face edit and a fresh ingest can't disagree
-    on n_faces/face_sharp/face_expr/portrait."""
-    rows = conn.execute(
-        "SELECT x1, y1, x2, y2, sharp, expr FROM faces WHERE image_id=?",
-        (image_id,)).fetchall()
-    n, fs, fe, portrait = largest_face_aggregate(rows)
-    conn.execute(
-        "UPDATE images SET n_faces=?, face_sharp=?, face_expr=?, portrait=? WHERE id=?",
-        (n, fs, fe, portrait, image_id))
-
-
 @app.post("/api/clusters/merge", response_model=MergeResponse)
 def merge_clusters(payload: dict = Body(...)):
     """Reassign every face of the `from` cluster(s) into `into`, then drop the
@@ -955,17 +936,9 @@ def merge_clusters(payload: dict = Body(...)):
         # Re-anchor the destination to its current name across all of its faces
         # (now including the moved ones); this also clears the moved faces' old
         # source-cluster anchors so a stale name can't resurface on rebuild.
-        _reanchor_cluster(conn, into)
+        face_ops.reanchor_cluster(conn, into)
         conn.commit()
     return {"ok": True, "moved": moved}
-
-
-def _face_key(conn, face_id):
-    r = conn.execute(
-        """SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2, f.image_id AS img
-           FROM faces f JOIN images i ON i.id = f.image_id WHERE f.id=?""",
-        (face_id,)).fetchone()
-    return r
 
 
 @app.post("/api/faces/{face_id}/assign", response_model=AssignFaceResponse)
@@ -973,28 +946,15 @@ def assign_face(face_id: int, payload: dict = Body(...)):
     """Move one face box to a different person. Either pass an existing
     `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
     fresh identity. Recorded as a persistent override so it survives re-ingest."""
+    if not payload.get("new_person") and payload.get("cluster_id") is None:
+        raise HTTPException(400, "cluster_id or new_person required")
     with db() as conn:
-        r = _face_key(conn, face_id)
-        if not r:
+        try:
+            target, _ = face_ops.assign_faces(
+                conn, [face_id], cluster_id=payload.get("cluster_id"),
+                new_person=bool(payload.get("new_person")), name=payload.get("name"))
+        except face_ops.FaceNotFound:
             raise HTTPException(404, "face not found")
-        if payload.get("new_person"):
-            target = photodb.next_manual_cluster_id(conn)
-            conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
-                         (target, payload.get("name") or None))
-        else:
-            cid = payload.get("cluster_id")
-            if cid is None:
-                raise HTTPException(400, "cluster_id or new_person required")
-            target = int(cid)
-            conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
-                         (target,))
-        target_ref = photodb.cluster_reference_face(conn, target, exclude_face_id=face_id)
-        conn.execute("UPDATE faces SET cluster_id=? WHERE id=?", (target, face_id))
-        photodb.record_face_override(
-            conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]),
-            "assign", target, target_ref)
-        # Keep the target's name anchors in step with its new membership.
-        _reanchor_cluster(conn, target)
         conn.commit()
     return {"ok": True, "cluster_id": target}
 
@@ -1004,13 +964,10 @@ def delete_face(face_id: int):
     """Drop a false-positive face box, decrement the image's face count, and
     record a persistent override so it stays deleted across re-ingest."""
     with db() as conn:
-        r = _face_key(conn, face_id)
-        if not r:
+        try:
+            face_ops.delete_faces(conn, [face_id])
+        except face_ops.FaceNotFound:
             raise HTTPException(404, "face not found")
-        conn.execute("DELETE FROM faces WHERE id=?", (face_id,))
-        _reaggregate_faces(conn, r["img"])
-        photodb.record_face_override(
-            conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]), "delete")
         conn.commit()
     return {"ok": True}
 

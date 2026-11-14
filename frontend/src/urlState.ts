@@ -8,11 +8,12 @@
 //   { kind:'lightbox', imgId }                 — grid full-detail viewer
 //   { kind:'group', refId, imgId, zoom }       — a duplicate-group review
 //   { kind:'scene', refId, imgId, zoom }       — a whole-scene review
+//   { kind:'person', refId }                   — one person's faces (per=)
 // `imgId` is the focused photo (added once you select/arrow; absent means the
 // review's default hero). `zoom` flags the full-size viewer open inside a
 // review. URL params: grp=, scn=, img=, zoom=1.
 
-export type View = 'grid' | 'groups' | 'scenes'
+export type View = 'grid' | 'groups' | 'scenes' | 'people'
 
 export interface Filters {
   sort: string
@@ -36,7 +37,7 @@ export interface Filters {
 }
 
 export interface Nav {
-  kind: 'lightbox' | 'group' | 'scene'
+  kind: 'lightbox' | 'group' | 'scene' | 'person'
   refId?: number | null
   imgId?: number | null
   zoom?: boolean
@@ -106,7 +107,8 @@ export function parseState(search: string): AppState {
   else if (filters.decision === 'notdel') { filters.decision = 'all' }
 
   const rawView = p.get('view')
-  const view: View = rawView === 'groups' || rawView === 'scenes' ? rawView : 'grid'
+  const view: View = rawView === 'groups' || rawView === 'scenes' || rawView === 'people'
+    ? rawView : 'grid'
 
   return { filters, view, nav: parseNav(p) }
 }
@@ -124,6 +126,9 @@ function parseNav(p: URLSearchParams): Nav | null {
   if (grp != null) return { kind: 'group', refId: grp, imgId, zoom }
   const scn = num(p.get('scn'))
   if (scn != null) return { kind: 'scene', refId: scn, imgId, zoom }
+  // A person's page (People view). cluster ids are >= 0; -1 is the unsorted bucket.
+  const per = num(p.get('per'))
+  if (per != null) return { kind: 'person', refId: per }
   if (imgId != null) return { kind: 'lightbox', imgId }
   return null
 }
@@ -150,6 +155,7 @@ export function buildSearch(filters: Filters, view: View, nav: Nav | null = null
   if (nav) {
     if (nav.kind === 'group') p.set('grp', String(nav.refId))
     else if (nav.kind === 'scene') p.set('scn', String(nav.refId))
+    else if (nav.kind === 'person') p.set('per', String(nav.refId))
     if (nav.imgId != null) p.set('img', String(nav.imgId))
     if (nav.zoom) p.set('zoom', '1')
   }

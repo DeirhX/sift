@@ -24,6 +24,7 @@ export interface OverlayNav {
   openImage: (id: number) => void
   openGroup: (refId: number) => void
   openScene: (refId: number) => void
+  openPerson: (clusterId: number) => void
   selectImage: (id: number) => void
   setZoom: (z: boolean) => void
 }
@@ -84,6 +85,7 @@ export function useOverlayNav(
   const openImage = useCallback((id: number) => navigate({ kind: 'lightbox', imgId: id }), [navigate])
   const openGroup = useCallback((refId: number) => navigate({ kind: 'group', refId, imgId: null, zoom: false }), [navigate])
   const openScene = useCallback((refId: number) => navigate({ kind: 'scene', refId, imgId: null, zoom: false }), [navigate])
+  const openPerson = useCallback((refId: number) => navigate({ kind: 'person', refId }), [navigate])
   // Focus a different photo / toggle zoom inside the current review overlay,
   // preserving its kind + refId so only the relevant URL bits change.
   const selectImage = useCallback((id: number) => navigate(nav ? { ...nav, imgId: id } : null), [navigate, nav])
@@ -137,5 +139,5 @@ export function useOverlayNav(
     }
   }, [filters, view, nav])
 
-  return { nav, navigate, closeOverlay, openImage, openGroup, openScene, selectImage, setZoom }
+  return { nav, navigate, closeOverlay, openImage, openGroup, openScene, openPerson, selectImage, setZoom }
 }

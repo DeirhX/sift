@@ -1,8 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query'
 
 export const PHOTO_LIST_QUERY_ROOTS = ['images', 'groups', 'scenes'] as const
-export const PHOTO_DATA_QUERY_ROOTS = ['images', 'groups', 'scenes', 'meta'] as const
-export const TASK_DATA_QUERY_ROOTS = ['images', 'groups', 'scenes', 'meta', 'applyStatus'] as const
+export const PHOTO_DATA_QUERY_ROOTS = ['images', 'groups', 'scenes', 'meta', 'people'] as const
+export const TASK_DATA_QUERY_ROOTS = ['images', 'groups', 'scenes', 'meta', 'people', 'applyStatus'] as const
 export const AUTOCULL_QUERY_ROOTS = ['images', 'groups', 'scenes', 'applyStatus'] as const
 
 type QueryRoot = readonly string[]

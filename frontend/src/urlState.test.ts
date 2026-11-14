@@ -26,6 +26,14 @@ describe('parseState', () => {
     expect(parseState('?view=bogus').view).toBe('grid')
   })
 
+  it('round-trips the People view and an open person', () => {
+    const s = parseState('?view=people&per=7')
+    expect(s.view).toBe('people')
+    expect(s.nav).toEqual({ kind: 'person', refId: 7 })
+    expect(buildSearch(DEFAULT_FILTERS, 'people', s.nav)).toBe('?view=people&per=7')
+    expect(parseState('?view=people&per=-1').nav).toEqual({ kind: 'person', refId: -1 })
+  })
+
   it('parses the grid lightbox (img only)', () => {
     expect(parseState('?img=42').nav).toEqual({ kind: 'lightbox', imgId: 42 })
   })

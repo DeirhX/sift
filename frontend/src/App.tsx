@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, startTask, fetchTask, regroupScenes, mergeScenes, splitScene, unmergeScene } from './api'
+import { fetchMeta, fetchImages, fetchGroups, fetchScenes, fetchPeople, startTask, fetchTask, regroupScenes, mergeScenes, splitScene, unmergeScene } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
 import { applyTrashHide, groupActivity } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
@@ -19,6 +19,8 @@ import Lightbox from './components/Lightbox'
 import AnalyzePanel from './components/AnalyzePanel'
 import SettingsPanel from './components/SettingsPanel'
 import SceneGranularity from './components/SceneGranularity'
+import PeopleView from './components/PeopleView'
+import PersonPage from './components/PersonPage'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -39,7 +41,7 @@ const INITIAL = parseState(window.location.search)
 
 export default function App() {
   const [filters, setFilters] = useState<Filters>(INITIAL.filters)
-  const [view, setView] = useState<View>(INITIAL.view)   // 'grid' | 'groups' | 'scenes'
+  const [view, setView] = useState<View>(INITIAL.view)   // 'grid' | 'groups' | 'scenes' | 'people'
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [tileSize, setTileSize] = useState(() => {
@@ -59,8 +61,8 @@ export default function App() {
   // "What overlay is open" + all of its browser-history choreography lives in
   // useOverlayNav; here we just consume the resulting nav state and actions.
   const {
-    nav, closeOverlay,
-    openImage, openGroup, openScene, selectImage, setZoom,
+    nav, navigate, closeOverlay,
+    openImage, openGroup, openScene, openPerson, selectImage, setZoom,
   } = useOverlayNav({ filters, view, initial: INITIAL, setFilters, setView, focusGrid })
 
   // Global shortcut: "/" jumps to the search box (unless already typing or a
@@ -112,6 +114,16 @@ export default function App() {
     },
     enabled: view === 'scenes',
   })
+
+  // People view: everyone found in the library. A person's own page is an
+  // overlay-style nav entry (per=), so Back returns to the people list.
+  const openPersonId = view === 'people' && nav?.kind === 'person' ? nav.refId ?? null : null
+  const persons = useQuery({
+    queryKey: ['people'],
+    queryFn: fetchPeople,
+    enabled: view === 'people',
+  })
+  const personList = persons.data?.people ?? []
 
   // Grid drops trashed photos (optimistically patched the instant a trash starts)
   // at render time — except on the Trash filter (trash='trashed'), which exists to
@@ -234,13 +246,29 @@ export default function App() {
     })
   }, [])
 
-  const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal : groupTotal
+  // Leaving the People view also leaves any open person page.
+  const switchView = useCallback((next: View) => {
+    if (nav?.kind === 'person') navigate(null, false)
+    setView(next)
+  }, [nav, navigate])
+
+  // "Show photos" on a person's page: the photo grid, filtered to that person.
+  const showPersonPhotos = useCallback((clusterId: number) => {
+    navigate(null)
+    setFilters({ ...DEFAULT_FILTERS, people: [String(clusterId)] })
+    setView('grid')
+  }, [navigate])
+
+  const peopleTotal = personList.filter((p) => p.cluster_id >= 0).length
+  const headerCount = view === 'grid' ? total : view === 'scenes' ? sceneTotal
+    : view === 'people' ? peopleTotal : groupTotal
   const headerLabel = view === 'grid' ? 'photos'
-    : view === 'scenes' ? 'scenes' : 'duplicate groups'
+    : view === 'scenes' ? 'scenes' : view === 'people' ? 'people' : 'duplicate groups'
   const activeTaskPct = activeTask?.progress == null
     ? null : Math.round(Math.max(0, Math.min(1, activeTask.progress)) * 100)
   const activeTaskLabel = activeTask ? (TASK_LABELS[activeTask.type] ?? activeTask.type) : null
-  const currentQuery = view === 'grid' ? images : view === 'groups' ? groups : scenes
+  const currentQuery = view === 'grid' ? images : view === 'groups' ? groups
+    : view === 'people' ? persons : scenes
   const reviewActions = {
     onSaveReview: saveReview, onUndoReview: canUndoReview ? undoReview : undefined,
     reviewBusy, reviewMessage,
@@ -319,9 +347,10 @@ export default function App() {
             Settings
           </button>
           <div className="seg view-toggle">
-            <button className={view === 'grid' ? 'active' : ''} onClick={() => setView('grid')}>Grid</button>
-            <button className={view === 'scenes' ? 'active' : ''} onClick={() => setView('scenes')}>Scenes</button>
-            <button className={view === 'groups' ? 'active' : ''} onClick={() => setView('groups')}>Groups</button>
+            <button className={view === 'grid' ? 'active' : ''} onClick={() => switchView('grid')}>Grid</button>
+            <button className={view === 'scenes' ? 'active' : ''} onClick={() => switchView('scenes')}>Scenes</button>
+            <button className={view === 'groups' ? 'active' : ''} onClick={() => switchView('groups')}>Groups</button>
+            <button className={view === 'people' ? 'active' : ''} onClick={() => switchView('people')}>People</button>
           </div>
         </div>
         {nav == null && (reviewMessage || canUndoReview) && (
@@ -363,6 +392,20 @@ export default function App() {
               onFaceChange={refetchPeople}
               tileSize={tileSize}
             />
+          )
+        ) : view === 'people' ? (
+          openPersonId != null ? (
+            <PersonPage
+              key={openPersonId}
+              clusterId={openPersonId}
+              people={personList}
+              onBack={closeOverlay}
+              onOpenPerson={openPerson}
+              onShowPhotos={showPersonPhotos}
+              onChanged={refetchPeople}
+            />
+          ) : (
+            <PeopleView people={personList} loading={persons.isLoading} onOpen={openPerson} />
           )
         ) : view === 'scenes' ? (
           <SceneView
