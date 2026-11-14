@@ -8,10 +8,11 @@ import {
   getLibraryFolders, addLibraryFolder, removeLibraryFolder,
 } from '../api'
 import type { Filters } from '../urlState'
-import type { MetaResponse, ClusterFacet, TaskSnapshot } from '../api/types'
+import type { MetaResponse, TaskSnapshot } from '../api/types'
 import type { UpdateFilter } from '../types'
 import { confirmDialog, plural } from '../dialog'
 import { toast } from '../toast'
+import { personLabel } from '../format'
 
 // Left filter panel. To keep it from growing without bound, the tall/variable
 // blocks (scores, people, folders, tags) live in collapsible sections that
@@ -246,9 +247,6 @@ export default function Sidebar(
       setFolderMsg(e instanceof Error ? e.message : String(e))
     } finally { setFolderBusy(false) }
   }
-
-  const personLabel = (c: ClusterFacet): string =>
-    c.name && c.name.trim() ? c.name : `Person ${c.cluster_id}`
 
   const saveName = async (cid: number, name: string, prev: string | null) => {
     if ((name || '').trim() === (prev || '').trim()) return

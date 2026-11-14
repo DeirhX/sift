@@ -29,12 +29,10 @@ import re
 import sys
 import json
 import string
-import shutil
 import asyncio
 import sqlite3
 import argparse
 import subprocess
-from datetime import datetime
 from pathlib import Path
 from contextlib import asynccontextmanager, contextmanager
 
@@ -43,20 +41,21 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from sift.web import face_ops, library_ops, photodb
-from sift.web.photodb import MANUAL_CLUSTER_BASE
+from sift.web import photodb
+from sift.web.photodb import MANUAL_CLUSTER_BASE  # noqa: F401  (re-exported for tests)
 
 from sift.web import tasks
 from sift.web.queries import (DEC_JOIN, DECISION, TRASH_ON, SORT_COLUMNS, histogram, image_where,
                               rows_to_items, grouped_page)
 from sift.web.routes.trash import create_router as create_trash_router
 from sift.web.routes.people import create_router as create_people_router
+from sift.web.routes.decisions import create_router as create_decisions_router
+from sift.web.routes.faces import create_router as create_faces_router
+from sift.web.routes.scene_edits import create_router as create_scene_edits_router
 from sift.web.schemas import (
     MetaResponse, ImagesResponse, GroupsResponse, ScenesResponse,
     LocationsResponse, RootsResponse, FsCompleteResponse, OkResponse,
-    MergeResponse, AssignFaceResponse, AutocullResponse, AnalyzeStatus,
-    TaskStartRequest, TaskSnapshot, TaskListResponse,
-    RegroupRequest, RegroupResponse, MergeScenesRequest, SplitSceneRequest, UnmergeSceneRequest)
+    AnalyzeStatus, TaskStartRequest, TaskSnapshot, TaskListResponse)
 
 # ── Globals set in init() ─────────────────────────────────────────────────────
 DB_PATH:    Path = Path()
@@ -434,40 +433,8 @@ def get_scenes(
     return {"total": total, "offset": offset, "limit": limit, "scenes": scenes}
 
 
-@app.post("/api/scenes/regroup", response_model=RegroupResponse)
-def regroup_scenes(req: RegroupRequest):
-    """Re-segment scenes by capture-time gap only (the 'scene granularity' knob).
-    Clamped to a sane range; recomputes scene_group in place and remembers the
-    chosen gap so the slider re-opens where the user left it."""
-    gap = max(5.0, min(86400.0, float(req.gap)))
-    with db() as conn:
-        return library_ops.recompute_scenes(conn, gap)
-
-
-@app.post("/api/scenes/merge", response_model=RegroupResponse)
-def merge_scenes(req: MergeScenesRequest):
-    """Pin two or more scenes into one (a manual merge that survives recuts and
-    re-analysis). Recomputes at the current gap and returns the new scene count."""
-    with db() as conn:
-        return library_ops.merge_scenes(conn, req.scene_groups)
-
-
-@app.post("/api/scenes/unmerge", response_model=RegroupResponse)
-def unmerge_scene(req: UnmergeSceneRequest):
-    """Drop the manual-merge pins touching a scene, returning it to automatic
-    time-gap segmentation."""
-    with db() as conn:
-        return library_ops.unmerge_scene(conn, req.scene_group)
-
-
-@app.post("/api/scenes/split", response_model=RegroupResponse)
-def split_scene(req: SplitSceneRequest):
-    """Split a scene before the selected photo's capture time."""
-    with db() as conn:
-        result = library_ops.split_scene(conn, req.scene_group, req.image_id, req.hash)
-    if result is None:
-        raise HTTPException(409, "choose a later photo in this scene")
-    return result
+# Scene edits (regroup / merge / unmerge / split): routes/scene_edits.py
+app.include_router(create_scene_edits_router(db))
 
 
 # ── Image serving ─────────────────────────────────────────────────────────────
@@ -870,231 +837,11 @@ def fs_complete(q: str = Query("")):
             "truncated": len(entries) > _FS_COMPLETE_LIMIT}
 
 
-# ── Decisions (keep / delete) ─────────────────────────────────────────────────
-
-@app.post("/api/decisions", response_model=OkResponse)
-def set_decision(payload: dict = Body(...)):
-    updates = payload.get("updates", [payload])
-    if not isinstance(updates, list) or any(not isinstance(u, dict) for u in updates):
-        raise HTTPException(400, "expected a list of decision updates")
-    with db() as conn:
-        conn.execute("BEGIN IMMEDIATE")
-        for update in updates:
-            h, path, image_id = update.get("hash"), update.get("path"), update.get("id")
-            decision = update.get("decision")
-            if decision not in ("keep", "del", None):
-                raise HTTPException(400, "invalid decision")
-            if image_id is not None:
-                row = conn.execute(
-                    f"""SELECT i.path, i.content_hash, ({DECISION}) AS decision, tm.state AS trash_state
-                        FROM images i {DEC_JOIN} LEFT JOIN {TRASH_ON} WHERE i.id=?""",
-                    (image_id,)).fetchone()
-                if not row or row["content_hash"] != h or (path and row["path"] != path):
-                    raise HTTPException(409, "photo changed, refresh and try again")
-                path = row["path"]
-                if "expected_decision" in update and (
-                    row["decision"] != update["expected_decision"] or row["trash_state"] is not None
-                ):
-                    raise HTTPException(409, "Marks changed. Refresh the preview and try again.")
-                if update.get("guard_only") and "expected_decision" in update:
-                    continue
-            elif not h and path:
-                row = conn.execute("SELECT content_hash FROM images WHERE path=?", (path,)).fetchone()
-                h = row["content_hash"] if row else None
-            if not h:
-                raise HTTPException(400, "hash required")
-            library_ops.write_decision(conn, h, decision, path)
-        conn.commit()
-    return {"ok": True}
-
-
-# ── Cluster names ─────────────────────────────────────────────────────────────
-
-@app.post("/api/clusters", response_model=OkResponse)
-def rename_cluster(payload: dict = Body(...)):
-    cid = payload.get("cluster_id")
-    name = payload.get("name")
-    if cid is None:
-        raise HTTPException(400, "cluster_id required")
-    with db() as conn:
-        conn.execute("INSERT OR REPLACE INTO clusters (cluster_id, name) VALUES (?,?)",
-                     (int(cid), name or None))
-        # Anchor the name to this cluster's faces so it survives re-clustering.
-        photodb.set_cluster_name_anchors(conn, int(cid), name or None)
-        conn.commit()
-    return {"ok": True}
-
-
-@app.post("/api/clusters/merge", response_model=MergeResponse)
-def merge_clusters(payload: dict = Body(...)):
-    """Reassign every face of the `from` cluster(s) into `into`, then drop the
-    now-empty source cluster name rows. Pure DB edit — no re-embedding. Each
-    moved face is also recorded as a persistent override."""
-    into = payload.get("into")
-    frm = payload.get("from")
-    if into is None or frm is None:
-        raise HTTPException(400, "from and into required")
-    into = int(into)
-    if isinstance(frm, (int, str)):
-        frm = [frm]
-    frm = [int(c) for c in frm if int(c) != into]
-    if not frm:
-        return {"ok": True, "moved": 0}
-    with db() as conn:
-        ph = ",".join("?" * len(frm))
-        # Record an override per moved face before the cluster_id changes.
-        moving = conn.execute(
-            f"""SELECT i.content_hash AS h, f.x1, f.y1, f.x2, f.y2
-                FROM faces f JOIN images i ON i.id = f.image_id
-                WHERE f.cluster_id IN ({ph})""", frm).fetchall()
-        # Pinned to a face the detector put in `into`, so the merge still lands
-        # on the same person after re-clustering renumbers the ids.
-        target_ref = photodb.cluster_reference_face(conn, into)
-        for r in moving:
-            photodb.record_face_override(
-                conn, r["h"], (r["x1"], r["y1"], r["x2"], r["y2"]),
-                "assign", into, target_ref)
-        cur = conn.execute(
-            f"UPDATE faces SET cluster_id=? WHERE cluster_id IN ({ph})", [into] + frm)
-        moved = cur.rowcount
-        conn.execute(f"DELETE FROM clusters WHERE cluster_id IN ({ph})", frm)
-        conn.execute("INSERT OR IGNORE INTO clusters (cluster_id, name) VALUES (?, NULL)",
-                     (into,))
-        # Re-anchor the destination to its current name across all of its faces
-        # (now including the moved ones); this also clears the moved faces' old
-        # source-cluster anchors so a stale name can't resurface on rebuild.
-        face_ops.reanchor_cluster(conn, into)
-        conn.commit()
-    return {"ok": True, "moved": moved}
-
-
-@app.post("/api/faces/{face_id}/assign", response_model=AssignFaceResponse)
-def assign_face(face_id: int, payload: dict = Body(...)):
-    """Move one face box to a different person. Either pass an existing
-    `cluster_id`, or `new_person: true` (with optional `name`) to spin up a
-    fresh identity. Recorded as a persistent override so it survives re-ingest."""
-    if not payload.get("new_person") and payload.get("cluster_id") is None:
-        raise HTTPException(400, "cluster_id or new_person required")
-    with db() as conn:
-        try:
-            target, _ = face_ops.assign_faces(
-                conn, [face_id], cluster_id=payload.get("cluster_id"),
-                new_person=bool(payload.get("new_person")), name=payload.get("name"))
-        except face_ops.FaceNotFound:
-            raise HTTPException(404, "face not found")
-        conn.commit()
-    return {"ok": True, "cluster_id": target}
-
-
-@app.delete("/api/faces/{face_id}", response_model=OkResponse)
-def delete_face(face_id: int):
-    """Drop a false-positive face box, decrement the image's face count, and
-    record a persistent override so it stays deleted across re-ingest."""
-    with db() as conn:
-        try:
-            face_ops.delete_faces(conn, [face_id])
-        except face_ops.FaceNotFound:
-            raise HTTPException(404, "face not found")
-        conn.commit()
-    return {"ok": True}
-
-
-# ── Export ────────────────────────────────────────────────────────────────────
-
-@app.get("/api/export")
-def export_decisions():
-    with db() as conn:
-        rows = conn.execute(
-            f"""SELECT i.path, i.filename, i.combined, i.content_hash,
-                       ({DECISION}) AS decision, cd.path AS copy_path
-               FROM images i {DEC_JOIN}""").fetchall()
-    out = {"kept": [], "deleted": [], "unmarked": []}
-    for r in rows:
-        # `hash` is the stable key (decisions are hash-keyed); path/filename are
-        # for humans and a fallback when re-importing into a moved library.
-        entry = {"hash": r["content_hash"], "path": r["path"],
-                 "filename": r["filename"], "combined": r["combined"]}
-        if r["copy_path"] is not None:
-            entry["copy_specific"] = True
-        if r["decision"] == "keep":
-            out["kept"].append(entry)
-        elif r["decision"] == "del":
-            out["deleted"].append(entry)
-        else:
-            out["unmarked"].append(entry)
-    return JSONResponse(out, headers={
-        "Content-Disposition": "attachment; filename=audit_decisions.json"})
-
-
-@app.post("/api/import")
-def import_decisions(payload: dict = Body(...)):
-    """Re-apply keep/del verdicts from an exported audit_decisions.json.
-
-    Each entry is matched by content hash (preferred) or, failing that, by path.
-    Additive and non-destructive: it overwrites marks only for hashes present in
-    the file and leaves every other existing mark untouched. Unmarked entries
-    apply only when they explicitly override a copy's inherited decision.
-    A hash that isn't in the
-    current catalog is still recorded — it binds if that photo is indexed later,
-    exactly like decisions preserved across a rebuild."""
-    if "kept" not in payload and "deleted" not in payload:
-        raise HTTPException(400, "unrecognized export: expected 'kept'/'deleted' lists")
-    buckets = (("keep", payload.get("kept") or []),
-               ("del", payload.get("deleted") or []),
-               (None, payload.get("unmarked") or []))
-    applied = 0
-    unmatched = 0
-    with db() as conn:
-        for decision, entries in buckets:
-            for e in entries:
-                if decision is None and (not isinstance(e, dict) or not e.get("copy_specific")):
-                    continue
-                if not isinstance(e, dict):
-                    unmatched += 1
-                    continue
-                h = e.get("hash") or e.get("content_hash")
-                if e.get("copy_specific"):
-                    row = conn.execute(
-                        "SELECT 1 FROM images WHERE path=? AND content_hash=?",
-                        (e.get("path"), h)).fetchone()
-                    if row:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO copy_decisions (path, hash, decision) VALUES (?,?,?)",
-                            (e["path"], h, decision))
-                        applied += 1
-                    else:
-                        unmatched += 1
-                    continue
-                if not h and e.get("path"):
-                    row = conn.execute(
-                        "SELECT content_hash FROM images WHERE path=?",
-                        (e["path"],)).fetchone()
-                    h = row["content_hash"] if row else None
-                if not h:
-                    unmatched += 1
-                    continue
-                conn.execute(
-                    "INSERT OR REPLACE INTO decisions (hash, decision) VALUES (?,?)",
-                    (h, decision))
-                applied += 1
-        conn.commit()
-    return {"ok": True, "applied": applied, "unmatched": unmatched}
-
-
-# ── Bulk auto-cull duplicate groups ───────────────────────────────────────────
-
-@app.get("/api/groups/autocull/preview")
-def preview_autocull_groups():
-    with db() as conn:
-        conn.execute("BEGIN")
-        return library_ops.preview_autocull(conn)
-
-
-@app.post("/api/groups/autocull", response_model=AutocullResponse)
-def autocull_groups():
-    """Mark exact copies and clear winners in tight, active duplicate sets."""
-    with db() as conn:
-        return library_ops.autocull_duplicates(conn)
+# ── Decisions, people edits ───────────────────────────────────────────────────
+# Marks, export/import and auto-cull: routes/decisions.py.
+# Rename/merge a person, reassign/delete one face: routes/faces.py.
+app.include_router(create_decisions_router(db))
+app.include_router(create_faces_router(db))
 
 
 # ── Generic web tasks (analyze, index, apply, undo, autocull) ─────────────────

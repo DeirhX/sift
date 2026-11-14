@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useEscapeKey } from '../hooks/useEscapeKey'
 import { fetchTasks, startTask, cancelTask, getLibraryFolders } from '../api'
 import TaskPanel from './TaskPanel'
 import type { TaskSnapshot } from '../api/types'
@@ -62,11 +63,7 @@ export default function AnalyzePanel({ onClose, onDone }: AnalyzePanelProps) {
 
   // Escape closes the panel. The job (if any) keeps running server-side and
   // re-attaches when the panel is reopened.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  useEscapeKey(onClose)
 
   // Re-attach to any already-running library task on open. The modal is now the
   // lightweight "current task" surface, not only an analyze form.

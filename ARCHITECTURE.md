@@ -2,7 +2,8 @@
 
 Developer-facing map of the `sift` package: the modules, how they layer, and the
 design decisions that aren't obvious from any single file. For install/usage see
-[`README.md`](README.md).
+[`README.md`](README.md); for how to verify a change and the rules that are easy
+to break, see [`AGENTS.md`](AGENTS.md).
 
 ## The pipeline
 
@@ -36,7 +37,8 @@ cleanly: a web-only install (`pip install -e .`) skips the multi-GB `[ml]` stack
 | `sift/audit/` | ~1450 | The analysis pipeline, split into focused modules (see below). Writes `audit_report.json`. The package `__init__` re-exports the public surface. |
 | `sift/web/build_db.py` | ~420 | Ingests a report into `photos.db`: content-hashing, thumbnail generation, **incremental** re-hash/re-thumb, decision/cluster-name preservation, face-override replay, orphan-thumb pruning. (`sift index`) |
 | `sift/web/photodb.py` | ~350 | The **schema + domain authority**. Owns DDL, migrations (`ensure_schema`), and the face/cluster/portrait domain rules (`largest_face_aggregate`, `bbox_key`, cluster name anchors, manual-cluster id allocation). Shared by `build_db` and `server`, so ingest and the API can't disagree. |
-| `sift/web/server.py` | ~1250 | FastAPI app: routing, runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, mutation endpoints (decisions, clusters, faces), byte serving (thumb/full/reveal), generic task routes, and static frontend serving. (`sift serve`) |
+| `sift/web/server.py` | ~1150 | FastAPI app: app wiring and middleware (host allowlist, cross-origin write guard), runtime config (`DB_PATH`/`THUMB_DIR`/photo roots/frontend dist), the `db()` connection factory, the list endpoints (meta, images, groups, scenes), byte serving (thumb/full/reveal), folder and photo-root settings, generic task routes, and static frontend serving. (`sift serve`) |
+| `sift/web/routes/` | ~520 | One router module per area, each a `create_router(db_factory)` included by `server.py`: `decisions.py` (marks, export/import, auto-cull), `faces.py` (rename/merge a person, single-face edits), `people.py` (People view), `scene_edits.py` (regroup/merge/unmerge/split), `trash.py` (apply/undo/status). Config is injected as callables so the modules never import `server`. New endpoints go here. |
 | `sift/web/queries.py` | ~230 | **Read layer.** Pure `conn`-parameterized SQL→dict helpers shared by the read endpoints: faceted `image_where`, `rows_to_items`, paginated `grouped_page` (groups/scenes), `histogram`, `SORT_COLUMNS`, the `DEC_ON` join. No app/global coupling — trivially unit-testable. Returns plain dicts; FastAPI validates them against the route's `response_model` (see `schemas.py`). |
 | `sift/web/schemas.py` | ~250 | **Response DTOs.** Pydantic models for every endpoint's JSON (`ImageItem`, `GroupedImageItem`, paginated wrappers, `MetaResponse`, task/trash models, …), attached as `response_model=` on the routes. This is what makes `/openapi.json` carry real response schemas, which the frontend codegens into `schema.d.ts` (the "can't drift" contract). |
 | `sift/web/tasks.py` | ~540 | **Generic web task runner.** Persists task state/events in SQLite, runs long operations in a background thread, streams SSE with replay, and delegates library mutations to `library_ops.py`. |
@@ -70,8 +72,9 @@ head as `sift.audit.aesthetic_scorer` — no `sys.path` manipulation anywhere.
 ### Layering inside `sift/web/`
 
 ```
-server.py  ── routing, config, file serving, app wiring
+server.py  ── app wiring, config, list endpoints, file serving
    │  imports
+   ├──► routes/*.py   (one APIRouter per area; get db()/paths injected)
    ├──► queries.py    (read layer; takes a conn, returns dicts)
    ├──► schemas.py    (Pydantic response_model DTOs ──► /openapi.json)
    ├──► tasks.py      (background task lifecycle + SSE replay)

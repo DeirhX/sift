@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api'
-import { fmt } from '../format'
+import { fmt, personLabel } from '../format'
 import { toast } from '../toast'
 import { promptDialog } from '../dialog'
 import type { ImageItem, ClusterFacet } from '../api/types'
@@ -94,7 +94,7 @@ export default function PhotoCard(
             <div
               key={f.id ?? i}
               className={'face-box editable' + (editFace === i ? ' selected' : '')}
-              title={(personName(f.cluster_id) || `Person ${f.cluster_id}`) + ' · click to edit'}
+              title={personLabel({ cluster_id: f.cluster_id, name: personName(f.cluster_id) }) + ' · click to edit'}
               style={{ left, top, width: w, height: h }}
               onClick={(e) => { e.stopPropagation(); setEditFace(editFace === i ? null : i) }}
             />
@@ -123,11 +123,11 @@ export default function PhotoCard(
             </span>
             <select value={face.cluster_id ?? ''} onChange={onSelect} disabled={busy}>
               {people.every((p) => p.cluster_id !== face.cluster_id) && (
-                <option value={face.cluster_id ?? ''}>Person {face.cluster_id}</option>
+                <option value={face.cluster_id ?? ''}>{personLabel({ cluster_id: face.cluster_id })}</option>
               )}
               {people.map((p) => (
                 <option key={p.cluster_id} value={p.cluster_id}>
-                  {p.name?.trim() ? p.name : `Person ${p.cluster_id}`} ({p.count})
+                  {personLabel(p)} ({p.count})
                 </option>
               ))}
               <option value="__new__">＋ New person…</option>

@@ -1,11 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useQuery, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMeta, fetchImages, fetchGroups, fetchScenes, fetchPeople, startTask, fetchTask, regroupScenes, mergeScenes, splitScene, unmergeScene } from './api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { fetchMeta, fetchGroups, fetchPeople, startTask, fetchTask } from './api'
 import { DEFAULT_FILTERS, parseState } from './urlState'
 import { applyTrashHide, groupActivity } from './format'
 import { useOverlayNav } from './hooks/useOverlayNav'
 import { useDecisions } from './hooks/useDecisions'
 import { useTaskInvalidation } from './hooks/useTaskInvalidation'
+import { useLibraryLists } from './hooks/useLibraryLists'
+import { useSceneActions } from './hooks/useSceneActions'
 import { invalidateRoots, PHOTO_DATA_QUERY_ROOTS } from './queryKeys'
 import type { Filters, View } from './urlState'
 import type { SetLightboxIndex } from './types'
@@ -25,12 +27,8 @@ import Toasts from './components/Toasts'
 import Dialogs from './components/Dialogs'
 import { isDialogOpen } from './dialog'
 import ShortcutHelp from './components/ShortcutHelp'
-import { toast } from './toast'
 import { isTypingTarget } from './keys'
 
-const PAGE = 60
-const GROUP_PAGE = 30
-const SCENE_PAGE = 30
 const TASK_LABELS: Record<string, string> = {
   analyze_library: 'Analyze',
   index_library: 'Index',
@@ -104,38 +102,7 @@ export default function App() {
 
   const meta = useQuery({ queryKey: ['meta'], queryFn: fetchMeta })
 
-  const images = useInfiniteQuery({
-    queryKey: ['images', filters],
-    queryFn: ({ pageParam }) => fetchImages(filters, pageParam, PAGE),
-    initialPageParam: 0,
-    getNextPageParam: (last) => {
-      const next = last.offset + last.limit
-      return next < last.total ? next : undefined
-    },
-    enabled: view === 'grid',
-  })
-
-  const groups = useInfiniteQuery({
-    queryKey: ['groups', filters],
-    queryFn: ({ pageParam }) => fetchGroups(filters, pageParam, GROUP_PAGE, 'review'),
-    initialPageParam: 0,
-    getNextPageParam: (last) => {
-      const next = last.offset + last.limit
-      return next < last.total ? next : undefined
-    },
-    enabled: view === 'groups',
-  })
-
-  const scenes = useInfiniteQuery({
-    queryKey: ['scenes', filters],
-    queryFn: ({ pageParam }) => fetchScenes(filters, pageParam, SCENE_PAGE),
-    initialPageParam: 0,
-    getNextPageParam: (last) => {
-      const next = last.offset + last.limit
-      return next < last.total ? next : undefined
-    },
-    enabled: view === 'scenes',
-  })
+  const { images, groups, scenes } = useLibraryLists(filters, view)
 
   // People view: everyone found in the library. A person's own page is an
   // overlay-style nav entry (per=), so Back returns to the people list.
@@ -235,47 +202,7 @@ export default function App() {
     }
   }, [invalidateAfterTask, patchTrashed, qc])
 
-  // Scene granularity knob: re-segment scenes by capture-time gap, then refetch
-  // scenes (new grouping) and meta (new scene count + remembered gap).
-  const onRegroupScenes = useCallback(async (gap: number) => {
-    try {
-      await regroupScenes(gap)
-    } catch (error) {
-      toast.failure('Couldn’t regroup scenes.', error)
-    }
-    qc.invalidateQueries({ queryKey: ['scenes'] })
-    qc.invalidateQueries({ queryKey: ['meta'] })
-  }, [qc])
-
-  // Manual scene merge / unmerge: pin (or release) scenes, then refetch the
-  // re-segmented scenes and the scene count.
-  const onMergeScenes = useCallback(async (sceneGroups: number[]) => {
-    try {
-      await mergeScenes(sceneGroups)
-    } catch (error) {
-      toast.failure('Couldn’t merge those scenes.', error)
-      throw error
-    }
-    qc.invalidateQueries({ queryKey: ['scenes'] })
-    qc.invalidateQueries({ queryKey: ['meta'] })
-  }, [qc])
-
-  const onUnmergeScene = useCallback(async (sceneGroup: number) => {
-    try {
-      await unmergeScene(sceneGroup)
-    } catch (error) {
-      toast.failure('Couldn’t unmerge that scene.', error)
-      throw error
-    }
-    qc.invalidateQueries({ queryKey: ['scenes'] })
-    qc.invalidateQueries({ queryKey: ['meta'] })
-  }, [qc])
-
-  const onSplitScene = useCallback(async (sceneGroup: number, imageId: number, hash: string) => {
-    await splitScene(sceneGroup, imageId, hash)
-    closeOverlay()
-    invalidateRoots(qc, PHOTO_DATA_QUERY_ROOTS)
-  }, [closeOverlay, qc])
+  const sceneActions = useSceneActions(closeOverlay)
 
   // After a face/person edit, refetch everything that renders names or counts.
   const refetchPeople = useCallback(() => {
@@ -369,7 +296,7 @@ export default function App() {
             <SceneGranularity
               gap={Number(meta.data?.meta?.scene_gap) || 120}
               sceneCount={sceneTotal}
-              onCommit={onRegroupScenes}
+              onCommit={sceneActions.regroup}
             />
           )}
           <div className="spacer" />
@@ -465,8 +392,8 @@ export default function App() {
             reviewOpen={nav?.kind === 'scene'}
             activeTags={filters.tags}
             onToggleTag={(t) => toggleInList('tags', t)}
-            onMerge={onMergeScenes}
-            onUnmerge={onUnmergeScene}
+            onMerge={sceneActions.merge}
+            onUnmerge={sceneActions.unmerge}
             showTrashed={filters.trash.includes('trashed') || filters.trash.includes('any')}
           />
         ) : (
@@ -517,7 +444,7 @@ export default function App() {
           onDecision={setDecision}
           {...reviewActions}
           onApplyDeletes={applyDeletes}
-          onSplitScene={onSplitScene}
+          onSplitScene={sceneActions.split}
           onOpenGroup={openGroup}
           // The scene's member count tracks the active filters, so the panel opens
           // showing every member that passes them — del-marked photos included
