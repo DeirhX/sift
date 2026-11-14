@@ -41,6 +41,7 @@ cleanly: a web-only install (`pip install -e .`) skips the multi-GB `[ml]` stack
 | `sift/web/schemas.py` | ~250 | **Response DTOs.** Pydantic models for every endpoint's JSON (`ImageItem`, `GroupedImageItem`, paginated wrappers, `MetaResponse`, task/trash models, …), attached as `response_model=` on the routes. This is what makes `/openapi.json` carry real response schemas, which the frontend codegens into `schema.d.ts` (the "can't drift" contract). |
 | `sift/web/tasks.py` | ~540 | **Generic web task runner.** Persists task state/events in SQLite, runs long operations in a background thread, streams SSE with replay, and delegates library mutations to `library_ops.py`. |
 | `sift/web/library_ops.py` | ~250 | **Write-side library operations.** Shared implementation for autocull, trash counts/list, move-to-trash, restore, and empty-trash. Called by both sync routes and background tasks so file/database behavior has one source of truth. |
+| `sift/web/face_ops.py` | ~270 | **Face and person operations.** Shared by the single-face routes and the People routes (`routes/people.py`): batch assign/delete with override recording, the people list and one person's faces, and identity similarity (merge suggestions, odd-one-out `match`) computed with numpy from the face embeddings `sift analyze` cached in `.embeddings.sqlite` — still no models in the server. `/face/{id}` cuts square upright crops on demand, cached under `.thumbs/faces/` by content hash + box. |
 | `sift/web/analysis.py` | ~120 | **Analysis command builder.** `build_analyze_steps` converts UI payloads into validated/clamped `python -m sift analyze/index` argv. Config-agnostic: paths and a connection factory are injected, so there's no import cycle with `server.py`. |
 
 ### Layering inside `sift/audit/`
@@ -179,6 +180,9 @@ typecheck` runs it standalone.
   the active tile is the sole highlight (UA focus rings on the tiles are
   suppressed), and the strip is a fixed height so expanding a collapsed near-dup
   set (via its `+` handle) never reflows the hero preview.
+- **People view** (`view=people`): `PeopleView` lists everyone found; `PersonPage` (nav kind `person`, URL `per=`,
+  so Back returns to the list) shows every face crop of one person with multi-select move / split / "not a face",
+  rename, merge, and look-alike merge suggestions.
 - Views: `PhotoGrid` (masonry, aspect-preserving) with `PhotoCard`;
   `GroupView`/`GroupPile` (duplicate sets); `SceneView`/`ScenePile`/`ScenePanel`
   (scene hierarchy); `GroupReview` (filmstrip review modal); `Lightbox`

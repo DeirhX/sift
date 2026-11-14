@@ -98,6 +98,96 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** People */
+        get: operations["people_api_people_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/people/{cluster_id}/faces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Person Faces */
+        get: operations["person_faces_api_people__cluster_id__faces_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/faces/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Assign Faces */
+        post: operations["assign_faces_api_faces_assign_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/faces/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Delete Faces */
+        post: operations["delete_faces_api_faces_delete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/face/{face_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Face Crop
+         * @description A square, upright crop of one face. Cut from the original on first
+         *     request and cached on disk by (content hash, box, size) — a key that,
+         *     unlike the face id, survives re-indexing.
+         */
+        get: operations["face_crop_face__face_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/meta": {
         parameters: {
             query?: never;
@@ -804,6 +894,29 @@ export interface components {
             /** Cluster Id */
             cluster_id: number;
         };
+        /** AssignFacesRequest */
+        AssignFacesRequest: {
+            /** Face Ids */
+            face_ids: number[];
+            /** Cluster Id */
+            cluster_id?: number | null;
+            /**
+             * New Person
+             * @default false
+             */
+            new_person: boolean;
+            /** Name */
+            name?: string | null;
+        };
+        /** AssignFacesResponse */
+        AssignFacesResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Cluster Id */
+            cluster_id: number;
+            /** Moved */
+            moved: number;
+        };
         /** AutocullResponse */
         AutocullResponse: {
             /** Groups */
@@ -840,6 +953,13 @@ export interface components {
             /** Scene Groups */
             scene_groups: number;
         };
+        /** DeleteFacesResponse */
+        DeleteFacesResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Deleted */
+            deleted: number;
+        };
         /** Face */
         Face: {
             /** Id */
@@ -854,6 +974,11 @@ export interface components {
             sharp?: number | null;
             /** Expr */
             expr?: number | null;
+        };
+        /** FaceBatchRequest */
+        FaceBatchRequest: {
+            /** Face Ids */
+            face_ids: number[];
         };
         /** FolderFacet */
         FolderFacet: {
@@ -1119,6 +1244,84 @@ export interface components {
             /** Ok */
             ok: boolean;
         };
+        /** PeopleResponse */
+        PeopleResponse: {
+            /** People */
+            people: components["schemas"]["Person"][];
+        };
+        /** Person */
+        Person: {
+            /** Cluster Id */
+            cluster_id: number;
+            /** Name */
+            name?: string | null;
+            /** Faces */
+            faces: number;
+            /** Photos */
+            photos: number;
+            /** Manual */
+            manual: boolean;
+            /** Cover Face Id */
+            cover_face_id?: number | null;
+            /** Cover Hash */
+            cover_hash?: string | null;
+        };
+        /** PersonFace */
+        PersonFace: {
+            /** Id */
+            id: number;
+            /** Image Id */
+            image_id: number;
+            /** Hash */
+            hash?: string | null;
+            /** Filename */
+            filename: string;
+            /** Path */
+            path: string;
+            /** Bbox */
+            bbox: number[];
+            /** Imgw */
+            imgw?: number | null;
+            /** Imgh */
+            imgh?: number | null;
+            /** Prob */
+            prob?: number | null;
+            /** Sharp */
+            sharp?: number | null;
+            /** Expr */
+            expr?: number | null;
+            /** Cluster Id */
+            cluster_id?: number | null;
+            /** Rel */
+            rel?: number | null;
+            /** Quality */
+            quality: number;
+            /** Capture Time */
+            capture_time?: number | null;
+            /** Decision */
+            decision?: string | null;
+            /** Match */
+            match?: number | null;
+        };
+        /** PersonFacesResponse */
+        PersonFacesResponse: {
+            /** Cluster Id */
+            cluster_id: number;
+            /** Name */
+            name?: string | null;
+            /** Total */
+            total: number;
+            /** Offset */
+            offset: number;
+            /** Limit */
+            limit: number;
+            /** Has Match */
+            has_match: boolean;
+            /** Items */
+            items: components["schemas"]["PersonFace"][];
+            /** Similar */
+            similar: components["schemas"]["SimilarPerson"][];
+        };
         /** Ranges */
         Ranges: {
             /** Cmin */
@@ -1183,6 +1386,25 @@ export interface components {
             limit: number;
             /** Scenes */
             scenes: components["schemas"]["Scene"][];
+        };
+        /** SimilarPerson */
+        SimilarPerson: {
+            /** Cluster Id */
+            cluster_id: number;
+            /** Name */
+            name?: string | null;
+            /** Faces */
+            faces: number;
+            /** Photos */
+            photos: number;
+            /** Manual */
+            manual: boolean;
+            /** Cover Face Id */
+            cover_face_id?: number | null;
+            /** Cover Hash */
+            cover_hash?: string | null;
+            /** Similarity */
+            similarity: number;
         };
         /** SplitSceneRequest */
         SplitSceneRequest: {
@@ -1414,6 +1636,160 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UndoResponse"];
+                };
+            };
+        };
+    };
+    people_api_people_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PeopleResponse"];
+                };
+            };
+        };
+    };
+    person_faces_api_people__cluster_id__faces_get: {
+        parameters: {
+            query?: {
+                sort?: string;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                cluster_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PersonFacesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_faces_api_faces_assign_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssignFacesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssignFacesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_faces_api_faces_delete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FaceBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteFacesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    face_crop_face__face_id__get: {
+        parameters: {
+            query?: {
+                size?: number;
+            };
+            header?: never;
+            path: {
+                face_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

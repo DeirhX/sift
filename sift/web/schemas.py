@@ -221,6 +221,78 @@ class AssignFaceResponse(BaseModel):
     cluster_id: int
 
 
+# ── People view ──────────────────────────────────────────────────────────────
+
+class Person(BaseModel):
+    cluster_id: int                   # -1 = faces with no identity yet
+    name: str | None = None
+    faces: int
+    photos: int
+    manual: bool
+    cover_face_id: int | None = None
+    cover_hash: str | None = None
+
+
+class SimilarPerson(Person):
+    similarity: float                 # centroid cosine to the person asked about
+
+
+class PeopleResponse(BaseModel):
+    people: list[Person]
+
+
+class PersonFace(BaseModel):
+    id: int
+    image_id: int
+    hash: str | None = None
+    filename: str
+    path: str
+    bbox: list[float]
+    imgw: int | None = None
+    imgh: int | None = None
+    prob: float | None = None
+    sharp: float | None = None
+    expr: float | None = None
+    cluster_id: int | None = None
+    rel: float | None = None          # face width / image width
+    quality: float                    # cover/sort heuristic, 0-1
+    capture_time: float | None = None
+    decision: str | None = None
+    match: float | None = None        # cosine to the person's centroid
+
+
+class PersonFacesResponse(BaseModel):
+    cluster_id: int
+    name: str | None = None
+    total: int
+    offset: int
+    limit: int
+    has_match: bool
+    items: list[PersonFace]
+    similar: list[SimilarPerson]
+
+
+class FaceBatchRequest(BaseModel):
+    face_ids: list[int] = Field(min_length=1, max_length=5000)
+
+
+class AssignFacesRequest(FaceBatchRequest):
+    cluster_id: int | None = None
+    new_person: bool = False
+    name: str | None = None
+
+
+class AssignFacesResponse(BaseModel):
+    ok: bool
+    cluster_id: int
+    moved: int
+
+
+class DeleteFacesResponse(BaseModel):
+    ok: bool
+    deleted: int
+
+
 class AutocullResponse(BaseModel):
     groups: int
     kept: int

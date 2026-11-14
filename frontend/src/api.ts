@@ -7,6 +7,7 @@ import type {
   MergeResponse, AssignFaceResponse, AutocullResponse, ApplyStatusResponse,
   ApplyResponse, UndoResponse, TrashStatusResponse, TrashListResponse,
   AnalyzeStatus, TaskSnapshot, TaskListResponse, RegroupResponse,
+  PeopleResponse, PersonFacesResponse, AssignFacesResponse, DeleteFacesResponse,
 } from './api/types'
 
 // Fetch + ok-check + JSON parse, the shape almost every endpoint shares.
@@ -158,6 +159,38 @@ export function assignFace(
   return jsonFetch<AssignFaceResponse>(
     `/api/faces/${faceId}/assign`, jsonBody({ cluster_id, new_person, name }))
 }
+
+// ── People view ──────────────────────────────────────────────────────────────
+
+export function fetchPeople(): Promise<PeopleResponse> {
+  return jsonFetch<PeopleResponse>('/api/people')
+}
+
+export type FaceSort = 'quality' | 'date' | 'size' | 'match'
+
+// Every face of one person (cluster id; -1 = faces with no identity yet).
+export function fetchPersonFaces(clusterId: number, sort: FaceSort = 'quality'): Promise<PersonFacesResponse> {
+  return jsonFetch<PersonFacesResponse>(`/api/people/${clusterId}/faces?sort=${sort}&limit=1000`)
+}
+
+// Move several faces at once to an existing person, or to a brand-new one.
+export function assignFaces(
+  faceIds: number[], { cluster_id, new_person, name }: AssignFaceOpts,
+): Promise<AssignFacesResponse> {
+  return jsonFetch<AssignFacesResponse>(
+    '/api/faces/assign', jsonBody({ face_ids: faceIds, cluster_id, new_person, name }))
+}
+
+// Remove several false-positive face boxes at once.
+export function deleteFaces(faceIds: number[]): Promise<DeleteFacesResponse> {
+  return jsonFetch<DeleteFacesResponse>('/api/faces/delete', jsonBody({ face_ids: faceIds }))
+}
+
+// Square face crop. Face ids are renumbered by a re-index, so `v` (content hash
+// + box) keys the browser cache to the actual face rather than the id.
+export const faceUrl = (
+  faceId: number, size: 96 | 160 | 320 = 160, v?: string | null,
+): string => `/face/${faceId}?size=${size}${v ? `&v=${encodeURIComponent(v)}` : ''}`
 
 // Remove a false-positive face box.
 export function deleteFace(faceId: number): Promise<OkResponse> {
