@@ -119,3 +119,39 @@ def test_list_backups_newest_first(env):
     b = backup.snapshot(env.db, skip_if_empty=False, keep=10)
     names = [x["name"] for x in backup.list_backups(env.db)]
     assert names[0] == b.name
+
+
+def test_restore_safety_copy_includes_commits_still_in_the_wal(tmp_path):
+    """The pre-restore copy is the undo for a mistaken restore, so it must hold
+    everything committed — including rows that only exist in the -wal file."""
+    import shutil
+
+    src_dir = tmp_path / "live"
+    src_dir.mkdir()
+    live = src_dir / "photos.db"
+    conn = photodb.connect(live)
+    photodb.create_base_schema(conn)
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")           # schema into the main file
+    snap = backup.snapshot(live, skip_if_empty=False)        # the "old" state
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("INSERT INTO decisions (hash, decision) VALUES ('wal-only', 'keep')")
+    conn.commit()
+    # Freeze the on-disk state while the commit is still only in the WAL (as
+    # after a crash), in a place with no open connection.
+    crashed_dir = tmp_path / "crashed"
+    crashed_dir.mkdir()
+    crashed = crashed_dir / "photos.db"
+    shutil.copy2(live, crashed)
+    shutil.copy2(str(live) + "-wal", str(crashed) + "-wal")
+    conn.close()
+
+    main_file_only = tmp_path / "main_only.db"
+    shutil.copy2(crashed, main_file_only)
+    assert _decisions(main_file_only) == {}                  # the row is WAL-only
+
+    safety = backup.restore(crashed, snap)
+
+    assert _decisions(crashed) == {}                         # snapshot is live
+    assert _decisions(safety) == {"wal-only": "keep"}        # nothing was dropped
+    assert not (crashed_dir / "photos.db.restoring").exists()

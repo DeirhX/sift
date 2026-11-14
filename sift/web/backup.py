@@ -23,6 +23,7 @@ Design choices:
     sidecars so the restored file isn't shadowed by a leftover write-ahead log.
 """
 
+import os
 import time
 import shutil
 import sqlite3
@@ -162,7 +163,20 @@ def restore(db_path, backup_path) -> Path | None:
     if db_path.exists():
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         safety = db_path.with_name(f"{db_path.name}.pre-restore-{stamp}")
-        shutil.copy2(db_path, safety)
+        # The live DB runs in WAL mode, so its newest commits can still be in
+        # the -wal sidecar (which is deleted below). Copying only the main file
+        # would silently drop them from the "undo" copy; the backup API reads
+        # through the WAL. If the DB is too damaged for that, fall back to raw
+        # copies of the file *and* its sidecars so nothing is discarded.
+        try:
+            _online_copy(db_path, safety)
+        except sqlite3.Error:
+            safety.unlink(missing_ok=True)
+            shutil.copy2(db_path, safety)
+            for ext in ("-wal", "-shm"):
+                side = Path(str(db_path) + ext)
+                if side.exists():
+                    shutil.copy2(side, str(safety) + ext)
 
     # A leftover write-ahead log would otherwise be replayed onto the restored
     # file and undo the restore. Drop the sidecars.
@@ -174,7 +188,11 @@ def restore(db_path, backup_path) -> Path | None:
             except OSError:
                 pass
 
-    shutil.copy2(backup_path, db_path)
+    # Copy next to the DB, then swap in one step: an interrupted restore leaves
+    # either the old DB or the complete snapshot, never a half-written file.
+    staging = db_path.with_name(db_path.name + ".restoring")
+    shutil.copy2(backup_path, staging)
+    os.replace(staging, db_path)
     return safety
 
 

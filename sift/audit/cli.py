@@ -170,6 +170,36 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _unique_dest(dest_dir: Path, name: str) -> Path:
+    """A path in `dest_dir` for `name` that does not exist yet (`a.jpg`,
+    `a_1.jpg`, `a_2.jpg`, ...)."""
+    dest = dest_dir / name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    k = 1
+    while dest.exists():
+        dest = dest_dir / f"{stem}_{k}{suffix}"
+        k += 1
+    return dest
+
+
+def move_junk(records: list[dict], junk_dir: Path, threshold: float) -> int:
+    """Move every record scoring below `threshold` into `junk_dir`.
+
+    Two photos with the same filename in different folders (IMG_0001.jpg is
+    common across cameras and days) get distinct names; a plain move would let
+    the second silently overwrite the first."""
+    junk_dir.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    for r in records:
+        if r["combined"] < threshold:
+            src = Path(r["path"])
+            if not src.exists():
+                continue
+            shutil.move(str(src), str(_unique_dest(junk_dir, src.name)))
+            moved += 1
+    return moved
+
+
 def _discover_image_paths(folder: Path, recurse: bool) -> list[Path]:
     glob = "**/*" if recurse else "*"
     excluded_dirs = {"_trash", "_rejected"}
@@ -765,14 +795,7 @@ def main():
     # ── Move junk ──
     if args.move_junk:
         junk_dir = Path(args.move_junk)
-        junk_dir.mkdir(parents=True, exist_ok=True)
-        moved = 0
-        for r in records:
-            if r["combined"] < args.junk_threshold:
-                src = Path(r["path"])
-                dst = junk_dir / src.name
-                shutil.move(str(src), str(dst))
-                moved += 1
+        moved = move_junk(records, junk_dir, args.junk_threshold)
         print(f"\nMoved {moved} images scoring < {args.junk_threshold} to {junk_dir}")
 
     print(f"\nDone. Total: {len(records)} images, {len(dup_groups)} duplicate groups.")

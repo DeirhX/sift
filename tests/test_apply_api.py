@@ -195,3 +195,52 @@ def test_reindex_same_report_handles_reused_trash_filename(tmp_path, make_env, r
     assert [item["hash"] for item in trashed] == [photos[str(originals[1])]["hash"]]
     assert client.post("/api/apply/undo").json()["restored"] == 1
     assert originals[1].exists() and not originals[0].exists()
+
+
+def test_trash_folder_check_matches_whole_path_components(tmp_path):
+    from sift.web.library_ops import _inside
+
+    trash = tmp_path / "_trash"
+    assert _inside(trash / "a.jpg", trash)
+    assert _inside(trash, trash)
+    # Siblings that merely share the prefix are ordinary library folders.
+    assert not _inside(tmp_path / "_trash_old" / "a.jpg", trash)
+    assert not _inside(tmp_path / "_trashed.jpg", trash)
+    assert not _inside(tmp_path / "a.jpg", trash)
+
+
+def test_photos_in_a_trash_lookalike_folder_can_still_be_trashed(real_library):
+    env = real_library(SPECS)
+    lookalike = env.lib / "_trash_old"
+    lookalike.mkdir()
+    (env.lib / "z.jpg").rename(lookalike / "z.jpg")
+    with sqlite3.connect(env.db) as conn:
+        conn.execute("UPDATE images SET path=? WHERE filename='z.jpg'", (str(lookalike / "z.jpg"),))
+    _mark(env, "z.jpg", "del")
+
+    assert env.client.get("/api/apply/status").json()["pending"] == 1
+    r = env.client.post("/api/apply").json()
+    assert r["moved"] == 1 and r["skipped"] == 0
+    assert (env.lib / "_trash" / "z.jpg").exists()
+
+
+def test_empty_trash_never_deletes_outside_a_trash_folder(real_library):
+    """A ledger row pointing at a real library file must not get it deleted."""
+    env = real_library(SPECS)
+    _mark(env, "y.jpg", "del")
+    env.client.post("/api/apply")
+    victim = env.lib / "x.jpg"
+    with sqlite3.connect(env.db) as conn:
+        conn.execute("UPDATE trash_moves SET trash_path=?", (str(victim),))
+
+    start = env.client.post("/api/tasks", json={"type": "empty_trash", "params": {}}).json()
+    import time
+    for _ in range(100):
+        done = env.client.get(f"/api/tasks/{start['id']}").json()
+        if done["state"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert done["state"] == "done"
+    assert done["result"] == {"deleted": 0, "skipped": 1}
+    assert victim.exists()
