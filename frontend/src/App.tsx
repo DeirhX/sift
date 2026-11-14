@@ -22,6 +22,8 @@ import SceneGranularity from './components/SceneGranularity'
 import PeopleView from './components/PeopleView'
 import PersonPage from './components/PersonPage'
 import Toasts from './components/Toasts'
+import Dialogs from './components/Dialogs'
+import { isDialogOpen } from './dialog'
 import ShortcutHelp from './components/ShortcutHelp'
 import { toast } from './toast'
 import { isTypingTarget } from './keys'
@@ -55,7 +57,7 @@ export default function App() {
   })
   const qc = useQueryClient()
   const searchRef = useRef<HTMLInputElement>(null)
-  const { setDecision, patchTrashed, saveReview, reviewBusy,
+  const { setDecision, undoLastMark, patchTrashed, saveReview, reviewBusy,
     reviewMessage, canUndoReview, undoReview } = useDecisions()
   const { activeTask, invalidateAfterTask } = useTaskInvalidation()
 
@@ -86,6 +88,19 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [nav, showAnalyze, showSettings, showHelp])
+
+  // Ctrl/Cmd+Z takes back the last keep / Trash mark, wherever it was made
+  // (grid, viewer or a review overlay). Text fields keep their own undo.
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'z') return
+      if (isTypingTarget(e.target) || isDialogOpen()) return
+      e.preventDefault()
+      void undoLastMark()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [undoLastMark])
 
   const meta = useQuery({ queryKey: ['meta'], queryFn: fetchMeta })
 
@@ -522,6 +537,7 @@ export default function App() {
       )}
 
       {showHelp && <ShortcutHelp onClose={() => setShowHelp(false)} />}
+      <Dialogs />
       <Toasts />
 
       {showSettings && (

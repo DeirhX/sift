@@ -8,6 +8,7 @@ import type { FaceSort } from '../api'
 import type { Person, PersonFace } from '../api/types'
 import { fmt, fmtTime } from '../format'
 import { PersonCover, personLabel } from './PeopleView'
+import { confirmDialog, promptDialog, plural } from '../dialog'
 
 // A face this unlike the rest of its person is worth a second look.
 const ODD_ONE_OUT = 0.35
@@ -109,10 +110,15 @@ export default function PersonPage(
   // Moving every face away empties this person, so there is no page to stay on.
   const leaveIfEmptied = () => { if (ids.length >= (data?.total ?? 0)) onBack() }
 
-  const moveSelected = (value: string) => {
+  const moveSelected = async (value: string) => {
     if (!value || !ids.length) return
     if (value === '__new__') {
-      const name = window.prompt('Name for the new person (optional):')
+      const name = await promptDialog({
+        title: `Move ${plural(ids.length, 'face')} to a new person`,
+        label: 'Name (optional)',
+        placeholder: 'Leave blank to name later',
+        confirmLabel: 'Create person',
+      })
       if (name === null) return
       void run(() => assignFaces(ids, { new_person: true, name: name.trim() || undefined }), leaveIfEmptied)
     } else {
@@ -120,22 +126,33 @@ export default function PersonPage(
     }
   }
 
-  const removeSelected = () => {
+  const removeSelected = async () => {
     if (!ids.length) return
-    if (!window.confirm(`Remove ${ids.length} face box${ids.length === 1 ? '' : 'es'}? `
-      + 'The photos are not touched; these just stop counting as faces.')) return
+    if (!await confirmDialog({
+      title: `Remove ${plural(ids.length, 'face box', 'face boxes')}?`,
+      body: 'The photos are not touched; these just stop counting as faces.',
+      confirmLabel: 'Remove',
+    })) return
     void run(() => deleteFaces(ids), leaveIfEmptied)
   }
 
-  const mergeInto = (value: string) => {
+  const mergeInto = async (value: string) => {
     const target = others.find((p) => p.cluster_id === Number(value))
     if (!target) return
-    if (!window.confirm(`Merge all of "${title}" into "${personLabel(target)}"?`)) return
+    if (!await confirmDialog({
+      title: `Merge “${title}” into “${personLabel(target)}”?`,
+      body: `Every face here will count as ${personLabel(target)}, and “${title}” disappears from the list.`,
+      confirmLabel: 'Merge',
+    })) return
     void run(() => mergeClusters(clusterId, target.cluster_id), () => onOpenPerson(target.cluster_id))
   }
 
-  const absorb = (other: Person) => {
-    if (!window.confirm(`Merge "${personLabel(other)}" (${other.faces}) into "${title}"?`)) return
+  const absorb = async (other: Person) => {
+    if (!await confirmDialog({
+      title: `Merge “${personLabel(other)}” into “${title}”?`,
+      body: `${plural(other.faces, 'face')} of ${personLabel(other)} will count as ${title}.`,
+      confirmLabel: 'Merge',
+    })) return
     void run(() => mergeClusters(other.cluster_id, clusterId))
   }
 

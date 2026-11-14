@@ -71,7 +71,9 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   await expect(page.locator('.card').first()).toBeVisible()
 
   // ── Reorganize: mark one for deletion, apply, verify the move on disk ───────
-  page.on('dialog', (d) => d.accept())
+  // Confirmations are in-app dialogs: click the named confirm button.
+  const confirmWith = (label) =>
+    page.locator('.dialog-panel').getByRole('button', { name: label, exact: true }).click()
 
   const beforeRoot = rootFileCount(lib)
   expect(trashCount(lib)).toBe(0)
@@ -86,7 +88,10 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   // Apply status is queried independently; reload so it sees the pending mark.
   await page.reload()
   const apply = page.locator('.apply-panel')
-  await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
+  await taskAndWait(page, async () => {
+    await apply.getByRole('button', { name: /Move \d+ to Trash/ }).click()
+    await confirmWith('Move to Trash')
+  })
   await expect(apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ })).toBeVisible()
 
   // One file physically moved into _trash/.
@@ -94,7 +99,10 @@ test('analyze a copied library, then reorganize (apply/undo) on disk', async ({ 
   expect(rootFileCount(lib)).toBe(beforeRoot - 1)
 
   // ── Restore moves it back ──────────────────────────────────────────────────
-  await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ }).click())
+  await taskAndWait(page, async () => {
+    await apply.getByRole('button', { name: /Restore \(\d+ trashed\)/ }).click()
+    await confirmWith('Restore')
+  })
   await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 
   expect(trashCount(lib)).toBe(0)
