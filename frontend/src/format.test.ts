@@ -196,3 +196,13 @@ describe('sceneKeywords', () => {
     expect(sceneKeywords(undefined)).toEqual([])
   })
 })
+
+describe('personLabel', () => {
+  it('prefers the name, falls back to the id, and names the unsorted bucket', async () => {
+    const { personLabel } = await import('./format')
+    expect(personLabel({ cluster_id: 3, name: 'Aja' })).toBe('Aja')
+    expect(personLabel({ cluster_id: 3, name: '  ' })).toBe('Person 3')
+    expect(personLabel({ cluster_id: 3 })).toBe('Person 3')
+    expect(personLabel({ cluster_id: -1, name: null })).toBe('Unsorted faces')
+  })
+})

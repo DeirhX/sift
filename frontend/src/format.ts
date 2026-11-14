@@ -189,3 +189,11 @@ export function sceneKeywords<T extends { tags?: string[] }>(
     .slice(0, limit)
     .map(([tag, count]) => ({ tag, count }))
 }
+
+// Display name for a person (face cluster): their name, else "Person N"; the
+// catch-all cluster of unassigned faces (negative id) is "Unsorted faces".
+// The single source for this rule: sidebar, photo cards and the People view.
+export function personLabel(p: { cluster_id: number | null | undefined; name?: string | null }): string {
+  if (p.cluster_id != null && p.cluster_id < 0) return 'Unsorted faces'
+  return p.name?.trim() ? p.name : `Person ${p.cluster_id}`
+}

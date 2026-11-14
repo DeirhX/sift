@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
+import { useEscapeKey } from '../hooks/useEscapeKey'
 import type { ChangeEvent } from 'react'
 import { importDecisions } from '../api'
 
@@ -15,11 +16,7 @@ export default function SettingsPanel({ onClose, onChange }: SettingsPanelProps)
   const importRef = useRef<HTMLInputElement>(null)
   const [dataMsg, setDataMsg] = useState<string | null>(null)
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  useEscapeKey(onClose)
 
   const onImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]

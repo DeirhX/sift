@@ -9,7 +9,8 @@ folder. Nothing is hard-deleted unless you explicitly empty Trash.
 Everything runs on your machine. There is no cloud, no auth, no telemetry.
 
 For a developer-facing map of the modules and design decisions, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md). For the physical culling/apply flow and
+[`ARCHITECTURE.md`](ARCHITECTURE.md); before changing code, read
+[`AGENTS.md`](AGENTS.md) (one command to verify a change: `python scripts/check.py`). For the physical culling/apply flow and
 duplicate filtering audit, see
 [`PHOTO_ORGANIZATION_PIPELINE.md`](PHOTO_ORGANIZATION_PIPELINE.md).
 

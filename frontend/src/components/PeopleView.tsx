@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { faceUrl } from '../api'
+import { personLabel } from '../format'
 import type { Person } from '../api/types'
 
-export const personLabel = (p: Pick<Person, 'cluster_id' | 'name'>): string =>
-  p.cluster_id < 0 ? 'Unsorted faces' : p.name?.trim() ? p.name : `Person ${p.cluster_id}`
+// Re-exported so People components keep one import site; defined in format.ts.
+export { personLabel }
 
 const plural = (n: number, one: string): string => `${n.toLocaleString()} ${one}${n === 1 ? '' : 's'}`
 
