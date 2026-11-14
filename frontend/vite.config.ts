@@ -2,6 +2,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// React only ships its test helpers (act) in non-production builds. A machine
+// with NODE_ENV=production set globally would otherwise fail every component
+// test, so pin the test runner to NODE_ENV=test regardless of the shell.
+if (process.env.VITEST || process.argv.some((arg) => /vitest/.test(arg))) {
+  process.env.NODE_ENV = 'test'
+}
+
 // During dev, proxy API + image routes to the FastAPI server on :8000.
 // The production build is served directly by FastAPI, so these paths line up.
 export default defineConfig({

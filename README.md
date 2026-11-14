@@ -1,4 +1,4 @@
-# PhotoOrganizer
+# Sift
 
 A local, single-user toolkit for **auditing and culling a photo library**. It
 scores every image for sharpness and aesthetic quality, groups near-duplicates,

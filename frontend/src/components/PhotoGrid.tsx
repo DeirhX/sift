@@ -3,6 +3,7 @@ import type { UIEvent, KeyboardEvent } from 'react'
 import PhotoCard from './PhotoCard'
 import { aestheticScore, fmt } from '../format'
 import { thumbUrl } from '../api'
+import { decisionForKey, hasModifier } from '../keys'
 import type { ImageItem, ClusterFacet } from '../api/types'
 import type { DecisionFn, PersonName } from '../types'
 
@@ -156,6 +157,8 @@ export default function PhotoGrid(
     // Don't hijack typing in the search box, face-editor select, etc.
     const tag = (e.target as HTMLElement).tagName
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (tag === 'BUTTON' && ['Enter', ' '].includes(e.key))) return
+    // Leave browser/OS chords alone: Ctrl+- (zoom out) must not mark a photo.
+    if (hasModifier(e)) return
     const last = items.length - 1
     if (last < 0) return
     const move = (next: number) => {
@@ -182,14 +185,12 @@ export default function PhotoGrid(
         if (focusIdx == null) setFocusIdx(0)
         setInspecting((open) => !open)
         return
-      // + (keep) / − (delete) mirror k/d; '=' is the unshifted main-row + key.
-      case 'k': case 'K': case '+': case '=':
-        if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'keep') }
+      default: {
+        // k / + / = keep, d / − / Delete mark for Trash (see keys.ts).
+        const verdict = decisionForKey(e)
+        if (verdict && focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], verdict) }
         return
-      case 'd': case 'D': case '-': case 'Delete':
-        if (focusIdx != null) { e.preventDefault(); onDecision(items[focusIdx], 'del') }
-        return
-      default: return
+      }
     }
   }, [items, focusIdx, neighbor, cols, hasNext, isFetchingNext, fetchNext, onOpen, onDecision])
 

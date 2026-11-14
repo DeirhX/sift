@@ -64,6 +64,7 @@ export default function SceneView(
     if (selCount < 2 || !onMerge) return
     setBusy(true)
     try { await onMerge([...selected]); setSelected(new Set()) }
+    catch { /* reported by the caller; keep the selection so it can be retried */ }
     finally { setBusy(false) }
   }, [selCount, selected, onMerge])
 
@@ -71,6 +72,7 @@ export default function SceneView(
     if (soleManual == null || !onUnmerge) return
     setBusy(true)
     try { await onUnmerge(soleManual); setSelected(new Set()) }
+    catch { /* reported by the caller; keep the selection so it can be retried */ }
     finally { setBusy(false) }
   }, [soleManual, onUnmerge])
 

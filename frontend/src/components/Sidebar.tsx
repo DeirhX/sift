@@ -308,7 +308,7 @@ export default function Sidebar(
   return (
     <aside className="sidebar">
       <div>
-        <h1>Photo Audit</h1>
+        <h1>Sift</h1>
         <div className="sub">{(counts?.total ?? 0).toLocaleString()} indexed · {counts?.dup_groups ?? 0} dup groups</div>
       </div>
 

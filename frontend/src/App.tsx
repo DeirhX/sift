@@ -21,6 +21,10 @@ import SettingsPanel from './components/SettingsPanel'
 import SceneGranularity from './components/SceneGranularity'
 import PeopleView from './components/PeopleView'
 import PersonPage from './components/PersonPage'
+import Toasts from './components/Toasts'
+import ShortcutHelp from './components/ShortcutHelp'
+import { toast } from './toast'
+import { isTypingTarget } from './keys'
 
 const PAGE = 60
 const GROUP_PAGE = 30
@@ -44,6 +48,7 @@ export default function App() {
   const [view, setView] = useState<View>(INITIAL.view)   // 'grid' | 'groups' | 'scenes' | 'people'
   const [showAnalyze, setShowAnalyze] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const [tileSize, setTileSize] = useState(() => {
     const saved = Number(localStorage.getItem('sift.grid.tileSize'))
     return [210, 285, 370].includes(saved) ? saved : 285
@@ -69,16 +74,18 @@ export default function App() {
   // modal is open). Pairs with the grid's arrow-key navigation.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return
-      if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target as HTMLElement).tagName)) return
-      if (nav != null || showAnalyze || showSettings) return
+      if ((e.key !== '/' && e.key !== '?') || e.ctrlKey || e.metaKey || e.altKey) return
+      if (isTypingTarget(e.target)) return
+      if (nav != null || showAnalyze || showSettings || showHelp) return
       e.preventDefault()
+      // "?" opens the keyboard reference; "/" jumps to search.
+      if (e.key === '?') { setShowHelp(true); return }
       searchRef.current?.focus()
       searchRef.current?.select()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [nav, showAnalyze, showSettings])
+  }, [nav, showAnalyze, showSettings, showHelp])
 
   const meta = useQuery({ queryKey: ['meta'], queryFn: fetchMeta })
 
@@ -196,19 +203,31 @@ export default function App() {
   const applyDeletes = useCallback(async (ids: number[]) => {
     if (!ids.length) return
     patchTrashed(ids)
-    const started = await startTask('trash_decisions', { image_ids: ids })
-    let snap = started
-    for (let i = 0; i < 150 && snap.state === 'running'; i++) {
-      await new Promise((r) => setTimeout(r, 400))
-      snap = await fetchTask(started.id)
+    try {
+      const started = await startTask('trash_decisions', { image_ids: ids })
+      let snap = started
+      for (let i = 0; i < 150 && snap.state === 'running'; i++) {
+        await new Promise((r) => setTimeout(r, 400))
+        snap = await fetchTask(started.id)
+      }
+      invalidateAfterTask(snap)
+      if (snap.state === 'failed') throw new Error(snap.error || 'Moving photos to Trash failed.')
+    } catch (error) {
+      // The photos were hidden optimistically; bring back whatever is still on
+      // disk rather than leaving the list claiming they were trashed.
+      invalidateRoots(qc, PHOTO_DATA_QUERY_ROOTS)
+      throw error
     }
-    invalidateAfterTask(snap)
-  }, [invalidateAfterTask, patchTrashed])
+  }, [invalidateAfterTask, patchTrashed, qc])
 
   // Scene granularity knob: re-segment scenes by capture-time gap, then refetch
   // scenes (new grouping) and meta (new scene count + remembered gap).
   const onRegroupScenes = useCallback(async (gap: number) => {
-    await regroupScenes(gap)
+    try {
+      await regroupScenes(gap)
+    } catch (error) {
+      toast.failure('Couldn’t regroup scenes.', error)
+    }
     qc.invalidateQueries({ queryKey: ['scenes'] })
     qc.invalidateQueries({ queryKey: ['meta'] })
   }, [qc])
@@ -216,13 +235,23 @@ export default function App() {
   // Manual scene merge / unmerge: pin (or release) scenes, then refetch the
   // re-segmented scenes and the scene count.
   const onMergeScenes = useCallback(async (sceneGroups: number[]) => {
-    await mergeScenes(sceneGroups)
+    try {
+      await mergeScenes(sceneGroups)
+    } catch (error) {
+      toast.failure('Couldn’t merge those scenes.', error)
+      throw error
+    }
     qc.invalidateQueries({ queryKey: ['scenes'] })
     qc.invalidateQueries({ queryKey: ['meta'] })
   }, [qc])
 
   const onUnmergeScene = useCallback(async (sceneGroup: number) => {
-    await unmergeScene(sceneGroup)
+    try {
+      await unmergeScene(sceneGroup)
+    } catch (error) {
+      toast.failure('Couldn’t unmerge that scene.', error)
+      throw error
+    }
     qc.invalidateQueries({ queryKey: ['scenes'] })
     qc.invalidateQueries({ queryKey: ['meta'] })
   }, [qc])
@@ -346,6 +375,10 @@ export default function App() {
           <button className="btn" onClick={() => setShowSettings(true)} title="Settings">
             Settings
           </button>
+          <button className="btn help-btn" onClick={() => setShowHelp(true)}
+            aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
+            ?
+          </button>
           <div className="seg view-toggle">
             <button className={view === 'grid' ? 'active' : ''} onClick={() => switchView('grid')}>Grid</button>
             <button className={view === 'scenes' ? 'active' : ''} onClick={() => switchView('scenes')}>Scenes</button>
@@ -378,7 +411,10 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              <div className="empty">No photos match these filters.</div>
+              <div className="empty">
+                <p>No photos match these filters.</p>
+                <button className="btn" onClick={resetFilters}>Reset filters</button>
+              </div>
             )
           ) : (
             <PhotoGrid
@@ -484,6 +520,9 @@ export default function App() {
           onDone={invalidateAfterTask}
         />
       )}
+
+      {showHelp && <ShortcutHelp onClose={() => setShowHelp(false)} />}
+      <Toasts />
 
       {showSettings && (
         <SettingsPanel

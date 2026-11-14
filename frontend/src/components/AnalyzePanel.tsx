@@ -125,7 +125,7 @@ export default function AnalyzePanel({ onClose, onDone }: AnalyzePanelProps) {
 
   return (
     <div className="review-overlay" onClick={onClose}>
-      <div className="analyze-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="analyze-panel" role="dialog" aria-modal="true" aria-label="Library operations" onClick={(e) => e.stopPropagation()}>
         <div className="review-head">
           <b>Library operations</b>
           {running && <span className="analyze-status running">Running…</span>}

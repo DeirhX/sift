@@ -13,6 +13,7 @@ import BurstCompare from './BurstCompare'
 import MarkPreview from './MarkPreview'
 import { useImageZoom } from '../hooks/useImageZoom'
 import { usePersistentBool } from '../hooks/usePersistentBool'
+import { decisionForKey, hasModifier } from '../keys'
 
 // Eye / eye-with-slash glyph for the culled/deleted visibility toggles. Drawn
 // inline (not an emoji) so it inherits the button's currentColor — amber when a
@@ -341,6 +342,9 @@ export default function GroupReview({
         return
       }
       if (plan || /^(INPUT|SELECT|TEXTAREA)$/.test((e.target as HTMLElement | null)?.tagName ?? '')) return
+      // Browser/OS chords (Ctrl+N, Ctrl+D, Ctrl+-) are never review commands.
+      if (hasModifier(e)) return
+      const verdict = decisionForKey(e)
       if (compareOpen && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         stepCompare(e.key === 'ArrowLeft' ? -1 : 1)
@@ -351,7 +355,7 @@ export default function GroupReview({
         onNextGroup()
         return
       }
-      if (compareOpen && !['k', '+', '=', 'd', '-', 'Delete'].includes(e.key)) return
+      if (compareOpen && !verdict) return
       const curItem = compareOpen ? alternative : view[sel] ?? view[0]
       if (!curItem) return
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
@@ -374,10 +378,8 @@ export default function GroupReview({
           // Keep the selection visible after collapsing: snap it to the rep.
           if (s.items[0] && curItem.id !== s.items[0].id) onSelect(s.items[0].id)
         }
-      } else if (e.key === 'k' || e.key === '+' || e.key === '=') {
-        decide(curItem, 'keep')
-      } else if (e.key === 'd' || e.key === '-' || e.key === 'Delete') {
-        decide(curItem, 'del')
+      } else if (verdict) {
+        decide(curItem, verdict)
       }
     }
     window.addEventListener('keydown', onKey)
