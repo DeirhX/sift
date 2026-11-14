@@ -6,6 +6,7 @@ becoming two different products.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from collections import defaultdict
 from datetime import datetime
@@ -36,7 +37,20 @@ def _library_root(conn) -> Path:
 
 
 def trash_dir(conn) -> Path:
-    return _library_root(conn) / "_trash"
+    return _library_root(conn) / TRASH_DIRNAME
+
+
+TRASH_DIRNAME = "_trash"
+
+
+def _inside(path, directory) -> bool:
+    """True when `path` is `directory` or lies below it. Compares whole path
+    components case-insensitively where the OS does, so a sibling such as
+    `_trash_old` or `_trashed` is not mistaken for the Trash folder (a plain
+    string-prefix test was)."""
+    p = os.path.normcase(os.path.abspath(str(path)))
+    d = os.path.normcase(os.path.abspath(str(directory))).rstrip("\\/")
+    return p == d or p.startswith(d + os.sep)
 
 
 def unique_dest(dest_dir: Path, name: str) -> Path:
@@ -57,7 +71,6 @@ def ensure_library_schema(conn) -> None:
 def trash_counts(conn) -> dict[str, int]:
     ensure_library_schema(conn)
     trash = trash_dir(conn)
-    trash_str = str(trash)
     pending = 0
     for row in conn.execute(
         f"""SELECT i.path FROM images i
@@ -65,7 +78,7 @@ def trash_counts(conn) -> dict[str, int]:
            LEFT JOIN {TRASHED_ON}
            WHERE ({DECISION})='del' AND tm.id IS NULL"""
     ):
-        if not str(row["path"]).startswith(trash_str):
+        if not _inside(row["path"], trash):
             pending += 1
     trashed = conn.execute(
         "SELECT COUNT(*) FROM trash_moves WHERE state='trashed'").fetchone()[0]
@@ -402,7 +415,7 @@ def trash_decisions(conn, *, image_ids: list[int] | None = None,
         if cancelled and cancelled():
             raise OperationCancelled()
         src = Path(row["path"])
-        if str(src).startswith(trash_str) or not src.exists():
+        if _inside(src, trash) or not src.exists():
             skipped += 1
         else:
             dest = unique_dest(trash, src.name)
@@ -490,7 +503,14 @@ def empty_trash(conn, *, progress: ProgressFn | None = None,
         if cancelled and cancelled():
             raise OperationCancelled()
         path = Path(row["trash_path"])
-        if not path.exists():
+        if path.parent.name != TRASH_DIRNAME:
+            # This is the one irreversible operation. Every file Sift trashes
+            # sits directly in a `_trash` folder, so a ledger row pointing
+            # anywhere else (a hand-edited or damaged DB) is never deleted.
+            skipped += 1
+            if log:
+                log(f"[skip] {path}: not inside a {TRASH_DIRNAME} folder; left alone")
+        elif not path.exists():
             skipped += 1
             conn.execute(
                 "UPDATE trash_moves SET state=?, emptied_at=? WHERE id=?",
