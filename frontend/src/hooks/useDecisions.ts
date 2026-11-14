@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { setDecision as apiSetDecision, setDecisions as apiSetDecisions } from '../api'
 import { invalidateRoots, PHOTO_LIST_QUERY_ROOTS, queryRootIn } from '../queryKeys'
@@ -15,6 +15,20 @@ interface CachePage {
 interface CacheData {
   pages: CachePage[]
 }
+
+interface MarkStep {
+  id: number
+  hash: string
+  path: string
+  filename: string
+  previous: string | null
+  next: string | null
+}
+
+const MAX_UNDO = 100
+
+const describeMark = (decision: string | null): string =>
+  decision === 'keep' ? 'back to Keep' : decision === 'del' ? 'back to marked for Trash' : 'now unmarked'
 
 export function useDecisions() {
   const qc = useQueryClient()
@@ -66,14 +80,23 @@ export function useDecisions() {
     patchCache((it) => (it.decision === 'del' ? { ...it, trash_state: 'trashed' } : it))
   }, [patchCache])
 
+  // Single marks made this session, newest last, so Ctrl+Z can walk them back.
+  const history = useRef<MarkStep[]>([])
+
   const setDecision = useCallback(async (item: ImageItem, decision: Decision) => {
     const next = item.decision === decision ? null : decision
     patchDecision(item.id, next)
     if (item.hash == null) return
+    const step: MarkStep = {
+      id: item.id, hash: item.hash, path: item.path, filename: item.filename,
+      previous: item.decision ?? null, next,
+    }
+    history.current = [...history.current, step].slice(-MAX_UNDO)
     try {
       await apiSetDecision(item.hash, next, item.id, item.path)
       qc.invalidateQueries({ queryKey: ['applyStatus'] })
     } catch (error) {
+      history.current = history.current.filter((s) => s !== step)
       // The optimistic badge is now a lie: put the old mark back at once (the
       // refetch may fail too if the server is down) and say so, instead of
       // letting the photo quietly flip back later.
@@ -81,6 +104,25 @@ export function useDecisions() {
       invalidateLists()
       toast.failure(`Couldn’t save the mark for ${item.filename}.`, error)
     }
+  }, [patchDecision, invalidateLists, qc])
+
+  // Ctrl+Z: take back the most recent single mark. Returns false when there is
+  // nothing to undo.
+  const undoLastMark = useCallback(async (): Promise<boolean> => {
+    const step = history.current[history.current.length - 1]
+    if (!step) { toast.info('Nothing to undo.'); return false }
+    history.current = history.current.slice(0, -1)
+    patchDecision(step.id, step.previous)
+    try {
+      await apiSetDecision(step.hash, step.previous, step.id, step.path)
+      qc.invalidateQueries({ queryKey: ['applyStatus'] })
+      toast.info(`Undid the mark on ${step.filename} — ${describeMark(step.previous)}.`)
+    } catch (error) {
+      patchDecision(step.id, step.next)
+      invalidateLists()
+      toast.failure(`Couldn’t undo the mark on ${step.filename}.`, error)
+    }
+    return true
   }, [patchDecision, invalidateLists, qc])
 
   const saveReview = async (changes: ReviewMark[], reversing = false) => {
@@ -109,7 +151,7 @@ export function useDecisions() {
     }
   }
 
-  return { invalidateLists, patchDecision, patchTrashed, patchTrashedDel, setDecision,
+  return { invalidateLists, patchDecision, patchTrashed, patchTrashedDel, setDecision, undoLastMark,
     saveReview, reviewBusy, reviewMessage, canUndoReview: undo != null,
     undoReview: () => { if (undo) void saveReview(undo, true).catch(() => {}) },
   }

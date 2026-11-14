@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { fetchApplyStatus, fetchTasks, startTask } from '../api'
 import { useDecisions } from '../hooks/useDecisions'
 import TaskPanel from './TaskPanel'
+import { confirmDialog, plural } from '../dialog'
 import type { TaskSnapshot } from '../api/types'
 
 interface ApplyPanelProps {
@@ -44,9 +45,13 @@ export default function ApplyPanel({ onTaskDone, showTrash, onOpenTrash, onOpenL
 
   const doApply = async () => {
     if (!s?.pending) return
-    if (!window.confirm(
-      `Move ${s.pending} photo(s) marked Del into Trash:\n${s.trash_dir ?? s.rejected_dir}\n\n` +
-      `Nothing is permanently deleted until you empty Trash.`)) return
+    if (!await confirmDialog({
+      title: `Move ${plural(s.pending, 'photo')} to Trash?`,
+      body: 'Every photo marked for Trash moves into the folder below. You can restore them '
+        + 'from the Trash view; nothing is permanently deleted until you empty Trash.',
+      detail: s.trash_dir ?? s.rejected_dir ?? undefined,
+      confirmLabel: 'Move to Trash',
+    })) return
     setBusy(true); setMsg(null)
     // Drop the del-marked photos from every list right away; the task + refetch
     // reconcile. (Only loaded pages are patched, which is all that's on screen.)
@@ -63,7 +68,11 @@ export default function ApplyPanel({ onTaskDone, showTrash, onOpenTrash, onOpenL
 
   const doUndo = async () => {
     if (!s?.applied) return
-    if (!window.confirm(`Restore ${s.applied} file(s) from Trash?`)) return
+    if (!await confirmDialog({
+      title: `Restore ${plural(s.applied, 'file')} from Trash?`,
+      body: 'They go back to the folders they came from.',
+      confirmLabel: 'Restore',
+    })) return
     setBusy(true); setMsg(null)
     try {
       const task = await startTask('restore_trash')
@@ -77,9 +86,13 @@ export default function ApplyPanel({ onTaskDone, showTrash, onOpenTrash, onOpenL
 
   const doEmptyTrash = async () => {
     if (!s?.applied) return
-    if (!window.confirm(
-      `Permanently delete ${s.applied} file(s) from Trash?\n\n` +
-      `This cannot be undone. Yes, this is the scary button.`)) return
+    if (!await confirmDialog({
+      title: `Permanently delete ${plural(s.applied, 'file')}?`,
+      body: 'This empties Trash and removes the files from disk. It cannot be undone.',
+      detail: s.trash_dir ?? s.rejected_dir ?? undefined,
+      confirmLabel: 'Delete permanently',
+      danger: true,
+    })) return
     setBusy(true); setMsg(null)
     try {
       const task = await startTask('empty_trash')

@@ -5,10 +5,9 @@ import { test, expect } from '@playwright/test'
 // clean up after itself (toggle marks back to null / Clear) so later tests
 // start from a predictable state. Keep marks are harmless to the apply flow.
 
-// Auto-accept confirm() dialogs (apply/undo use them).
-test.beforeEach(({ page }) => {
-  page.on('dialog', (d) => d.accept())
-})
+// Confirmations are in-app dialogs: click the named confirm button.
+const confirmWith = (page, label) =>
+  page.locator('.dialog-panel').getByRole('button', { name: label, exact: true }).click()
 
 // Click something that issues a decision and wait for the server to ack it,
 // so reloads / follow-up assertions don't race the fire-and-forget POST.
@@ -457,13 +456,19 @@ test.describe('apply / undo', () => {
     // Apply status is queried independently; reload so it sees the pending mark.
     await page.reload()
     const apply = page.locator('.apply-panel')
-    await taskAndWait(page, () => apply.getByRole('button', { name: /Move \d+ to Trash/ }).click())
+    await taskAndWait(page, async () => {
+      await apply.getByRole('button', { name: /Move \d+ to Trash/ }).click()
+      await confirmWith(page, 'Move to Trash')
+    })
     await expect(apply.getByRole('button', { name: 'Empty Trash' })).toHaveCount(0)
     await apply.getByRole('button', { name: /Open Trash/ }).click()
     await expect(apply.getByRole('button', { name: /Restore \d+/ })).toBeVisible()
     await expect(apply.getByRole('button', { name: 'Empty Trash' })).toBeVisible()
 
-    await taskAndWait(page, () => apply.getByRole('button', { name: /Restore \d+/ }).click())
+    await taskAndWait(page, async () => {
+      await apply.getByRole('button', { name: /Restore \d+/ }).click()
+      await confirmWith(page, 'Restore')
+    })
     await apply.getByRole('button', { name: 'Back to Library' }).click()
     await expect(apply.getByRole('button', { name: /Move \d+ to Trash/ })).toBeVisible()
 

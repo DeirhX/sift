@@ -6,6 +6,7 @@ const SECTIONS: { title: string; rows: [string[], string][] }[] = [
     rows: [
       [['/'], 'Jump to search'],
       [['?'], 'Show this help'],
+      [['Ctrl', 'Z'], 'Undo the last keep / Trash mark'],
       [['Esc'], 'Close the open panel or viewer'],
     ],
   },

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import PersonPage from './PersonPage'
 import PeopleView from './PeopleView'
+import Dialogs from './Dialogs'
 import * as api from '../api'
 import type { Person, PersonFace, PersonFacesResponse } from '../api/types'
 
@@ -44,6 +45,7 @@ function renderPage(props: Partial<Parameters<typeof PersonPage>[0]> = {}) {
   render(
     <QueryClientProvider client={qc}>
       <PersonPage clusterId={0} people={PEOPLE} {...handlers} {...props} />
+      <Dialogs />
     </QueryClientProvider>,
   )
   return handlers
@@ -70,13 +72,14 @@ describe('PersonPage', () => {
   })
 
   it('shift-click selects a range, and removing every face leaves the page', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     const handlers = renderPage()
     await userEvent.click(await screen.findByRole('button', { name: 'Select face from f1.jpg' }))
     fireEvent.click(screen.getByRole('button', { name: 'Select face from f3.jpg' }), { shiftKey: true })
     expect(screen.getByText('3 selected')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: 'Not a face' }))
+    expect(screen.getByRole('alertdialog', { name: 'Remove 3 face boxes?' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Remove' }))
     await waitFor(() => expect(api.deleteFaces).toHaveBeenCalledWith([1, 2, 3]))
     await waitFor(() => expect(handlers.onBack).toHaveBeenCalled())
   })
@@ -88,10 +91,10 @@ describe('PersonPage', () => {
   })
 
   it('offers look-alike people to merge in', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderPage()
     expect(await screen.findByText('62%')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Merge in' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Merge' }))
     await waitFor(() => expect(api.mergeClusters).toHaveBeenCalledWith(1, 0))
   })
 })

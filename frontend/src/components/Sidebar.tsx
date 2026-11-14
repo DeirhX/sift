@@ -10,6 +10,8 @@ import {
 import type { Filters } from '../urlState'
 import type { MetaResponse, ClusterFacet, TaskSnapshot } from '../api/types'
 import type { UpdateFilter } from '../types'
+import { confirmDialog, plural } from '../dialog'
+import { toast } from '../toast'
 
 // Left filter panel. To keep it from growing without bound, the tall/variable
 // blocks (scores, people, folders, tags) live in collapsible sections that
@@ -228,10 +230,13 @@ export default function Sidebar(
 
   const removeFolder = async (path: string) => {
     if (folderBusy) return
-    if (!window.confirm(
-      `Remove this folder from the library?\n\n${path}\n\n` +
-      'Its photos leave the catalog on the next index. Your keep/delete ' +
-      'decisions are kept and re-bind if you add it back.')) return
+    if (!await confirmDialog({
+      title: 'Remove this folder from the library?',
+      body: 'Its photos leave the catalog on the next index; the files on disk are not touched. '
+        + 'Your keep/delete decisions are kept and re-bind if you add the folder back.',
+      detail: path,
+      confirmLabel: 'Remove folder',
+    })) return
     setFolderBusy(true); setFolderMsg(null)
     try {
       const d = await removeLibraryFolder(path)
@@ -247,7 +252,11 @@ export default function Sidebar(
 
   const saveName = async (cid: number, name: string, prev: string | null) => {
     if ((name || '').trim() === (prev || '').trim()) return
-    await renameCluster(cid, name.trim())
+    try {
+      await renameCluster(cid, name.trim())
+    } catch (e) {
+      toast.failure('Couldn’t rename that person.', e)
+    }
     onPeopleChange?.()
   }
 
@@ -256,9 +265,17 @@ export default function Sidebar(
     const target = clusters.find((c) => c.cluster_id === Number(into))
     const src = clusters.find((c) => c.cluster_id === from)
     if (!src || !target) return
-    if (!window.confirm(
-      `Merge "${personLabel(src)}" (${src.count}) into "${personLabel(target)}"?`)) return
-    await mergeClusters(from, Number(into))
+    if (!await confirmDialog({
+      title: `Merge “${personLabel(src)}” into “${personLabel(target)}”?`,
+      body: `${plural(src.count, 'photo')} of ${personLabel(src)} will count as ${personLabel(target)}, `
+        + `and ${personLabel(src)} disappears from the list.`,
+      confirmLabel: 'Merge',
+    })) return
+    try {
+      await mergeClusters(from, Number(into))
+    } catch (e) {
+      toast.failure('Couldn’t merge those people.', e)
+    }
     onPeopleChange?.()
   }
 

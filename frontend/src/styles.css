@@ -2542,3 +2542,50 @@ kbd {
     scroll-behavior: auto !important;
   }
 }
+
+/* ---------- In-app confirm / prompt dialogs ---------- */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;               /* above the viewer and review overlays */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.6);
+}
+.dialog-panel {
+  width: 100%;
+  max-width: 440px;
+  padding: 20px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  animation: toast-in 0.14s ease-out;
+}
+.dialog-panel h3 { margin: 0 0 8px; font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
+.dialog-panel p { margin: 0 0 12px; font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+.dialog-detail {
+  display: block;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font: 12px/1.45 var(--font-mono);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.dialog-field { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; font-size: 12px; color: var(--text-dim); }
+.dialog-field input {
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dialog-actions .btn { min-width: 84px; }

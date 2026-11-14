@@ -3,6 +3,7 @@ import type { ChangeEvent } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api'
 import { fmt } from '../format'
 import { toast } from '../toast'
+import { promptDialog } from '../dialog'
 import type { ImageItem, ClusterFacet } from '../api/types'
 import type { DecisionFn, PersonName } from '../types'
 import DecisionBadge from './DecisionBadge'
@@ -61,12 +62,19 @@ export default function PhotoCard(
     finally { setBusy(false) }
   }
 
-  const onSelect = (e: ChangeEvent<HTMLSelectElement>) => {
+  const onSelect = async (e: ChangeEvent<HTMLSelectElement>) => {
     if (!face) return
     const v = e.target.value
     if (v === '__new__') {
-      const name = window.prompt('Name for the new person (optional):') || null
-      runFace(() => assignFace(face.id, { new_person: true, name: name ?? undefined }))
+      const name = await promptDialog({
+        title: 'Move this face to a new person',
+        label: 'Name (optional)',
+        placeholder: 'Leave blank to name later',
+        confirmLabel: 'Create person',
+      })
+      // Cancel now really cancels (it used to create an unnamed person anyway).
+      if (name === null) return
+      runFace(() => assignFace(face.id, { new_person: true, name: name.trim() || undefined }))
     } else {
       runFace(() => assignFace(face.id, { cluster_id: Number(v) }))
     }
