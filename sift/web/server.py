@@ -79,6 +79,26 @@ async def _lifespan(_app: FastAPI):
 
 
 LOOPBACK_ORIGIN = r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Hostnames this server answers to, or None for "any". Set at startup from the
+# bind address (see _allowed_hosts_for). The check defeats DNS rebinding: a
+# hostile page whose domain is re-pointed at 127.0.0.1 is same-origin as far as
+# the browser is concerned, so the Origin guard below passes it — but its
+# requests still carry the attacker's hostname in Host.
+ALLOWED_HOSTS: frozenset[str] | None = None
+
+
+def _allowed_hosts_for(bind_host: str, extra: list[str] | None = None) -> frozenset[str] | None:
+    """Host allowlist for a server bound to `bind_host`.
+
+    Bound to loopback (the default): only loopback names, plus any `extra`
+    names the user vouches for (--allow-host). Bound to anything else, the user
+    has chosen to serve other machines, whose names we cannot know: no check."""
+    def clean(h: str) -> str:
+        return h.strip().strip("[]").lower()
+    if clean(bind_host) not in LOOPBACK_HOSTS:
+        return None
+    return LOOPBACK_HOSTS | {clean(h) for h in (extra or []) if clean(h)}
 
 app = FastAPI(title="Photo Audit", lifespan=_lifespan)
 app.add_middleware(
@@ -91,6 +111,13 @@ app.add_middleware(
 
 @app.middleware("http")
 async def guard_browser_writes(request: Request, call_next):
+    # Reads are guarded too: a rebound page could otherwise list folders and
+    # pull photos.
+    if ALLOWED_HOSTS is not None and (request.url.hostname or "").lower() not in ALLOWED_HOSTS:
+        return JSONResponse(
+            {"detail": "This Sift server only answers to localhost. Open it as "
+                       "http://localhost or start it with --allow-host <name>."},
+            status_code=403)
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         origin = request.headers.get("origin")
         if origin is None:
@@ -1274,6 +1301,9 @@ def _startup_from_reload_env() -> None:
     thumb_dir = Path(os.environ["SIFT_THUMB_DIR"])
     frontend_env = os.environ.get("SIFT_RUNTIME_FRONTEND_DIST")
     frontend_dist = Path(frontend_env) if frontend_env else None
+    global ALLOWED_HOSTS
+    hosts_env = os.environ.get("SIFT_ALLOWED_HOSTS")
+    ALLOWED_HOSTS = frozenset(json.loads(hosts_env)) if hosts_env else None
     _init_runtime(db_path, thumb_dir, frontend_dist, _runtime_env_photo_roots())
 
 
@@ -1296,14 +1326,21 @@ def _default_db_path() -> Path:
 
 
 def main() -> None:
-    global DB_PATH, THUMB_DIR, FRONTEND_DIST
+    global DB_PATH, THUMB_DIR, FRONTEND_DIST, ALLOWED_HOSTS
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=None,
                     help="SQLite library path. Defaults to a per-user app-data "
                          "location, created empty on first run so you can analyze "
                          "your first folder entirely from the web UI.")
     ap.add_argument("--thumbs", default=None)
-    ap.add_argument("--host",   default="127.0.0.1")
+    ap.add_argument("--host",   default="127.0.0.1",
+                    help="Address to listen on. The default serves this machine "
+                         "only and rejects requests addressed to any other "
+                         "hostname. A non-loopback address (e.g. 0.0.0.0) serves "
+                         "your network and turns that check off.")
+    ap.add_argument("--allow-host", action="append", default=None, metavar="NAME",
+                    help="Extra hostname to answer to while listening on loopback "
+                         "(repeatable), e.g. a local reverse-proxy name.")
     ap.add_argument("--port",   type=int, default=8000)
     ap.add_argument("--photo-root", action="append", default=None, metavar="DIR",
                     help="Directory the file-reveal feature may open into (repeatable). "
@@ -1324,8 +1361,17 @@ def main() -> None:
     thumb_dir = Path(args.thumbs) if args.thumbs else db_path.parent / ".thumbs"
     frontend_dist = _resolve_frontend_dist(args.frontend_dist)
 
+    ALLOWED_HOSTS = _allowed_hosts_for(args.host, args.allow_host)
+    if ALLOWED_HOSTS is None:
+        print(f"NOTE: listening on {args.host}: other machines can reach this "
+              f"server, and the localhost-only host check is off.")
+
     import uvicorn
     if args.reload:
+        if ALLOWED_HOSTS is None:
+            os.environ.pop("SIFT_ALLOWED_HOSTS", None)
+        else:
+            os.environ["SIFT_ALLOWED_HOSTS"] = json.dumps(sorted(ALLOWED_HOSTS))
         os.environ["SIFT_DB_PATH"] = str(db_path)
         os.environ["SIFT_THUMB_DIR"] = str(thumb_dir)
         os.environ["SIFT_RUNTIME_FRONTEND_DIST"] = str(frontend_dist)

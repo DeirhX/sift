@@ -101,6 +101,12 @@ sift serve --db "E:\Photos\photos.db"
 # → http://localhost:8000
 ```
 
+By default the server listens on this machine only and refuses requests
+addressed to any hostname other than `localhost` / `127.0.0.1`, so a web page
+cannot reach it by pointing its own domain at your machine. To open Sift from
+another device, start it with `--host 0.0.0.0` (this turns that check off); to
+add one extra name while staying local-only, use `--allow-host <name>`.
+
 ```bash
 # Development: API on :8000 + Vite dev server on :5173 (proxies /api, /thumb, /img)
 sift serve --db "E:\Photos\photos.db" --reload
