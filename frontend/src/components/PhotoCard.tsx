@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { thumbUrl, assignFace, deleteFace } from '../api'
 import { fmt } from '../format'
+import { toast } from '../toast'
 import type { ImageItem, ClusterFacet } from '../api/types'
 import type { DecisionFn, PersonName } from '../types'
 import DecisionBadge from './DecisionBadge'
@@ -55,7 +56,7 @@ export default function PhotoCard(
       setEditFace(null)
       onFaceChange?.()
     } catch (e) {
-      console.error(e)
+      toast.failure('Couldn’t update that face.', e)
     }
     finally { setBusy(false) }
   }

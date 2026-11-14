@@ -4,6 +4,7 @@ import { setDecision as apiSetDecision, setDecisions as apiSetDecisions } from '
 import { invalidateRoots, PHOTO_LIST_QUERY_ROOTS, queryRootIn } from '../queryKeys'
 import type { ImageItem } from '../api/types'
 import type { Decision, ReviewMark } from '../types'
+import { toast } from '../toast'
 
 interface CachePage {
   items?: ImageItem[]
@@ -72,8 +73,13 @@ export function useDecisions() {
     try {
       await apiSetDecision(item.hash, next, item.id, item.path)
       qc.invalidateQueries({ queryKey: ['applyStatus'] })
-    } catch {
+    } catch (error) {
+      // The optimistic badge is now a lie: put the old mark back at once (the
+      // refetch may fail too if the server is down) and say so, instead of
+      // letting the photo quietly flip back later.
+      patchDecision(item.id, item.decision ?? null)
       invalidateLists()
+      toast.failure(`Couldn’t save the mark for ${item.filename}.`, error)
     }
   }, [patchDecision, invalidateLists, qc])
 

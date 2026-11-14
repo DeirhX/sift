@@ -7,6 +7,8 @@ import type { ImageItem, LocationsResponse } from '../api/types'
 import type { DecisionFn, SetLightboxIndex } from '../types'
 import DecideButtons from './DecideButtons'
 import { useImageZoom } from '../hooks/useImageZoom'
+import { decisionForKey, hasModifier } from '../keys'
+import { toast } from '../toast'
 
 // Normalise a path for prefix comparison against the configured roots: lower
 // case, forward slashes, no trailing slash (mirrors the server's normcase).
@@ -43,7 +45,7 @@ function PathLink({ path, roots = [] }: { path: string; roots?: string[] }) {
   const restrict = roots && roots.length > 0
   const open = (target: string) => (e: MouseEvent) => {
     e.stopPropagation()
-    revealPath(target).catch(() => {})
+    revealPath(target).catch((err) => toast.failure(`Couldn’t open ${target}.`, err))
   }
   return (
     <span className="path-link">
@@ -96,15 +98,32 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setIndex(null)
-      else if (e.key === 'ArrowLeft') go(-1)
+      if (e.key === 'Escape') { setIndex(null); return }
+      // Browser/OS chords (Ctrl+D, Ctrl+-, Alt+←) are never viewer commands.
+      if (hasModifier(e)) return
+      if (e.key === 'ArrowLeft') go(-1)
       else if (e.key === 'ArrowRight') go(1)
-      else if (e.key === 'k' || e.key === '+' || e.key === '=') onDecision(item, 'keep')
-      else if (e.key === 'd' || e.key === '-' || e.key === 'Delete') onDecision(item, 'del')
+      else {
+        const verdict = decisionForKey(e)
+        if (verdict && item) onDecision(item, verdict)
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [go, item, onDecision, setIndex])
+
+  // The full-res file can take a moment. Until it arrives the browser would keep
+  // painting the *previous* photo under the new photo's name and scores, so we
+  // show the (already cached) thumbnail in its place and fade the real one in.
+  const [loadedId, setLoadedId] = useState<number | null>(null)
+  const loading = item != null && loadedId !== item.id
+
+  // Warm the neighbours so stepping with ←/→ is instant.
+  useEffect(() => {
+    for (const n of [items[index + 1], items[index - 1]]) {
+      if (n) new Image().src = fullUrl(n.id, n.hash)
+    }
+  }, [items, index])
 
   // Keep the active strip thumb in view as ←/→ walk past the rendered edge.
   const stripRef = useRef<HTMLDivElement>(null)
@@ -153,25 +172,35 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
   ]
 
   return (
-    <div className="lightbox" onClick={() => setIndex(null)}>
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label={`Photo viewer: ${item.filename}`}
+      onClick={() => setIndex(null)}>
       <div
         className={'lb-stage' + (item.decision ? ' dec-' + item.decision : '')}
         onClick={() => setIndex(null)}
       >
-        <button className="lb-close" onClick={(e) => { e.stopPropagation(); setIndex(null) }}>×</button>
+        <button className="lb-close" aria-label="Close viewer" title="Close (Esc)"
+          onClick={(e) => { e.stopPropagation(); setIndex(null) }}>×</button>
         {index > 0 && (
-          <button className="lb-nav prev" onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>
+          <button className="lb-nav prev" aria-label="Previous photo" title="Previous (←)"
+            onClick={(e) => { e.stopPropagation(); go(-1) }}>‹</button>
         )}
         {index < items.length - 1 && (
-          <button className="lb-nav next" onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
+          <button className="lb-nav next" aria-label="Next photo" title="Next (→)"
+            onClick={(e) => { e.stopPropagation(); go(1) }}>›</button>
+        )}
+        {loading && (
+          <div className="lb-placeholder" aria-hidden="true"
+            style={{ backgroundImage: `url("${thumbUrl(item.id, item.hash)}")` }} />
         )}
         <img
           ref={zoom.ref}
-          className={'lb-img' + (zoom.zoomed ? ' zoomed' : '')}
+          className={'lb-img' + (zoom.zoomed ? ' zoomed' : '') + (loading ? ' loading' : '')}
           style={{ transform: zoom.transform }}
           src={fullUrl(item.id, item.hash)}
           alt={item.filename}
           draggable={false}
+          onLoad={() => setLoadedId(item.id)}
+          onError={() => setLoadedId(item.id)}
           onClick={(e) => e.stopPropagation()}
           onMouseDown={zoom.onMouseDown}
           onDoubleClick={zoom.onDoubleClick}
@@ -202,6 +231,10 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
       </div>
 
       <aside className="lb-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="lb-position" aria-live="polite">
+          Photo {(index + 1).toLocaleString()} of {items.length.toLocaleString()}
+          {loading && <span className="lb-loading"> · loading full size…</span>}
+        </div>
         <div className="lb-panel-head">
           <span className="q-pill big" style={{ background: qualityColor(item.combined) }} title="Composite quality">
             Q {fmt(item.combined)}
@@ -217,6 +250,10 @@ export default function Lightbox({ items, index, setIndex, onDecision, showStrip
             keepLabel="Keep (k / +)"
             delLabel="Mark for Trash (D)"
           />
+        </div>
+
+        <div className="lb-hint">
+          <kbd>←</kbd><kbd>→</kbd> browse · scroll or double-click to zoom · <kbd>Esc</kbd> close
         </div>
 
         {item.caption && <div className="lb-caption">{item.caption}</div>}

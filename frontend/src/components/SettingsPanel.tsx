@@ -39,7 +39,7 @@ export default function SettingsPanel({ onClose, onChange }: SettingsPanelProps)
 
   return (
     <div className="review-overlay" onClick={onClose}>
-      <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="settings-panel" role="dialog" aria-modal="true" aria-label="Settings" onClick={(e) => e.stopPropagation()}>
         <div className="review-head">
           <b>Settings</b>
           <div className="spacer" />
